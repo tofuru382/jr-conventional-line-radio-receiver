@@ -46,6 +46,30 @@ struct Channel {
     progress_us: u64,
     monitored: bool,
 }
+impl Channel {
+    /// Hands the monitored channel's PCM to the single audio consumer and
+    /// keeps the other queues fresh.
+    fn route_audio(&mut self, monitored: bool, audio: &mut Vec<Audio>) {
+        // Freshness applies when entering a channel, not to an
+        // ongoing stream. TCP can deliver over half a second at once;
+        // synthesis lookahead makes the first PCM older than 600 ms.
+        // Pruning that PCM on every poll punched holes in live audio
+        // while the recording (written before this queue) stayed intact.
+        if !monitored || !self.monitored {
+            while self
+                .audio
+                .front()
+                .is_some_and(|(time, _)| time.saturating_add(600_000) < self.progress_us)
+            {
+                self.audio.pop_front();
+            }
+        }
+        self.monitored = monitored;
+        if monitored {
+            audio.extend(self.audio.drain(..).map(|(_, a)| a));
+        }
+    }
+}
 #[derive(Clone, Serialize)]
 pub struct Overview {
     pub running: bool,
@@ -267,6 +291,16 @@ impl Session {
         selected: Option<&str>,
         automatic: bool,
     ) -> (Overview, Vec<Audio>) {
+        self.snapshot_with_options(selected, automatic, true)
+    }
+    /// With `take_audio` false the monitor PCM stays queued for another
+    /// consumer (the Android native player); only status is returned.
+    pub fn snapshot_with_options(
+        &self,
+        selected: Option<&str>,
+        automatic: bool,
+        take_audio: bool,
+    ) -> (Overview, Vec<Audio>) {
         let s = self.shared.lock().unwrap();
         let (preferred, active_calls) = self.monitor.lock().unwrap().snapshot();
         let selected = if automatic {
@@ -282,24 +316,10 @@ impl Session {
                 let mut c = c.lock().unwrap();
                 let mut status = c.status.clone();
                 let monitored = selected == Some(status.config.id.as_str());
-                // Freshness applies when entering a channel, not to an
-                // ongoing stream. TCP can deliver over half a second at once;
-                // synthesis lookahead makes the first PCM older than 600 ms.
-                // Pruning that PCM on every poll punched holes in live audio
-                // while the recording (written before this queue) stayed intact.
-                if !monitored || !c.monitored {
-                    while c
-                        .audio
-                        .front()
-                        .is_some_and(|(time, _)| time.saturating_add(600_000) < c.progress_us)
-                    {
-                        c.audio.pop_front();
-                    }
+                if take_audio {
+                    c.route_audio(monitored, &mut audio);
                 }
-                c.monitored = monitored;
-                if monitored {
-                    audio.extend(c.audio.drain(..).map(|(_, a)| a));
-                } else {
+                if !monitored {
                     status.status.messages.clear();
                     status.status.constellation.clear();
                 }
@@ -322,6 +342,23 @@ impl Session {
             },
             audio,
         )
+    }
+    /// Audio-only counterpart of [`Self::snapshot_with_monitor`] for a native
+    /// player: the same channel choice, without cloning any channel status.
+    pub fn take_monitor_audio(&self, selected: Option<&str>, automatic: bool) -> Vec<Audio> {
+        let (preferred, _) = self.monitor.lock().unwrap().snapshot();
+        let selected = if automatic {
+            preferred.as_deref().or(selected)
+        } else {
+            selected
+        };
+        let mut audio = Vec::new();
+        for c in &self.channels {
+            let mut c = c.lock().unwrap();
+            let monitored = selected == Some(c.status.config.id.as_str());
+            c.route_audio(monitored, &mut audio);
+        }
+        audio
     }
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -884,6 +921,30 @@ mod tests {
                     .is_empty());
             }
         }
+    }
+
+    #[test]
+    fn native_player_takes_audio_while_status_polls_leave_it_queued() {
+        let session = monitor_test_session();
+        let configs = crate::pipeline::presets("east");
+        // A status-only poll reports the automatic choice but keeps its PCM.
+        let (status, audio) = session.snapshot_with_options(Some(&configs[0].id), true, false);
+        assert_eq!(
+            status.selected_channel.as_deref(),
+            Some(configs[1].id.as_str())
+        );
+        assert!(audio.is_empty());
+        assert!(status.channels[0].status.messages.is_empty());
+        let audio = session.take_monitor_audio(Some(&configs[0].id), true);
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].channel, configs[1].id);
+        assert!(session
+            .take_monitor_audio(Some(&configs[0].id), true)
+            .is_empty());
+        // Manual selection is authoritative for the native player too.
+        let audio = session.take_monitor_audio(Some(&configs[0].id), false);
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].channel, configs[0].id);
     }
 
     #[test]

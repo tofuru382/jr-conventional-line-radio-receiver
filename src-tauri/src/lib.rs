@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod icon;
+mod native_audio;
 mod preferences;
 mod recording_directory;
 
@@ -137,21 +138,34 @@ async fn stop_recording(
     .await
     .map_err(|e| e.to_string())?
 }
+/// `audio: false` leaves the monitor PCM for the Android native player.
 #[tauri::command]
 fn snapshot(
     selected: Option<String>,
     automatic: Option<bool>,
+    audio: Option<bool>,
     state: tauri::State<'_, Receiver>,
 ) -> Result<serde_json::Value, String> {
     let guard = state.0.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
         None => Ok(serde_json::Value::Null),
         Some(s) => {
-            let (status, audio) =
-                s.snapshot_with_monitor(selected.as_deref(), automatic.unwrap_or(false));
+            let (status, audio) = s.snapshot_with_options(
+                selected.as_deref(),
+                automatic.unwrap_or(false),
+                audio.unwrap_or(true),
+            );
             Ok(serde_json::json!({"status":status,"audio":audio}))
         }
     }
+}
+#[tauri::command]
+fn set_native_monitor(
+    settings: native_audio::Settings,
+    receiver: tauri::State<'_, Receiver>,
+    monitor: tauri::State<'_, native_audio::NativeMonitor>,
+) -> Result<(), String> {
+    monitor.update(settings, &receiver)
 }
 /// What the frontend needs to adapt to the host: Android has no SoapySDR and
 /// no folder picker, but can start an on-device RTL-TCP driver app.
@@ -201,10 +215,12 @@ pub fn run() {
         })
         .manage(Receiver::default())
         .manage(PreferencesStore::default())
+        .manage(native_audio::NativeMonitor::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             platform,
             start_rtl_driver,
+            set_native_monitor,
             devices,
             load_preferences,
             save_preferences,

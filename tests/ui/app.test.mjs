@@ -377,6 +377,34 @@ test("Android hides SoapySDR and pickers, defaults to the on-device driver, and 
   await app.change("input-kind", "wave");
   assert.equal($("driver-group").hidden, true);
 });
+test("Android plays audio natively and holds the background service while receiving", async (t) => {
+  const app = await setup(t, {
+    platformInfo: { android: true, soapy: false },
+  });
+  const service = [];
+  app.w.JrAndroid = { setReceiving: (on) => service.push(on) };
+  app.$("listen").checked = true;
+  await app.click("start");
+  await app.poll();
+  assert.deepEqual(service, [true]);
+  const snapshots = app.calls.filter((c) => c.command === "snapshot");
+  assert.ok(snapshots.length > 0);
+  assert.ok(snapshots.every((c) => c.args.audio === false));
+  const monitor = () =>
+    app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args
+      .settings;
+  assert.equal(monitor().enabled, true);
+  assert.equal(monitor().automatic, true);
+  assert.equal(app.$("audio-state").textContent, "音声オン");
+  app.input("volume", "40");
+  assert.equal(monitor().volume, 0.4);
+  app.$("listen").checked = false;
+  app.$("listen").dispatchEvent(new app.w.Event("change"));
+  assert.equal(monitor().enabled, false);
+  await app.click("stop");
+  assert.deepEqual(service, [true, false]);
+  assert.equal(monitor().enabled, false);
+});
 test("Android reports a missing driver app", async (t) => {
   const app = await setup(t, {
     configureConnection: false,
@@ -388,9 +416,22 @@ test("Android reports a missing driver app", async (t) => {
   assert.match(app.$("error").textContent, /ドライバーを起動できませんでした/);
 });
 test("desktop keeps SoapySDR and pickers and never shows the driver button", async (t) => {
-  const { $ } = await setup(t, {
+  const app = await setup(t, {
     platformInfo: { android: false, soapy: true },
   });
+  const { $ } = app;
+  await app.click("start");
+  await app.poll();
+  assert.equal(
+    app.calls.some((c) => c.command === "set_native_monitor"),
+    false,
+  );
+  assert.ok(
+    app.calls
+      .filter((c) => c.command === "snapshot")
+      .every((c) => !("audio" in c.args)),
+  );
+  await app.click("stop");
   assert.ok($("input-kind").querySelector('option[value="sdr"]'));
   assert.equal($("driver-group").hidden, true);
   for (const id of ["browse", "record-browse", "preset-browse"])

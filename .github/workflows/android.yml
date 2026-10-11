@@ -51,12 +51,9 @@ jobs:
           echo "Using NDK $ndk"
 
       # The Tauri CLI comes from package.json: Gradle calls back into it through
-      # `npm run tauri`. src-tauri/gen/ is generated here (see .gitignore).
+      # `npm run tauri`. The Android project (src-tauri/gen/android) is
+      # committed, including MainActivity and the background ReceiverService.
       - run: npm ci
-      - name: Generate the Android project
-        run: |
-          npm run tauri -- android init --ci
-          npm run tauri -- icon src-tauri/icons/icon.png
 
       - name: Build release APK (arm64)
         run: |

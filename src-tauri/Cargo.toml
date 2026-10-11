@@ -29,6 +29,7 @@ receiver-core = { path = "../crates/receiver-core", features = ["soapy"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 tauri-plugin-opener = "2"
+ndk = { version = "0.9", features = ["audio", "api-level-26"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

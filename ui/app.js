@@ -11,6 +11,36 @@ const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
 // folder picker and receives from an on-device RTL-TCP driver app instead.
 let platform = { android: false, soapy: true };
 const androidDriver = { host: "127.0.0.1", port: "1234" };
+// Android plays the monitor natively (it keeps playing in the background) and
+// keeps a foreground service running while receiving.
+let nativeAudio = false,
+  nativeMonitorState = "",
+  serviceReceiving = false;
+function syncNativeMonitor() {
+  if (!nativeAudio) return;
+  const settings = {
+    enabled: running && $("listen").checked,
+    selected: selected || null,
+    automatic: $("auto-select").checked,
+    volume: Number($("volume").value) / 100,
+  };
+  const next = JSON.stringify(settings);
+  if (next === nativeMonitorState) return;
+  nativeMonitorState = next;
+  invoke("set_native_monitor", { settings }).catch((e) => {
+    nativeMonitorState = "";
+    fail(e);
+  });
+}
+function syncBackgroundService() {
+  if (!platform.android || serviceReceiving === running) return;
+  serviceReceiving = running;
+  try {
+    window.JrAndroid?.setReceiving(running);
+  } catch {
+    // The bridge only exists in the Android app.
+  }
+}
 let channels = [],
   enabled = new Set(),
   selected = "",
@@ -314,7 +344,9 @@ function setControls() {
   $("total-enabled").textContent = enabled.size;
   $("audio-state").textContent = !$("listen").checked
     ? "消音中"
-    : audioPlayer?.active
+    : nativeAudio
+      ? "音声オン"
+      : audioPlayer?.active
       ? "音声再生中"
       : "音声待機";
   for (const [id, r] of rows) {
@@ -343,6 +375,7 @@ function renderSelectionMode() {
 $("auto-select").addEventListener("change", () => {
   selectionRevision++;
   renderSelectionMode();
+  syncNativeMonitor();
 });
 function outputOptions() {
   return {
@@ -495,7 +528,7 @@ function resetAudio() {
   audioPlayer?.reset();
 }
 async function prepareAudio() {
-  if (!$("listen").checked) return;
+  if (nativeAudio || !$("listen").checked) return;
   if (!context) {
     context = new AudioContext();
     gain = context.createGain();
@@ -506,6 +539,7 @@ async function prepareAudio() {
   await context.resume();
 }
 function play(frames) {
+  if (nativeAudio) return;
   if (!context || context.state !== "running" || !$("listen").checked) return;
   audioPlayer.enqueue(frames, selected);
 }
@@ -643,6 +677,7 @@ function select(id, manual = false) {
   }
   if (selected !== id) resetAudio();
   selected = id;
+  syncNativeMonitor();
   messageNodes.clear();
   $("messages").replaceChildren();
   for (const [key, r] of rows) {
@@ -1126,6 +1161,8 @@ $("start").addEventListener("click", async () => {
       config: { input, channels: activeChannels },
     });
     running = true;
+    syncBackgroundService();
+    syncNativeMonitor();
     sessionReplay = input.kind === "wave";
     recordingStatus = emptyRecording();
     recordingResumePending = recordingEnabled;
@@ -1171,6 +1208,8 @@ $("stop").addEventListener("click", async () => {
     }
     recordingStatus = await invoke("stop");
     running = false;
+    syncBackgroundService();
+    syncNativeMonitor();
     $("state").textContent = "停止中";
     resetAudio();
   } catch (e) {
@@ -1182,6 +1221,7 @@ $("stop").addEventListener("click", async () => {
   }
 });
 $("listen").addEventListener("change", () => {
+  syncNativeMonitor();
   resetAudio();
   prepareAudio().catch(fail);
   setControls();
@@ -1235,6 +1275,7 @@ $("pause-messages").addEventListener("click", () => {
 $("volume").addEventListener("input", () => {
   $("volume-value").value = `${$("volume").value}%`;
   if (gain) gain.gain.value = Number($("volume").value) / 100;
+  syncNativeMonitor();
 });
 async function poll() {
   const started = performance.now();
@@ -1247,12 +1288,14 @@ async function poll() {
       const result = await invoke("snapshot", {
         selected: requestedChannel,
         automatic,
+        ...(nativeAudio ? { audio: false } : {}),
       });
       if (result && generation === uiGeneration) {
         const s = result.status;
         lastSnapshot = s;
         if (s.recording) recordingStatus = s.recording;
         running = s.running;
+        syncBackgroundService();
         const selectionCurrent = revision === selectionRevision;
         if (
           selectionCurrent &&
@@ -1269,6 +1312,7 @@ async function poll() {
           if (s.state === "receiving" || s.state === "completed")
             play(result.audio);
           else resetAudio();
+          syncNativeMonitor();
         }
         const stateLabel =
           {
@@ -1348,6 +1392,7 @@ try {
       // Older backends have no platform command; they are desktop builds.
     }
     if (platform.android) applyAndroidLayout();
+    nativeAudio = platform.android;
   }
   bundledCatalog = native
     ? await invoke("preset_catalog")

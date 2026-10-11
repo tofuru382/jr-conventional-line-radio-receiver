@@ -2,6 +2,6 @@
 /dist/
 /.ci-deps/
 /node_modules/
-/src-tauri/gen/
+/src-tauri/gen/schemas/
 *.wav.incomplete
 *.jsonl.incomplete
