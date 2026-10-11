@@ -323,6 +323,16 @@ fieldset {
   grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr);
   gap: 12px;
 }
+.driver-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-block-start: 16px;
+}
+.driver-row[hidden] {
+  display: none;
+}
 #device-group,
 .file-row {
   display: flex;

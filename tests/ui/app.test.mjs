@@ -77,6 +77,8 @@ async function setup(
     preferences = { value: null },
     devices = [],
     presetFiles = { path: null, catalogs: {} },
+    platformInfo = null,
+    driverError = null,
   } = {},
 ) {
   const dom = new JSDOM(html, {
@@ -227,6 +229,11 @@ async function setup(
               return structuredClone(recording);
             }
             if (command === "devices") return structuredClone(devices);
+            if (command === "platform") return structuredClone(platformInfo);
+            if (command === "start_rtl_driver") {
+              if (driverError) throw new Error(driverError);
+              return null;
+            }
             return null;
           },
         },
@@ -312,6 +319,83 @@ async function setup(
     },
   };
 }
+test("Android hides SoapySDR and pickers, defaults to the on-device driver, and starts it", async (t) => {
+  const preferences = {
+    value: {
+      version: 1,
+      preset_file: null,
+      input: {
+        kind: "sdr",
+        profile: "east",
+        center: "352.603125",
+        rate: "240000",
+        gain: "",
+        host: "",
+        port: "",
+        ppm: "0",
+        args: "driver=rtlsdr",
+        rx_channel: "0",
+        antenna: "",
+        path: "",
+      },
+      output: {
+        enabled: false,
+        directory: null,
+        audio: true,
+        raw_frames: false,
+        data_messages: false,
+      },
+    },
+  };
+  const app = await setup(t, {
+    preferences,
+    configureConnection: false,
+    platformInfo: { android: true, soapy: false },
+  });
+  const { $ } = app;
+  assert.deepEqual(
+    [...$("input-kind").options].map((o) => o.value),
+    ["rtl_tcp", "wave"],
+  );
+  assert.equal($("input-kind").value, "rtl_tcp");
+  assert.equal($("host").value, "127.0.0.1");
+  assert.equal($("port").value, "1234");
+  assert.equal($("driver-group").hidden, false);
+  for (const id of ["browse", "record-browse", "preset-browse"])
+    assert.equal($(id).hidden, true, id);
+  await tick();
+  assert.equal(preferences.value.input.kind, "rtl_tcp");
+  assert.equal(preferences.value.input.host, "127.0.0.1");
+  await app.click("driver-start");
+  assert.deepEqual(
+    app.calls
+      .filter((c) => c.command === "start_rtl_driver")
+      .map((c) => c.args.port),
+    [1234],
+  );
+  assert.equal($("error").hidden, true);
+  await app.change("input-kind", "wave");
+  assert.equal($("driver-group").hidden, true);
+});
+test("Android reports a missing driver app", async (t) => {
+  const app = await setup(t, {
+    configureConnection: false,
+    platformInfo: { android: true, soapy: false },
+    driverError: "RTL-SDR ドライバーを起動できませんでした。",
+  });
+  await app.click("driver-start");
+  assert.equal(app.$("error").hidden, false);
+  assert.match(app.$("error").textContent, /ドライバーを起動できませんでした/);
+});
+test("desktop keeps SoapySDR and pickers and never shows the driver button", async (t) => {
+  const { $ } = await setup(t, {
+    platformInfo: { android: false, soapy: true },
+  });
+  assert.ok($("input-kind").querySelector('option[value="sdr"]'));
+  assert.equal($("driver-group").hidden, true);
+  for (const id of ["browse", "record-browse", "preset-browse"])
+    assert.equal($(id).hidden, false, id);
+});
 test("connection and output preferences survive restart without connecting or recording", async (t) => {
   const preferences = { value: null };
   const first = await setup(t, { preferences, configureConnection: false });

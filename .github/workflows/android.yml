@@ -1,0 +1,102 @@
+name: Android APK
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TAURI_CLI: "@tauri-apps/cli@2.12.2"
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-arm64
+          workspaces: ". -> target"
+
+      # The runner image ships the Android SDK; use its newest NDK, or install one.
+      - name: Locate Android NDK
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-}"
+          if [ -z "$ndk" ] || [ ! -d "$ndk" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.2.12479018"
+            ndk="$ANDROID_HOME/ndk/27.2.12479018"
+          fi
+          echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "Using NDK $ndk"
+
+      # src-tauri/gen/ is generated here rather than committed (see .gitignore).
+      - name: Generate the Android project
+        run: |
+          npx --yes "$TAURI_CLI" android init --ci
+          npx --yes "$TAURI_CLI" icon src-tauri/icons/icon.png
+
+      - name: Build release APK (arm64)
+        run: npx --yes "$TAURI_CLI" android build --apk --target aarch64 --ci
+
+      # Release builds are unsigned. Sign with a stable key when the repository
+      # has one (secrets below), otherwise with a throwaway key: such APKs install
+      # fine, but each new build must replace the app by uninstalling it first.
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          unsigned=$(find src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk' | head -n 1)
+          test -n "$unsigned" || { echo "No release APK was produced" >&2; exit 1; }
+          echo "Unsigned APK: $unsigned"
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          keystore="$RUNNER_TEMP/release.jks"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+            alias="$KEY_ALIAS"; store_pass="$KEYSTORE_PASSWORD"; key_pass="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+            echo "Signing with the repository key"
+          else
+            alias=ci; store_pass=android; key_pass=android
+            keytool -genkeypair -keystore "$keystore" -alias "$alias" -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass "$store_pass" -keypass "$key_pass" -dname "CN=JR Radio Receiver CI"
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret: signed with a throwaway key. Uninstall the previous build before installing this one."
+          fi
+          mkdir -p dist
+          "$tools/zipalign" -f -p 4 "$unsigned" "$RUNNER_TEMP/aligned.apk"
+          STORE_PASS="$store_pass" KEY_PASS="$key_pass" "$tools/apksigner" sign \
+            --ks "$keystore" --ks-key-alias "$alias" \
+            --ks-pass env:STORE_PASS --key-pass env:KEY_PASS \
+            --out dist/jr-radio-receiver-android-arm64.apk "$RUNNER_TEMP/aligned.apk"
+          "$tools/apksigner" verify dist/jr-radio-receiver-android-arm64.apk
+          rm -f "$keystore"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jr-radio-receiver-android-arm64
+          path: dist/jr-radio-receiver-android-arm64.apk
+          if-no-files-found: error
+          retention-days: 30

@@ -7,6 +7,10 @@ let sessionReplay = false;
 const $ = (id) => document.getElementById(id);
 const native = !!window.__TAURI__;
 const invoke = (command, args) => window.__TAURI__.core.invoke(command, args);
+// Desktop unless the backend reports otherwise. Android has no SoapySDR or
+// folder picker and receives from an on-device RTL-TCP driver app instead.
+let platform = { android: false, soapy: true };
+const androidDriver = { host: "127.0.0.1", port: "1234" };
 let channels = [],
   enabled = new Set(),
   selected = "",
@@ -998,6 +1002,7 @@ $("all").addEventListener("change", () => {
 function updateSource() {
   const wave = $("input-kind").value === "wave";
   const tcp = $("input-kind").value === "rtl_tcp";
+  $("driver-group").hidden = !(tcp && platform.android);
   $("device-group").hidden = wave || tcp;
   $("tcp-group").hidden = !tcp;
   $("ppm-group").hidden = !tcp;
@@ -1018,7 +1023,9 @@ function updateSource() {
       : "SoapySDR デバイス";
   $("source-hint").textContent = wave
     ? "I は左、Q は右のステレオ WAV。サンプルレートはファイルから取得します。"
-    : tcp
+    : tcp && platform.android
+      ? `ドングルを挿して「RTL-SDR ドライバーを起動」を押し、ドライバーが起動したら「受信を開始」を押してください。${channels.length} 波を同時受信します。`
+      : tcp
       ? `利用するサーバーの IP アドレスとポートを入力してください。接続設定は自動保存されます。${channels.length} 波を同時受信します。RTL-TCP は設定値の読み戻しとサーバー側の欠落通知に対応していません。`
       : "SoapySDR 対応デバイスを検索するか、詳細設定にデバイス引数を入力してください。接続設定は自動保存されます。";
 }
@@ -1027,6 +1034,44 @@ $("input-kind").addEventListener("change", () => {
   updateSource();
 });
 $("host").addEventListener("input", updateSource);
+function fillDriverEndpoint() {
+  let changed = false;
+  for (const id of ["host", "port"])
+    if (!$(id).value.trim()) {
+      $(id).value = androidDriver[id];
+      changed = true;
+    }
+  return changed;
+}
+$("driver-start").addEventListener("click", async () => {
+  clearError();
+  if (fillDriverEndpoint()) void persistPreferences();
+  updateSource();
+  try {
+    await invoke("start_rtl_driver", { port: Number($("port").value) });
+    $("driver-hint").textContent =
+      "ドライバーの起動を確認したら「受信を開始」を押してください。";
+  } catch (e) {
+    fail(e);
+  }
+});
+// Android: drop the SoapySDR source and the desktop file/folder pickers, whose
+// results (content:// URIs) cannot be opened as paths. Paths can still be typed.
+function applyAndroidLayout() {
+  $("input-kind").querySelector('option[value="sdr"]')?.remove();
+  for (const id of ["browse", "record-browse", "preset-browse"])
+    $(id).hidden = true;
+}
+function adoptAndroidDefaults() {
+  let changed = false;
+  if ($("input-kind").value !== "rtl_tcp" && $("input-kind").value !== "wave") {
+    $("input-kind").value = "rtl_tcp";
+    changed = true;
+  }
+  if ($("input-kind").value === "rtl_tcp" && fillDriverEndpoint())
+    changed = true;
+  if (changed) void persistPreferences();
+}
 $("port").addEventListener("input", updateSource);
 $("browse").addEventListener("click", async () => {
   try {
@@ -1296,6 +1341,14 @@ for (const id of [
     });
 }
 try {
+  if (native) {
+    try {
+      platform = { ...platform, ...((await invoke("platform")) ?? {}) };
+    } catch {
+      // Older backends have no platform command; they are desktop builds.
+    }
+    if (platform.android) applyAndroidLayout();
+  }
   bundledCatalog = native
     ? await invoke("preset_catalog")
     : buildCatalog(
@@ -1305,6 +1358,7 @@ try {
         }),
       );
   await restorePreferences(true);
+  if (platform.android) adoptAndroidDefaults();
   busy = false;
   setControls();
   updateSource();

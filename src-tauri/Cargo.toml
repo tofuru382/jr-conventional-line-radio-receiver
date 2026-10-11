@@ -5,16 +5,30 @@ authors.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# The library holds the application; the desktop executable and the Android
+# shared library are both thin entry points into it.
+[lib]
+name = "jr_receiver_desktop_lib"
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
-receiver-core = { path = "../crates/receiver-core" }
+receiver-core = { path = "../crates/receiver-core", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+
+# SoapySDR is a native desktop SDK. Android receives through RTL-TCP (for
+# example the "Rtl-sdr driver" app on the same phone) and IQ WAV files only.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+receiver-core = { path = "../crates/receiver-core", features = ["soapy"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-opener = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -23,4 +37,3 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-
