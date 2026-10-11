@@ -14,7 +14,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  TAURI_CLI: "@tauri-apps/cli@2.12.2"
 
 jobs:
   apk:
@@ -31,6 +30,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -50,16 +50,18 @@ jobs:
           echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
           echo "Using NDK $ndk"
 
-      # src-tauri/gen/ is generated here rather than committed (see .gitignore).
+      # The Tauri CLI comes from package.json: Gradle calls back into it through
+      # `npm run tauri`. src-tauri/gen/ is generated here (see .gitignore).
+      - run: npm ci
       - name: Generate the Android project
         run: |
-          npx --yes "$TAURI_CLI" android init --ci
-          npx --yes "$TAURI_CLI" icon src-tauri/icons/icon.png
+          npm run tauri -- android init --ci
+          npm run tauri -- icon src-tauri/icons/icon.png
 
       - name: Build release APK (arm64)
         run: |
           set -o pipefail
-          npx --yes "$TAURI_CLI" android build --apk --target aarch64 --ci 2>&1 | tee "$RUNNER_TEMP/build.log"
+          npm run tauri -- android build --apk --target aarch64 --ci 2>&1 | tee "$RUNNER_TEMP/build.log"
 
       # Surface the build errors as annotations, which stay readable from the
       # run summary and the checks API even where raw logs are not.
