@@ -659,6 +659,14 @@ tr.selected {
   letter-spacing: 0.01em;
   white-space: nowrap;
 }
+.channel-lines {
+  display: block;
+  color: var(--muted);
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  margin-block-start: 2px;
+  overflow-wrap: anywhere;
+}
 .channel-label {
   display: block;
   color: var(--muted);

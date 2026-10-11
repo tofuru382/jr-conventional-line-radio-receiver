@@ -559,6 +559,13 @@ function receiveCheck(c) {
   label.append(check);
   return { check, label };
 }
+// Known lines using the channel's group (reference examples, not exhaustive).
+function channelLines(id) {
+  return (
+    presetCatalog.find((p) => p.id === activePresetId)?.channel_lines?.[id] ??
+    ""
+  );
+}
 function channelButton(c, simple = false) {
   const button = el("button", undefined, "channel-select");
   button.type = "button";
@@ -569,6 +576,12 @@ function channelButton(c, simple = false) {
     el("span", " MHz", simple ? "frequency-unit" : "sr-only"),
   );
   identity.append(frequency, el("span", c.label, "channel-label"));
+  const lines = channelLines(c.id);
+  if (lines) {
+    const node = el("span", lines, "channel-lines");
+    node.title = `使用例：${lines}`;
+    identity.append(node);
+  }
   button.append(identity);
   button.addEventListener("click", () => select(c.id, true));
   return button;
@@ -695,8 +708,11 @@ function select(id, manual = false) {
   $("selected-frequency").textContent = c
     ? (c.frequency_hz / 1e6).toFixed(5)
     : "—";
+  const lines = c ? channelLines(c.id) : "";
   $("selected-label").textContent = c
-    ? c.label + (note ? ` · ${note}` : "")
+    ? c.label +
+      (lines ? ` · 使用例：${lines}` : "") +
+      (note ? ` · ${note}` : "")
     : "プリセットを読み込んでください";
   const summary = c
     ? `${(c.frequency_hz / 1e6).toFixed(5)} MHz · ${c.label}`
@@ -1230,7 +1246,7 @@ function filterRows() {
   const query = $("channel-search").value.trim().toLocaleLowerCase();
   let count = 0;
   for (const c of channels) {
-    const shown = `${(c.frequency_hz / 1e6).toFixed(5)} ${c.label}`
+    const shown = `${(c.frequency_hz / 1e6).toFixed(5)} ${c.label} ${channelLines(c.id)}`
       .toLocaleLowerCase()
       .includes(query);
     const row = rows.get(c.id);

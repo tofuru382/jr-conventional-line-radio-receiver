@@ -1557,7 +1557,26 @@ test("company changes isolate editable formats and restore the source allocation
   await ui.change("selected-format", "common");
   await ui.change("region", "west");
   assert.equal(ui.$("selected-format").value, "slotted");
-  assert.equal(ui.$("selected-label").textContent, "D2 音声第1波");
+  assert.equal(
+    ui.$("selected-label").textContent,
+    "D2 音声第1波 · 使用例：湖西線・学研都市線（片町線）",
+  );
+  // Line names appear on the channel tiles and are searchable.
+  assert.ok(
+    Array.from(
+      ui.$("channels-simple").querySelectorAll(".channel-lines"),
+      (n) => n.textContent,
+    ).includes("大阪環状線・桜島線・梅田貨物線・奈良線"),
+  );
+  ui.input("channel-search", "大阪環状線");
+  const visible = Array.from(
+    ui.$("channels-simple").children,
+  ).filter((item) => !item.hidden);
+  assert.deepEqual(
+    visible.map((item) => item.querySelector(".channel-label").textContent),
+    ["D6 音声第2波", "D6 音声第1波", "D6 データ波"],
+  );
+  ui.input("channel-search", "");
   await ui.change("region", "east");
   assert.equal(ui.$("selected-format").value, "slotted");
   assert.match(

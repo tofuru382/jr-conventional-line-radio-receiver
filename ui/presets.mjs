@@ -23,6 +23,11 @@ export function buildCatalog(config) {
           .filter((c) => c.note)
           .map((c) => [String(c.frequency_hz), c.note]),
       ),
+      channel_lines: Object.fromEntries(
+        selected
+          .filter((c) => c.lines)
+          .map((c) => [String(c.frequency_hz), c.lines]),
+      ),
       channels: selected
         .map((c) => ({
           id: String(c.frequency_hz),

@@ -23,6 +23,9 @@ pub struct ReceivePreset {
     pub sample_rate: f64,
     pub note: String,
     pub channel_notes: BTreeMap<String, String>,
+    /// Known lines per channel id (reference only; may be incomplete).
+    #[serde(default)]
+    pub channel_lines: BTreeMap<String, String>,
     pub channels: Vec<ChannelConfig>,
 }
 #[derive(Deserialize)]
@@ -59,6 +62,8 @@ struct Channel {
     frequency_hz: u64,
     label: String,
     service: Service,
+    #[serde(default)]
+    lines: String,
     note: String,
 }
 #[derive(Deserialize, PartialEq, Eq, Hash)]
@@ -182,9 +187,14 @@ pub fn parse(text: &str) -> Result<Vec<ReceivePreset>, String> {
             sample_rate: rate,
             note: profile.note,
             channel_notes: selected
-                .into_iter()
+                .iter()
                 .filter(|c| !c.note.is_empty())
                 .map(|c| (c.frequency_hz.to_string(), c.note.clone()))
+                .collect(),
+            channel_lines: selected
+                .into_iter()
+                .filter(|c| !c.lines.is_empty())
+                .map(|c| (c.frequency_hz.to_string(), c.lines.clone()))
                 .collect(),
             channels,
         });
@@ -368,6 +378,15 @@ mod tests {
         }
         let east = resolve("east").unwrap();
         assert_eq!(east.channels[14].format, Format::Common);
+        // Reference line names follow the channel group (D1–D7).
+        assert_eq!(east.channel_lines["352625000"], "全線区共通");
+        let west = resolve("west").unwrap();
+        for id in ["352568750", "352606250", "352662500"] {
+            assert_eq!(
+                west.channel_lines[id],
+                "大阪環状線・桜島線・梅田貨物線・奈良線"
+            );
+        }
         assert_eq!(east.channel_notes.len(), 8);
         assert_eq!(
             east.channel_notes["352612500"],

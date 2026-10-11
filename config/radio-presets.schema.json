@@ -31,6 +31,10 @@
         "frequency_hz": { "$ref": "#/$defs/frequency" },
         "label": { "$ref": "#/$defs/label" },
         "service": { "$ref": "#/$defs/service" },
+        "lines": {
+          "type": "string",
+          "description": "Known lines or sections using this channel (reference only)."
+        },
         "note": { "type": "string" }
       }
     },
