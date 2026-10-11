@@ -380,6 +380,10 @@ mod tests {
         assert_eq!(east.channels[14].format, Format::Common);
         // Reference line names follow the channel group (D1–D7).
         assert_eq!(east.channel_lines["352625000"], "全線区共通");
+        // D7 (voice 1, voice 2, data) is the Yamanote Line group.
+        for id in ["352543750", "352606250", "352668750"] {
+            assert!(east.channel_lines[id].starts_with("山手線"));
+        }
         let west = resolve("west").unwrap();
         for id in ["352568750", "352606250", "352662500"] {
             assert_eq!(

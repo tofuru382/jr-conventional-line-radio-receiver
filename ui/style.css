@@ -667,6 +667,13 @@ tr.selected {
   margin-block-start: 2px;
   overflow-wrap: anywhere;
 }
+.channel-tile .channel-lines {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
 .channel-label {
   display: block;
   color: var(--muted);
