@@ -57,7 +57,20 @@ jobs:
           npx --yes "$TAURI_CLI" icon src-tauri/icons/icon.png
 
       - name: Build release APK (arm64)
-        run: npx --yes "$TAURI_CLI" android build --apk --target aarch64 --ci
+        run: |
+          set -o pipefail
+          npx --yes "$TAURI_CLI" android build --apk --target aarch64 --ci 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      # Surface the build errors as annotations, which stay readable from the
+      # run summary and the checks API even where raw logs are not.
+      - name: Report build errors
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          [ -f "$log" ] || exit 0
+          emit() { python3 -c 'import sys; t=sys.stdin.read()[-60000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
+          grep -nE "error(\[E[0-9]+\])?:|^error|FAILURE|What went wrong|Exception|failed|not found|cannot find" "$log" | grep -v "Compiling\|Downloaded" | head -n 80 | emit "Error lines"
+          tail -n 120 "$log" | emit "Build log tail"
 
       # Release builds are unsigned. Sign with a stable key when the repository
       # has one (secrets below), otherwise with a throwaway key: such APKs install
