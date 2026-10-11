@@ -19,3 +19,8 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# Methods called from ui/app.js through window.JrAndroid must keep their names.
+-keepattributes JavascriptInterface
+-keepclassmembers class io.jrradio.receiver.MainActivity$Bridge {
+    @android.webkit.JavascriptInterface <methods>;
+}

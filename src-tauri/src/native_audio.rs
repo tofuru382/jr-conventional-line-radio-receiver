@@ -57,8 +57,8 @@ impl NativeMonitor {
 mod android {
     use super::Settings;
     use ndk::audio::{
-        AudioContentType, AudioDirection, AudioFormat, AudioPerformanceMode, AudioSharingMode,
-        AudioStream, AudioStreamBuilder, AudioUsage,
+        AudioDirection, AudioFormat, AudioPerformanceMode, AudioSharingMode, AudioStream,
+        AudioStreamBuilder,
     };
     use std::{
         sync::{Arc, Mutex},
@@ -77,8 +77,7 @@ mod android {
                     .sample_rate(SAMPLE_RATE)
                     .channel_count(1)
                     .format(AudioFormat::PCM_I16)
-                    .usage(AudioUsage::Media)
-                    .content_type(AudioContentType::Speech)
+                    // Usage/content type need API 28; the default is media.
                     .open_stream()
             })
             .map_err(|e| format!("{e:?}"))?;
