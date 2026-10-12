@@ -1,7 +1,8 @@
 //! Immutable production coefficients, shared by all decoder instances.
-pub mod chime_data;
-pub mod distilled_data;
-pub mod model_data;
+#[path = "model_bindings/correction.rs"]
+pub mod correction;
+#[path = "model_bindings/predictor.rs"]
+pub mod predictor;
 
 #[derive(Clone, Copy)]
 pub struct Tensor {
@@ -90,4 +91,8 @@ impl Int8Matrix {
     }
 }
 
-pub mod planner_data;
+#[path = "model_bindings/planner.rs"]
+pub mod planner;
+
+#[path = "model_bindings/binary.rs"]
+mod binary;

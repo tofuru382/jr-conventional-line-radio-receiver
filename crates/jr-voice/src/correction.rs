@@ -1,5 +1,5 @@
 //! Learned native-bit-conditioned gain and spectral corrections.
-use crate::models::distilled_data as d;
+use crate::models::correction as d;
 use crate::numeric::Numeric;
 use crate::predictor::Controls;
 

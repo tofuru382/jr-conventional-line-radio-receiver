@@ -1,6 +1,5 @@
 //! Bounded lookahead feature prediction and recurrent speech controls.
-use crate::chime::select_chime;
-use crate::models::{model_data as m, Mlp};
+use crate::models::{predictor as m, Mlp};
 use crate::numeric::{affine, affine_columns, normalize, normalize_in_place, Numeric};
 pub type Controls = [f32; 82];
 pub type Payload = [u8; 20];
@@ -10,27 +9,18 @@ pub const LOOKAHEAD: usize = 3;
 pub struct FeatureRecord {
     pub features: [f32; 198],
     pub periods: [f32; 4],
-    pub chime_logits: [f32; 2],
-    pub chime_evidence: [bool; 2],
-    pub chime_ready: bool,
 }
 impl Default for FeatureRecord {
     fn default() -> Self {
         Self {
             features: [0.0; 198],
             periods: [0.0; 4],
-            chime_logits: [0.0; 2],
-            chime_evidence: [false; 2],
-            chime_ready: false,
         }
     }
 }
 pub struct Prediction {
     pub controls: Controls,
     pub bits: [u8; 158],
-    pub periods: [f32; 4],
-    pub chime: usize,
-    pub chime_end: bool,
 }
 fn read(bits: &[u8], positions: &[usize]) -> usize {
     positions
@@ -223,9 +213,6 @@ impl Predictor {
         }
     }
     fn refine(&mut self, index: i32, values: &mut Controls) {
-        if !m::REFINEMENT_ENABLED {
-            return;
-        }
         for half in 0..2 {
             let features = &self.at(index).features;
             let state = usize::from(features[38 + half] != 0.0);
@@ -390,15 +377,8 @@ impl Predictor {
         if !values.iter().all(|x| x.is_finite()) {
             return Err(());
         }
-        let chime = select_chime(&mut self.buffer[..self.count], self.cursor);
-        let chime_end = chime != 0
-            && (self.cursor + 1 == self.count
-                || select_chime(&mut self.buffer[..self.count], self.cursor + 1) != chime);
         let prediction = Prediction {
             controls: values,
-            chime,
-            chime_end,
-            periods: self.at(index).periods,
             bits: std::array::from_fn(|i| u8::from(self.at(index).features[40 + i] < 0.0)),
         };
         self.cursor += 1;

@@ -1,11 +1,12 @@
 //! Safe owned interface; preserves the C ABI acceptance and retirement policy.
-//! Synthesis looks ahead four frames (160 ms). Drain output after each operation;
+//! Synthesis looks ahead seven frames (280 ms). Drain output after each operation;
 //! pass `None` for missing slots and flush at EOF to emit the buffered tail.
 use super::Decoder;
 pub use crate::stream::Output;
 
 #[derive(Default)]
-pub struct Voice(Decoder);
+// Keep the substantial synthesis state off the caller's worker stack.
+pub struct Voice(Box<Decoder>);
 impl Voice {
     pub fn push(&mut self, index: u32, payload: Option<[u8; 20]>) -> Result<(), String> {
         if self.0.ready(index) != 0 {

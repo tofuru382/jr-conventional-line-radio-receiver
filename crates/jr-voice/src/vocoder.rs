@@ -1,5 +1,5 @@
-//! Stateful mixed-excitation synthesis, using only Rust and immutable models.
-use crate::models::model_data as m;
+//! Shared source/filter synthesis with bounded gain interpolation before limiting.
+use crate::models::predictor as m;
 use crate::numeric::{affine, normalize_in_place, sample, Numeric};
 use crate::predictor::Controls;
 pub type Pcm = [i16; 320];
@@ -33,6 +33,7 @@ impl VoiceNoise {
 pub struct Vocoder {
     pub original_choice: usize,
     pub numeric: Numeric,
+    pub source_trace: [f32; 320],
     noise: VoiceNoise,
     previous_features: [f32; 28],
     feature_average: [f32; 28],
@@ -40,7 +41,6 @@ pub struct Vocoder {
     history: [f32; 255],
     phase: f32,
     previous_pulse: f32,
-    period: f32,
     fraction: f32,
     power: f32,
     level: f32,
@@ -55,6 +55,7 @@ impl Default for Vocoder {
         Self {
             original_choice: 4,
             numeric: Numeric::default(),
+            source_trace: [0.0; 320],
             noise: VoiceNoise::default(),
             previous_features: [0.0; 28],
             feature_average: [0.0; 28],
@@ -62,7 +63,6 @@ impl Default for Vocoder {
             history: [0.0; 255],
             phase: 0.0,
             previous_pulse: 0.0,
-            period: 0.0,
             fraction: 0.0,
             power: 0.0,
             level: 0.0,
@@ -94,13 +94,7 @@ impl Vocoder {
         }
         true
     }
-    fn excitation(
-        &mut self,
-        fraction: f32,
-        mut period: f32,
-        output: &mut [f32],
-        native_period: bool,
-    ) {
+    fn excitation(&mut self, fraction: f32, period: f32, output: &mut [f32]) {
         let mut mapped = if fraction == 0.0 || fraction == 1.0 {
             fraction
         } else {
@@ -108,14 +102,8 @@ impl Vocoder {
         };
         if self.has_excitation {
             mapped = 0.0625 * self.fraction + (1.0 - 0.0625) * mapped;
-            if !native_period {
-                period = (0.5 * self.period.ln() + 0.5 * period.ln())
-                    .exp()
-                    .clamp(20.0, 160.0);
-            }
         }
         self.fraction = mapped;
-        self.period = period;
         self.has_excitation = true;
         let root_period = period.sqrt();
         let normalization = (1.0 - 1.0 / period).sqrt();
@@ -137,9 +125,6 @@ impl Vocoder {
         self.phase = (self.phase + 80.0 / period) % 1.0;
     }
     fn apply_policy(&mut self, values: &mut Controls, action: Option<usize>) {
-        if m::VOICING_ALWAYS_NEUTRAL {
-            return;
-        }
         let mut current = [0.0; 28];
         for i in 0..4 {
             current[i] = values[i].clamp(-120.0, -3.0);
@@ -189,19 +174,14 @@ impl Vocoder {
             *x = (-(exponent * (-x.clamp(0.0, 1.0)).ln_1p()).exp_m1()).clamp(0.0, 1.0);
         }
     }
-    fn apply_spectrum(&mut self, values: &mut Controls, separate: bool) {
+    fn apply_spectrum(&mut self, values: &mut Controls) {
         let original: [f32; 64] = values[6..70].try_into().unwrap();
         for half in 0..2 {
             let mut proposal = [0.0; 32];
             let mut delta = [0.0; 32];
             for i in 0..32 {
-                let middle = 0.5 * original[i] + 0.5 * original[32 + i];
                 let normalized = (i as i32 + 1 - 8).max(0) as f32 / 24.0;
-                let value = (if separate {
-                    original[half * 32 + i]
-                } else {
-                    0.5 * original[half * 32 + i] + 0.5 * middle
-                }) * (-0.5 * normalized * normalized).exp();
+                let value = original[half * 32 + i] * (-0.5 * normalized * normalized).exp();
                 proposal[i] = if self.has_spectrum {
                     0.75 * value + 0.25 * self.spectrum_average[i]
                 } else {
@@ -217,20 +197,13 @@ impl Vocoder {
             self.has_spectrum = true;
         }
     }
-    pub fn process(
+    pub fn process_explicit(
         &mut self,
         parameters: &Controls,
-        native_period: bool,
-        separate_spectra: bool,
-    ) -> Result<Pcm, ()> {
-        self.process_with_action(parameters, native_period, separate_spectra, None)
-    }
-    pub fn process_with_action(
-        &mut self,
-        parameters: &Controls,
-        native_period: bool,
-        separate_spectra: bool,
         action: Option<usize>,
+        source: Option<&[f32; 320]>,
+        curve: Option<&[f32; 320]>,
+        restore: bool,
     ) -> Result<Pcm, ()> {
         if action.is_some_and(|a| a > 8) {
             return Err(());
@@ -240,7 +213,7 @@ impl Vocoder {
         }
         let mut values = *parameters;
         self.apply_policy(&mut values, action);
-        self.apply_spectrum(&mut values, separate_spectra);
+        self.apply_spectrum(&mut values);
         let levels: [f32; 4] = std::array::from_fn(|i| values[i].clamp(-120.0, -3.0));
         let mut pcm = [0.0; 320];
         let mut impulse = [0.0; 256];
@@ -265,8 +238,18 @@ impl Vocoder {
                 values[70 + block].clamp(0.0, 1.0),
                 values[74 + block].clamp(20.0, 160.0),
                 &mut extended[255..],
-                native_period,
             );
+            if let Some(source) = source {
+                let source = &source[block * 80..(block + 1) * 80];
+                let power = source.iter().fold(0.0_f32, |sum, x| sum + x * x);
+                if !power.is_finite() {
+                    return Err(());
+                }
+                if power != 0.0 {
+                    extended[255..].copy_from_slice(source);
+                }
+            }
+            self.source_trace[block * 80..(block + 1) * 80].copy_from_slice(&extended[255..]);
             let mut slope_gain = 10.0_f32.powf(-slope / 40.0);
             let slope_step = 10.0_f32.powf(slope / (20.0 * 79.0));
             let mut shaped = [0.0; 80];
@@ -296,6 +279,15 @@ impl Vocoder {
             for x in &mut shaped {
                 *x *= gain;
             }
+            if let Some(curve) = curve {
+                for n in 0..80 {
+                    let value = curve[block * 80 + n];
+                    if !value.is_finite() || value <= 0.0 || value > 4.0 {
+                        return Err(());
+                    }
+                    shaped[n] *= value;
+                }
+            }
             if !Self::limit(&mut shaped) {
                 return Err(());
             }
@@ -308,7 +300,7 @@ impl Vocoder {
             .iter()
             .fold(0.0, |sum, level| sum + 10.0_f32.powf(level / 10.0))
             / 4.0;
-        let restoration = (target / own).sqrt();
+        let restoration = if restore { (target / own).sqrt() } else { 1.0 };
         for x in &mut pcm {
             *x *= restoration;
         }

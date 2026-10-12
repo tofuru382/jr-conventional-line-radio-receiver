@@ -1,5 +1,5 @@
 //! Feature hypotheses used by the fixed planner, not normative bit assignments.
-use crate::models::planner_data::input_parameters as t;
+use crate::models::planner::input_parameters as t;
 use crate::predictor::Controls;
 #[derive(Clone, Copy, Default)]
 struct Half {

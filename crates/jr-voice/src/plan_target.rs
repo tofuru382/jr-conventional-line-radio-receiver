@@ -1,5 +1,5 @@
 //! Quantized fixed acoustic target inference with isotonic pitch distributions.
-use crate::models::planner_data::learned_parameters as m;
+use crate::models::planner::learned_parameters as m;
 use crate::predictor::Controls;
 #[derive(Clone)]
 pub struct Target {

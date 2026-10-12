@@ -1,4 +1,4 @@
-# jr_conventional_voice 1.2.0
+# jr_conventional_voice 1.3.0
 
 English | [日本語](README.ja.md)
 
@@ -21,7 +21,7 @@ or an explicit missing/nonvoice slot, with a `u32` slot index.
 | Output frame | 320 `i16` samples, 8 kHz, mono, with the original slot index |
 | Spectral processing | Two 20 ms halves, each with its own spectral envelope |
 | Excitation and level processing | Four 10 ms blocks of 80 samples |
-| Continuous-input lookahead | Four frames, 160 ms in total |
+| Continuous-input lookahead | Seven frames, 280 ms in total |
 
 The 20 ms and 10 ms units organize synthesis within a 40 ms input frame. State is
 shared across these units and across consecutive frames. The bit groupings and
@@ -38,18 +38,17 @@ payload and its context. The waveform itself is produced by the synthesis stages
 
 ```mermaid
 flowchart TD
-    A["Accepted payload and slot index"] --> B["Bit and codeword features"]
-    B --> C["Context prediction and recurrent controls"]
-    C --> D["Gain and spectral correction"]
-    C --> H["Chime classification and synthesis"]
-    D --> E["Acoustic target prediction"]
-    D --> F["Current and next-frame trial synthesis"]
-    F --> M["Chime mixing and boundary fades"]
-    H --> M
-    E --> G["Measure PCM and score candidates"]
-    M --> G
-    G --> O["Selected PCM and original slot index"]
-    G -. "Commit selected synthesis state" .-> F
+    A["Accepted payload and slot index"] --> B["Context models and recurrent controls"]
+    A --> C["Integer CELP excitation and gain history"]
+    B --> D["Native, periodic and noise source mixture"]
+    C --> D
+    D --> E["Candidate synthesis and acoustic comparison"]
+    E --> F["Spectral correction and periodicity guard"]
+    C --> G["Encoded gain correction"]
+    F --> G
+    G --> H["Temporal parameter correction"]
+    H --> I["Common source/filter synthesis, gain curve and boundary fades"]
+    I --> J["PCM with original slot index"]
 ```
 
 All model coefficients are compiled into the crate. Inference uses fixed tables,
@@ -100,116 +99,122 @@ and a small quantized neural network. Corrections are bounded in both coefficien
 space and their frequency-domain effect before they are added to the envelope.
 These steps change synthesis parameters before waveform generation.
 
-### 3. Predict the acoustic targets used for selection
+### 3. Reconstruct excitation and its state
 
-[`plan_features.rs`](src/plan_features.rs) builds a separate **220-element feature
-vector** from the corrected controls and the payload. It contains current control
-summaries, differences from the previous frame, smoothed histories, spectral and
-gain features, and codeword-derived excitation summaries. The latter include
-energy, short-lag correlations, and pulse-class indicators.
+The implementation in [`src/celp/`](src/celp/) reuses and adapts parts of
+[mcelp-codec](https://github.com/soltia48/mcelp-codec), including the integer DSP
+code and tables in [`fixed_core/`](src/celp/fixed_core/). These are integrated with
+Modified RL-CELP parameter decoding and gain/spectral state handling. The reused
+code is Copyright (c) 2026 KIRISHIKI Yudai, licensed under the MIT License; the
+original notice and license text are retained in [`src/celp/LICENSE`](src/celp/LICENSE).
 
-[`plan_target.rs`](src/plan_target.rs) predicts what the synthesized PCM should
-measure like: four block levels, 20 spectral-band levels for each half, periodicity,
-and evidence for a measurable pitch. It also predicts pitch distributions used to
-assign a cost to each candidate lag from 20 to 160 samples. The cumulative
-distributions are made monotonic before conversion to expected pitch-error costs.
-A small neural network refines the current frame's periodicity target.
+[`celp/`](src/celp/) interprets two parameter groups and runs an
+integer CELP core. Adaptive-codebook pitch memory and sparse innovation pulses
+produce four 80-sample excitation blocks. Spectral lookup and interpolation,
+predictive gain history, saturation, and synthesis-filter state continue across
+frames. Gain history starts from the mean of the log-gain table after a reset.
+The reconstructed waveform and internal gain quantities are observations for the
+following models; their interpretations remain implementation hypotheses where
+the bit allocation is uncertain.
 
-Targets cover the current 40 ms frame and two overlapping 80 ms windows. These
-longer windows include preceding PCM and help evaluate continuity across frame
-boundaries. All targets come from payload features, controls, and decoder history.
+[`excitation.rs`](src/excitation.rs) whitens the excitation with an order-10
+prediction filter and normalizes each block. It also constructs a coherent periodic
+source from current and delayed excitation, and deterministic noise. These three
+sources retain their own histories. No recording or reference waveform is needed
+during decoding.
 
-### 4. Synthesize a candidate waveform
+### 4. Infer a source mixture and choose a synthesis trajectory
 
-[`vocoder.rs`](src/vocoder.rs) generates the waveform in four 80-sample blocks.
-Pitch controls the spacing of a phase-continuous pulse train. A stateful,
-fixed-seed pseudorandom generator supplies noise. The periodicity control is
-mapped and smoothed, then used to mix pulse and noise excitation.
+[`source_features.rs`](src/source_features.rs) combines recent payload and physical
+features into 570 values per 20 ms half. Native waveform descriptors, controls,
+and source geometry extend this to **633 values**. A **633→256→128→40** network
+predicts bounded spectral/level corrections and source-mixture adjustments.
+The mixture weights are normalized and smoothed; block power is normalized again
+after mixing.
 
-Each 20 ms envelope is converted into a normalized minimum-phase impulse response
-by [`numeric.rs`](src/numeric.rs). A 128-tap FIR shapes the excitation. Excitation
-history, pulse phase, spectral history, and power estimates persist across blocks
-and frames. Gain ramps and smoothed power normalization set the requested level;
-peak limiting and round-to-nearest-even conversion produce PCM16 samples.
+The decoder compares the proposed source's periodicity with an ordinary pulse/noise
+trial. If the proposal has weak periodicity and the ordinary trial is substantially
+stronger, that frame uses the ordinary controls and source. This rule applies to
+all received content.
 
-Candidate selection varies the periodicity control `v` using three curves:
+[`planner.rs`](src/planner.rs) uses the acoustic targets from
+[`plan_features.rs`](src/plan_features.rs) and [`plan_target.rs`](src/plan_target.rs).
+Those models infer block levels, spectral-band shape, periodicity, and pitch-error
+costs from a 220-element feature vector. Three current-frame candidates and nine
+next-frame trials test the effect of changing the pulse/noise balance. Explicit
+source blocks are shared among trials; those blocks can therefore make different
+actions equivalent. Only the selected current state is committed.
 
-```text
-v' = 1 - (1 - v)^a,     a in {0.5, 1, 2}
-```
+[`plan_acoustics.rs`](src/plan_acoustics.rs) measures actual trial PCM: integer-sum
+correlations at lags 20–160, Hann-windowed spectral-band levels, four block energies,
+and saturation. It also scores overlapping 80 ms windows when history is available.
+The current cost plus the best next-frame cost determines the choice. A fixed
+margin protects the default choice, which is always used at the start of a run.
+The original-source trial and the selected-source synthesis each keep independent
+state and one frame of lookahead.
 
-These choices weaken, retain, or strengthen periodic excitation. One curve is
-applied to all four blocks of a candidate frame; pitch, level, and envelope controls
-remain those supplied to the synthesizer. A local voicing policy provides the
-default choice against which the candidate score improvement is compared.
+### 5. Correct spectrum and gain before final synthesis
 
-### 5. Score current and future candidates
+Selected and native PCM descriptors plus run age extend the observation to
+**679 values per half**. A **679→384→192→34** network refines spectral shape.
+A trial synthesizer checks whether the refinement loses periodicity that the
+selected waveform had retained; if so, the earlier controls are used for that frame.
+This check maintains its own continuous trial history.
 
-[`planner.rs`](src/planner.rs) copies the current synthesis state and creates
-**three current-frame candidates**. For each resulting state, it creates three
-next-frame candidates: **nine future trials** in total. This lets the selection
-account for how today's phase, filtering, and gain state affect the next frame.
+A further baseline synthesis measures actual level with whole-frame level
+restoration disabled. Its level residuals, the requested levels, and the integer
+core's gain history extend the observation to **707 values**. A fixed linear
+gain model consumes the last 137 values to estimate two block-gain corrections
+per half, at half strength.
 
-[`plan_acoustics.rs`](src/plan_acoustics.rs) measures the actual mixed PCM:
+The temporal model embeds each 707-element observation into 128 values. For each
+half it combines four past halves, the current half, and two future halves:
+**896→256→128→34**. Context clamps to the nearest available half at a run boundary.
+This model adjusts spectrum and block gains at half strength. Spectral changes
+are bounded in coefficient and frequency-response space; final gain changes are
+bounded to ±12 dB and target levels to −120…−3 dB.
 
-- Mean-centered correlation over lags 20–160 measures periodicity and pitch.
-  Correlation sums use integer accumulation before floating-point normalization.
-- Each 20 ms half is Hann-windowed, transformed with a 512-point FFT, and reduced
-  to 20 spectral bands. Absolute band levels and level-independent shape are scored.
-- Four 10 ms energy measurements evaluate level errors. Saturated samples add a
-  penalty, and missing pitch is penalized according to the predicted pitch evidence.
-- When enough history exists, periodicity and pitch are also evaluated over two
-  80 ms windows: the previous-plus-current frame, and a window centered on the
-  previous frame extending 20 ms into each neighbor.
+[`synthesis_parameters.rs`](src/synthesis_parameters.rs) interpolates block gain at
+80-sample spacing with a cosine curve. Neighboring gain nodes are used only within
+the same continuous run. This curve is applied inside synthesis before peak
+limiting; whole-frame level restoration is disabled so it cannot undo the gain
+correction.
 
-The selection rule is:
+### 6. Synthesize all received content through one path
 
-```text
-score(current choice) = current-frame cost
-                      + minimum next-frame cost from that choice's resulting state
-```
+[`vocoder.rs`](src/vocoder.rs) filters the selected excitation using
+normalized, minimum-phase 128-tap responses derived from the two cepstral envelopes.
+It retains excitation history, spectral smoothing, phase, and power memory across
+frames. Within-block gain slopes, power normalization, the inferred gain curve,
+peak limiting, and round-to-nearest-even quantization produce PCM16. Boundary
+fades use 80 samples.
 
-The default voicing choice is retained unless the best candidate improves this
-score by more than the configured margin. The first frame of a segment always
-uses the default choice. Only the chosen current frame and its synthesis state
-are committed; future trials are discarded and reconsidered when more input
-arrives. At EOF, the final pending frame is scored without a future-frame term.
-
-### 6. Handle chimes and transitions
-
-[`chime.rs`](src/chime.rs) identifies chimes for passenger broadcasts and call
-channels using features from neighboring frames, a learned gate, and pattern
-evidence. For passenger broadcast chimes, synthesis adjusts the level and envelope
-and uses fully periodic excitation. For call channel chimes, synthesis estimates
-amplitudes for a bank of sinusoidal components and a shaped-noise component.
-
-The chime signal is mixed with speech using 40-sample transition ramps. Gaps between
-accepted speech runs use 80-sample boundary fades. Both are applied **before
-candidate scoring**, so selection evaluates the PCM that will actually be emitted.
+Speech, passenger broadcast chimes, and call channel chimes use this same pipeline.
+There is no chime classifier, separate melody generator, sinusoidal chime bank,
+or speech/chime crossfade. Model coefficients are fixed during decoding; only
+per-stream state changes. All coefficients and tables are packaged with the crate;
+inference needs neither a GPU nor an external model service.
 
 ## Lookahead, gaps, and stream state
 
-The predictor needs **three future frames (120 ms)**. Candidate selection needs
-the next predicted frame, adding **one more frame (40 ms)**. For continuous input
-starting at index 0, the first output, index 0, becomes available when index 4 has
-been accepted. Thereafter, each accepted contiguous frame normally releases one
-output. This is 160 ms of synthesis lookahead, separate from processing time and
-the receiver's 440 ms monitor jitter buffer.
+The base predictor needs three future frames. Two source-selection stages add
+one frame each, temporal correction adds one, and gain interpolation adds one.
+The complete path therefore needs **seven future frames (280 ms)**. With continuous
+input starting at index 0, accepting index 7 releases output index 0. Processing
+time and any playback buffer are additional to this algorithmic delay.
 
-[`stream.rs`](src/stream.rs) maintains a bounded queue and separates continuous
-runs by their slot indices. A missing-slot notification can release pending work.
-The final buffered control is retained until a following accepted frame or EOF
-determines how to finish the run. At an accepted-index gap, pending audio is drained
-and the predictor, correction, chime, and planner states are reset before synthesis
-of the new run. Each regular input operation emits at most one output frame;
-`flush()` drains the remaining run and can return several frames.
+[`stream.rs`](src/stream.rs) maintains bounded queues. At a gap, it drains the old
+run, applies boundary fades, and resets all predictor, codebook, gain, noise,
+filter, candidate, and temporal state before the next run. Missing-slot operations
+can advance buffered work. A regular input operation emits at most one output;
+`flush()` drains every accepted tail frame, including calls shorter than the
+lookahead, and is idempotent. The input queue holds eight payloads; output capacity
+is 16 frames. Memory use does not grow with the duration of a call.
 
-Outputs retain their original indices. Missing slots produce no replacement PCM;
-the caller uses index gaps to preserve silence or manage its playback/recording
-timeline. `flush()` is idempotent and ends the stream. Reception restart or a new
-index epoch requires a fresh `Voice` (or `jr_voice_reset` through the C ABI).
-Each independently received channel needs its own decoder state; coefficients are
-immutable and shared.
+Missing slots produce no replacement PCM. Outputs retain their original indices,
+so the host can preserve gaps on its timeline. A new index epoch requires a fresh
+`Voice` or `jr_voice_reset`. Each independent channel needs its own state; immutable
+coefficients are shared. The C ABI number and frame representation remain unchanged.
 
 ## API usage
 
@@ -261,33 +266,35 @@ serialized access.
 | `-4` | Internal failure; reset is required |
 
 `jr_voice_status` exposes completion/failure flags, frame counts, and processing
-times in a 28-byte structure. `jr_voice_version()` reports `1.2.0`. The Cargo
+times in a 28-byte structure. `jr_voice_version()` reports `1.3.0`. The Cargo
 library target is an `rlib`; the header documents the exported C entry points.
 
 ## Source layout and tests
 
-| Source | Responsibility |
-|---|---|
-| [`predictor.rs`](src/predictor.rs) | Payload features, context models, recurrent controls, pitch refinement |
-| [`correction.rs`](src/correction.rs) | Gain and spectral corrections conditioned on bits and history |
-| [`plan_features.rs`](src/plan_features.rs), [`plan_target.rs`](src/plan_target.rs) | Features and predicted acoustic targets for candidate selection |
-| [`vocoder.rs`](src/vocoder.rs), [`numeric.rs`](src/numeric.rs) | Stateful excitation, envelope filtering, normalization, numeric bounds |
-| [`plan_acoustics.rs`](src/plan_acoustics.rs), [`planner.rs`](src/planner.rs) | PCM measurement, candidate search, synthesis-state selection |
-| [`chime.rs`](src/chime.rs) | Chime detection, synthesis, and transitions |
-| [`stream.rs`](src/stream.rs), [`receiver.rs`](src/receiver.rs), [`lib.rs`](src/lib.rs) | Indexed scheduling, safe Rust API, C ABI |
-| [`src/models/`](src/models/) | Fixed coefficients, lookup tables, and measurement constants |
+The signal path is coordinated by [`synthesis.rs`](src/synthesis.rs).
+Model loading and fixed inference kernels are in [`synthesis_models.rs`](src/synthesis_models.rs),
+with model data stored as `.bin` files in [`src/models/`](src/models/).
+[`models.rs`](src/models.rs) and [`model_bindings/`](src/model_bindings/) provide
+array types, dimensions, and byte offsets for the predictor, correction, and planner
+tables. Their little-endian values are decoded at compile time; float bits and
+quantized integers are preserved without alignment-dependent casts. Indices use
+32-bit unsigned values on disk, independent of the host's pointer width.
 
-From the repository root:
+The source, spectrum, gain, and temporal network files contain named float arrays
+with dimensions. They are loaded once and shared by decoder instances. CELP parameter
+tables are in `celp_parameters.bin`. All assets are embedded with `include_bytes!`;
+no external model files are needed at runtime.
+
+The files linked in the stages above separate feature extraction, integer CELP
+state, acoustic selection, parameter correction, and synthesis.
 
 ```sh
 cargo test -p jr_conventional_voice --locked
 cargo clippy -p jr_conventional_voice --all-targets --locked -- -D warnings
 ```
 
-[`tests/planner.rs`](tests/planner.rs) generates synthetic payloads in memory to
-check lookahead, short calls, missing slots, gaps, maximum `u32` indices, and
-idempotent flushing. [Unit tests](src/tests.rs) cover C ABI backpressure, invalid
-input, reset, failure retirement, numeric bounds, and deterministic noise
-sequences. These tests check API and stream behavior; they do not measure speech
-fidelity. The acoustic scores used during decoding guide candidate selection and
-are not a direct measurement of intelligibility.
+Tests generate payloads in memory. They cover ABI validation/backpressure, seven-frame
+lookahead, future-dependency bounds, repeated gaps, short-call tails, state isolation,
+maximum indices, deterministic noise, and idempotent flushing. No captured audio or
+radio fixtures are packaged. These are contract and numerical tests; acoustic target
+scores used inside the decoder are not direct measures of intelligibility.

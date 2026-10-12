@@ -14,10 +14,10 @@ fn abi_validates_payload_before_advancing_and_requires_drain() {
         assert_eq!(jr_voice_process(handle, 0, payload.as_ptr(), 20), -1);
         payload[19] = 0;
         assert_eq!(jr_voice_process(handle, 0, payload.as_ptr(), 48), -1);
-        for i in 0..5 {
+        for i in 0..8 {
             assert_eq!(jr_voice_process(handle, i, payload.as_ptr(), 20), 0);
         }
-        assert_eq!(jr_voice_advance(handle, 5), -3);
+        assert_eq!(jr_voice_advance(handle, 8), -3);
         assert_eq!(jr_voice_flush(handle), -3);
         let mut output = [0xa5; 642];
         let mut index = u32::MAX;
@@ -32,8 +32,8 @@ fn abi_validates_payload_before_advancing_and_requires_drain() {
         assert_eq!(index, 0);
         assert_eq!(output[0], 0xa5);
         assert_eq!(output[641], 0xa5);
-        assert_eq!(jr_voice_advance(handle, 4), -2);
-        assert_eq!(jr_voice_advance(handle, 5), 0);
+        assert_eq!(jr_voice_advance(handle, 7), -2);
+        assert_eq!(jr_voice_advance(handle, 8), 0);
         assert_eq!(jr_voice_flush(handle), -3);
         assert_eq!(
             jr_voice_read(handle, &mut index, output.as_mut_ptr().add(1), 640),
@@ -42,7 +42,7 @@ fn abi_validates_payload_before_advancing_and_requires_drain() {
         assert_eq!(index, 1);
         assert_eq!(jr_voice_flush(handle), 0);
         assert_eq!(jr_voice_flush(handle), 0);
-        assert_eq!(jr_voice_process(handle, 6, payload.as_ptr(), 20), -2);
+        assert_eq!(jr_voice_process(handle, 9, payload.as_ptr(), 20), -2);
         assert_eq!(jr_voice_reset(handle), 0);
         assert_eq!(jr_voice_process(handle, u32::MAX, payload.as_ptr(), 20), 0);
         assert_eq!(jr_voice_flush(handle), 0);
@@ -91,7 +91,9 @@ fn numeric_edges_remain_finite_and_normalized() {
     let mut vocoder = Vocoder::default();
     let mut parameters = [0.0; 82];
     parameters[0] = f32::NAN;
-    assert!(vocoder.process(&parameters, true, true).is_err());
+    assert!(vocoder
+        .process_explicit(&parameters, None, None, None, true)
+        .is_err());
 }
 
 #[test]

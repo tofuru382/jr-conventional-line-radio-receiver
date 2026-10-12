@@ -4,13 +4,18 @@ use crate::plan_acoustics::frame_cost;
 use crate::plan_features::Features;
 use crate::plan_target::{ModelState, Target};
 use crate::predictor::{Controls, Payload};
-use crate::stream::Output;
 use crate::vocoder::{Pcm, Vocoder};
+pub struct Output {
+    pub index: u64,
+    pub pcm: Pcm,
+    pub source: [f32; 320],
+}
 #[derive(Clone)]
 pub struct Input {
-    pub key: u32,
+    pub key: u64,
     pub payload: Payload,
     pub controls: Controls,
+    pub source: [f32; 320],
     pub weight: [f32; 320],
     pub offset: [f32; 320],
     pub fade_in: bool,
@@ -50,13 +55,10 @@ fn mix(raw: &Pcm, input: &Input) -> Pcm {
     pcm
 }
 impl Planner {
-    pub fn has_pending(&self) -> bool {
-        self.pending.is_some()
-    }
     pub fn push(&mut self, input: Input) -> Result<Option<Output>, ()> {
         let reset = self.pending.is_none() && self.previous.is_none();
         if let Some(p) = &self.pending {
-            if input.key as u64 != p.input.key as u64 + 1 {
+            if p.input.key.checked_add(1) != Some(input.key) {
                 return Err(());
             }
         }
@@ -89,8 +91,13 @@ impl Planner {
         let mut scores = [0.0; 3];
         let mut base = 0;
         for a in 0..3 {
-            let raw =
-                trials[a].process_with_action(&pending.input.controls, true, true, Some(4 * a))?;
+            let raw = trials[a].process_explicit(
+                &pending.input.controls,
+                Some(4 * a),
+                Some(&pending.input.source),
+                None,
+                true,
+            )?;
             if a != 0 && base != trials[a].original_choice {
                 return Err(());
             }
@@ -108,8 +115,13 @@ impl Planner {
                 let mut minimum = 0.0;
                 for b in 0..3 {
                     let mut future = trials[a].clone();
-                    let raw =
-                        future.process_with_action(&input.controls, true, true, Some(4 * b))?;
+                    let raw = future.process_explicit(
+                        &input.controls,
+                        Some(4 * b),
+                        Some(&input.source),
+                        None,
+                        true,
+                    )?;
                     let pcm = mix(&raw, input);
                     let cost = frame_cost(&pcm, target, Some(&current[a]), self.previous.as_ref());
                     if !cost.is_finite() {
@@ -141,6 +153,7 @@ impl Planner {
         Ok(Some(Output {
             index: pending.input.key,
             pcm: current[chosen],
+            source: self.state.source_trace,
         }))
     }
 }

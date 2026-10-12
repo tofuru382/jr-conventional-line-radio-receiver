@@ -1,5 +1,5 @@
 //! Actual candidate-PCM scoring. Integer centered moments retain exact sums.
-use crate::models::planner_data::measurement_parameters as t;
+use crate::models::planner::measurement_parameters as t;
 use crate::plan_target::Target;
 fn level(pcm: &[i16]) -> f32 {
     let sum: i64 = pcm.iter().map(|&x| x as i64 * x as i64).sum();

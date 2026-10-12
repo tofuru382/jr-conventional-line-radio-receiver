@@ -1,9 +1,8 @@
-//! Indexed receiver with four-frame total lookahead and bounded gap draining.
-use crate::chime::ChimeSynth;
+//! Indexed receiver with seven-frame total lookahead and bounded gap draining.
 use crate::correction::Correction;
 use crate::numeric::Numeric;
-use crate::planner::{Input, Planner};
 use crate::predictor::{Payload, Prediction, Predictor, LOOKAHEAD};
+use crate::synthesis::{Input, Pipeline};
 use crate::vocoder::Pcm;
 
 #[derive(Clone, Copy)]
@@ -20,12 +19,11 @@ pub struct VoiceStream {
     predictor: Predictor,
     correction: Correction,
     numeric: Numeric,
-    planner: Planner,
-    chime: ChimeSynth,
+    pipeline: Pipeline,
     next_index: u64,
     fade_in: bool,
     known_missing: bool,
-    queue: [QueuedFrame; LOOKAHEAD + 2],
+    queue: [QueuedFrame; LOOKAHEAD + 5],
     head: usize,
     count: usize,
     last_fed: Option<u32>,
@@ -41,15 +39,14 @@ impl Default for VoiceStream {
             predictor: Predictor::default(),
             correction: Correction::default(),
             numeric: Numeric::default(),
-            planner: Planner::default(),
-            chime: ChimeSynth::default(),
+            pipeline: Pipeline::default(),
             next_index: 0,
             fade_in: false,
             known_missing: false,
             queue: [QueuedFrame {
                 payload: [0; 20],
                 index: 0,
-            }; LOOKAHEAD + 2],
+            }; LOOKAHEAD + 5],
             head: 0,
             count: 0,
             last_fed: None,
@@ -90,12 +87,11 @@ impl VoiceStream {
         self.known_missing = true;
         self.advance()
     }
-    fn can_produce(&self, budget: usize, before: u32) -> bool {
-        budget != 0 && (self.synthesized == before || !self.planner.has_pending())
+    fn can_produce(&self, before: u32) -> bool {
+        self.synthesized == before || !self.pipeline.has_pending()
     }
     pub fn advance(&mut self) -> Result<(), ()> {
         let before = self.synthesized;
-        let mut budget = 1;
         while self.count != 0 {
             let frame = self.queue[self.head];
             let gap = self
@@ -103,31 +99,35 @@ impl VoiceStream {
                 .is_some_and(|last| frame.index as u64 != last as u64 + 1);
             if gap {
                 if self.predictor.pending() != 0 {
-                    if !self.can_produce(budget, before) {
+                    if !self.can_produce(before) {
                         return Ok(());
                     }
                     let p = self.predictor.emit()?;
                     self.render(p, true)?;
-                    budget -= 1;
                     continue;
                 }
-                if self.planner.has_pending() {
+                if self.pipeline.has_pending() {
                     if self.synthesized != before {
                         return Ok(());
                     }
-                    if let Some(output) = self.planner.finish()? {
-                        self.emit(output)?;
+                    if let Some(output) = self.pipeline.finish()? {
+                        self.emit(Output {
+                            index: u32::try_from(output.index).map_err(|_| ())?,
+                            pcm: output.pcm,
+                        })?;
+                    }
+                    if self.pipeline.has_pending() {
+                        return Ok(());
                     }
                 }
                 self.predictor.reset();
                 self.correction.reset();
-                self.chime.reset();
-                self.planner = Planner::default();
+                self.pipeline = Pipeline::default();
                 self.fade_in = true;
                 self.last_fed = None;
             }
             let will_produce = self.predictor.pending() == LOOKAHEAD;
-            if will_produce && !self.can_produce(budget, before) {
+            if will_produce && !self.can_produce(before) {
                 return Ok(());
             }
             if self.last_fed.is_none() {
@@ -136,14 +136,13 @@ impl VoiceStream {
             if let Some(p) = self.predictor.decode(&frame.payload)? {
                 self.render(p, false)?;
             }
-            budget -= usize::from(will_produce);
             self.last_fed = Some(frame.index);
             self.head = (self.head + 1) % self.queue.len();
             self.count -= 1;
         }
         // A missing slot proves a discontinuity, but retain the final control until
         // EOF or a restart determines whether its trailing fade is required.
-        if self.known_missing && self.predictor.pending() > 1 && self.can_produce(budget, before) {
+        if self.known_missing && self.predictor.pending() > 1 && self.can_produce(before) {
             let p = self.predictor.emit()?;
             self.render(p, false)?;
         }
@@ -160,8 +159,11 @@ impl VoiceStream {
             let p = self.predictor.emit()?;
             self.render(p, false)?;
         }
-        if let Some(output) = self.planner.finish()? {
-            self.emit(output)?;
+        while let Some(output) = self.pipeline.finish()? {
+            self.emit(Output {
+                index: u32::try_from(output.index).map_err(|_| ())?,
+                pcm: output.pcm,
+            })?;
         }
         Ok(())
     }
@@ -169,23 +171,22 @@ impl VoiceStream {
         let corrected = self
             .correction
             .process(&p.bits, &p.controls, &mut self.numeric)?;
-        self.chime.render(&p.controls, &p.periods, p.chime)?;
-        let (weight, offset) = self.chime.mix_coefficients(p.chime_end);
         let mut payload = [0; 20];
         for i in 0..158 {
             payload[i / 8] |= p.bits[i] << (i % 8);
         }
         let input = Input {
-            key: u32::try_from(self.next_index).map_err(|_| ())?,
+            key: self.next_index,
             payload,
             controls: corrected,
-            weight,
-            offset,
             fade_in: self.fade_in,
             fade_out: draining_gap && self.predictor.pending() == 0,
         };
-        if let Some(output) = self.planner.push(input)? {
-            self.emit(output)?;
+        if let Some(output) = self.pipeline.push(input)? {
+            self.emit(Output {
+                index: u32::try_from(output.index).map_err(|_| ())?,
+                pcm: output.pcm,
+            })?;
         }
         self.fade_in = false;
         self.next_index += 1;

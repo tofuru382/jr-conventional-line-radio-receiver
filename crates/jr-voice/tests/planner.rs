@@ -37,12 +37,12 @@ fn decode_indices(events: &[Event]) -> Vec<u32> {
 }
 
 #[test]
-fn first_frame_waits_for_four_future_frames_and_flush_keeps_tail() {
+fn first_frame_waits_for_seven_future_frames_and_flush_keeps_tail() {
     let mut voice = Voice::default();
-    for i in 0..5 {
+    for i in 0..8 {
         voice.push(i, Some(payload(i as u8))).unwrap();
-        if i < 4 {
-            assert!(voice.read().is_none(), "160 ms synthesis lookahead");
+        if i < 7 {
+            assert!(voice.read().is_none(), "280 ms synthesis lookahead");
         }
     }
     assert_eq!(voice.read().unwrap().index, 0);
@@ -50,12 +50,12 @@ fn first_frame_waits_for_four_future_frames_and_flush_keeps_tail() {
     voice.flush().unwrap();
     let mut indices = Vec::new();
     drain_indices(&mut voice, &mut indices);
-    assert_eq!(indices, [1, 2, 3, 4]);
+    assert_eq!(indices, [1, 2, 3, 4, 5, 6, 7]);
 }
 
 #[test]
 fn short_calls_emit_every_accepted_frame_at_eof() {
-    for length in 1..=4 {
+    for length in 1..=7 {
         let events: Vec<_> = (0..length)
             .map(|i| (42 + i, Some(payload(i as u8))))
             .collect();

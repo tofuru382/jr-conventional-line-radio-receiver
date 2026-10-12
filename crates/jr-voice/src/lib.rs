@@ -1,8 +1,9 @@
 //! Rust CELP decoder, C ABI 2. Radio/channel decoding belongs to the receiver host.
 // Explicit indexed loops make the binary32 reduction order auditable.
 #![allow(clippy::needless_range_loop)]
-mod chime;
+mod celp;
 mod correction;
+mod excitation;
 mod models;
 mod numeric;
 mod plan_acoustics;
@@ -11,7 +12,11 @@ mod plan_target;
 mod planner;
 mod predictor;
 pub mod receiver;
+mod source_features;
 mod stream;
+mod synthesis;
+mod synthesis_models;
+mod synthesis_parameters;
 #[cfg(test)]
 mod tests;
 mod vocoder;

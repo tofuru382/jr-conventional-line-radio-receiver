@@ -1,0 +1,10 @@
+pub const SUBFRAME: usize = 80;
+pub const LPC_ORDER: usize = 10;
+pub mod codebook;
+pub mod excitation;
+pub mod fixed;
+pub mod lsp;
+pub mod pitch;
+pub mod postfilter;
+pub mod synth;
+pub mod tables;
