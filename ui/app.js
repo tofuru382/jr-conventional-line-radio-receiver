@@ -362,6 +362,7 @@ function setControls() {
   $("selected-format").disabled = running || busy || !channels.length;
   $("preferences-retry").disabled = busy || (preferencesLoadFailed && running);
   $("total-enabled").textContent = enabled.size;
+  renderMute();
   $("audio-state").textContent = !$("listen").checked
     ? "消音中"
     : nativeAudio
@@ -1138,12 +1139,54 @@ $("driver-start").addEventListener("click", async () => {
     fail(e);
   }
 });
+const androidName = "JR-CLRR For Android";
 // Android: drop the SoapySDR source and the desktop file/folder pickers, whose
 // results (content:// URIs) cannot be opened as paths. Paths can still be typed.
+// The phone layout also has no search features, only the detailed channel
+// list, and a mute toggle in the top bar.
 function applyAndroidLayout() {
+  document.documentElement.classList.add("android");
   $("input-kind").querySelector('option[value="sdr"]')?.remove();
   for (const id of ["browse", "record-browse", "preset-browse"])
     $(id).hidden = true;
+  // No route picker or channel search.
+  $("route-open").hidden = true;
+  $("route-feedback").hidden = true;
+  $("channel-search").closest("label").hidden = true;
+  $("filter-note").hidden = true;
+  // Detailed list only.
+  setChannelView(false);
+  $("view-detailed").closest(".view-switch").hidden = true;
+  // Mute toggle next to start/stop; the listen checkbox stays the source of truth.
+  const mute = el("button", undefined, "mute-toggle");
+  mute.id = "mute-toggle";
+  mute.type = "button";
+  mute.addEventListener("click", () => {
+    $("listen").checked = !$("listen").checked;
+    $("listen").dispatchEvent(new Event("change"));
+    renderMute();
+  });
+  $("state").after(mute);
+  $("listen").closest(".listening-control").hidden = true;
+  renderMute();
+  // Name.
+  document.title = androidName;
+  document.querySelector(".topbar h1").textContent = androidName;
+  document.querySelector(".topbar .eyebrow").textContent =
+    "JR 在来線デジタル列車無線受信";
+  $("about-product").textContent = androidName;
+  $("about-description").textContent =
+    "KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした Android 版";
+  document.querySelector("footer > span").firstChild.textContent =
+    `${androidName} `;
+}
+function renderMute() {
+  const mute = $("mute-toggle");
+  if (!mute) return;
+  const muted = !$("listen").checked;
+  mute.setAttribute("aria-pressed", String(muted));
+  mute.textContent = muted ? "ミュート中" : "音声オン";
+  mute.title = muted ? "タップで音声を再開" : "タップでミュート";
 }
 function adoptAndroidDefaults() {
   let changed = false;

@@ -406,6 +406,37 @@ test("Android plays audio natively and holds the background service while receiv
   assert.deepEqual(service, [true, false]);
   assert.equal(monitor().enabled, false);
 });
+test("Android layout has no search, only the detailed list, a top mute toggle and its own name", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.ok(app.w.document.documentElement.classList.contains("android"));
+  assert.equal($("route-open").hidden, true);
+  assert.equal($("channel-search").closest("label").hidden, true);
+  assert.equal($("view-detailed").closest(".view-switch").hidden, true);
+  assert.equal($("channels-table").hidden, false);
+  assert.equal($("channels-simple").hidden, true);
+  assert.equal(app.w.document.title, "JR-CLRR For Android");
+  assert.equal(app.w.document.querySelector(".topbar h1").textContent, "JR-CLRR For Android");
+  const mute = $("mute-toggle");
+  assert.equal(mute.parentElement, $("state").parentElement);
+  assert.equal($("listen").closest(".listening-control").hidden, true);
+  $("listen").checked = true; // the harness starts muted without a change event
+  await app.click("start");
+  await app.poll();
+  assert.equal(mute.getAttribute("aria-pressed"), "false");
+  assert.equal(mute.textContent, "音声オン");
+  const monitor = () =>
+    app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args.settings;
+  assert.equal(monitor().enabled, true);
+  mute.click();
+  assert.equal($("listen").checked, false);
+  assert.equal(mute.getAttribute("aria-pressed"), "true");
+  assert.equal(mute.textContent, "ミュート中");
+  assert.equal(monitor().enabled, false);
+  mute.click();
+  assert.equal($("listen").checked, true);
+  assert.equal(monitor().enabled, true);
+});
 test("Android reports a missing driver app", async (t) => {
   const app = await setup(t, {
     configureConnection: false,
@@ -435,6 +466,8 @@ test("desktop keeps SoapySDR and pickers and never shows the driver button", asy
   await app.click("stop");
   assert.ok($("input-kind").querySelector('option[value="sdr"]'));
   assert.equal($("driver-group").hidden, true);
+  assert.equal($("mute-toggle"), null);
+  assert.equal($("route-open").hidden, false);
   for (const id of ["browse", "record-browse", "preset-browse"])
     assert.equal($(id).hidden, false, id);
 });

@@ -1536,3 +1536,30 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   .route-heading { flex-wrap: wrap; }
   .route-actions > div > button { width: 100%; }
 }
+
+/* Android: mute toggle in the top bar. */
+.mute-toggle {
+  min-width: 7.5em;
+}
+.mute-toggle[aria-pressed="true"] {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+.android .session {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+.android .session > * {
+  width: 100%;
+  justify-content: center;
+}
+.android #channels-table .channel-lines {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
