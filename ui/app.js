@@ -15,7 +15,19 @@ const androidDriver = { host: "127.0.0.1", port: "1234" };
 // keeps a foreground service running while receiving.
 let nativeAudio = false,
   nativeMonitorState = "",
-  serviceReceiving = false;
+  serviceReceiving = false,
+  outputLostSeen = 0,
+  audioNotice = "";
+// The native player silences itself when headphones/Bluetooth disconnect;
+// reflect that by turning "listen" off until the user turns it back on.
+function handleOutputLost(events) {
+  if (!nativeAudio || !(events > outputLostSeen)) return;
+  outputLostSeen = events;
+  if (!$("listen").checked) return;
+  $("listen").checked = false;
+  audioNotice = "イヤホンの接続が切れたため消音しました";
+  syncNativeMonitor();
+}
 function syncNativeMonitor() {
   if (!nativeAudio) return;
   const settings = {
@@ -343,7 +355,7 @@ function setControls() {
   $("preferences-retry").disabled = busy || (preferencesLoadFailed && running);
   $("total-enabled").textContent = enabled.size;
   $("audio-state").textContent = !$("listen").checked
-    ? "消音中"
+    ? audioNotice || "消音中"
     : nativeAudio
       ? "音声オン"
       : audioPlayer?.active
@@ -1237,6 +1249,7 @@ $("stop").addEventListener("click", async () => {
   }
 });
 $("listen").addEventListener("change", () => {
+  audioNotice = "";
   syncNativeMonitor();
   resetAudio();
   prepareAudio().catch(fail);
@@ -1312,6 +1325,7 @@ async function poll() {
         if (s.recording) recordingStatus = s.recording;
         running = s.running;
         syncBackgroundService();
+        handleOutputLost(result.audio_output_lost_events);
         const selectionCurrent = revision === selectionRevision;
         if (
           selectionCurrent &&

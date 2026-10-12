@@ -4,9 +4,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -23,7 +26,32 @@ import androidx.core.content.ContextCompat
 class ReceiverService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
 
+  // Headphones unplugged or Bluetooth disconnected: Android would route the
+  // monitor to the loudspeaker. Silence it instead (e.g. on a crowded train).
+  private val becomingNoisy =
+    object : BroadcastReceiver() {
+      override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+          try {
+            NativeBridge.audioBecomingNoisy()
+          } catch (e: UnsatisfiedLinkError) {
+            // Library not loaded yet: nothing is playing.
+          }
+        }
+      }
+    }
+
   override fun onBind(intent: Intent?): IBinder? = null
+
+  override fun onCreate() {
+    super.onCreate()
+    ContextCompat.registerReceiver(
+      this,
+      becomingNoisy,
+      IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY),
+      ContextCompat.RECEIVER_NOT_EXPORTED,
+    )
+  }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val type =
@@ -46,6 +74,7 @@ class ReceiverService : Service() {
   }
 
   override fun onDestroy() {
+    unregisterReceiver(becomingNoisy)
     wakeLock?.let { if (it.isHeld) it.release() }
     wakeLock = null
     super.onDestroy()

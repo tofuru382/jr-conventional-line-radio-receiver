@@ -155,7 +155,11 @@ fn snapshot(
                 automatic.unwrap_or(false),
                 audio.unwrap_or(true),
             );
-            Ok(serde_json::json!({"status":status,"audio":audio}))
+            Ok(serde_json::json!({
+                "status": status,
+                "audio": audio,
+                "audio_output_lost_events": native_audio::output_lost_events(),
+            }))
         }
     }
 }

@@ -405,6 +405,33 @@ test("Android plays audio natively and holds the background service while receiv
   assert.deepEqual(service, [true, false]);
   assert.equal(monitor().enabled, false);
 });
+test("Android turns listening off when the native player loses its headphones", async (t) => {
+  const app = await setup(t, {
+    platformInfo: { android: true, soapy: false },
+  });
+  app.$("listen").checked = true;
+  await app.click("start");
+  await app.poll();
+  const monitor = () =>
+    app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args
+      .settings;
+  assert.equal(monitor().enabled, true);
+  app.setSnapshot({ status: status(), audio: [], audio_output_lost_events: 1 });
+  await app.poll();
+  assert.equal(app.$("listen").checked, false);
+  assert.equal(monitor().enabled, false);
+  assert.equal(
+    app.$("audio-state").textContent,
+    "イヤホンの接続が切れたため消音しました",
+  );
+  // The same loss is reported once; turning listening back on resumes.
+  app.$("listen").checked = true;
+  app.$("listen").dispatchEvent(new app.w.Event("change"));
+  await app.poll();
+  assert.equal(app.$("listen").checked, true);
+  assert.equal(monitor().enabled, true);
+  assert.equal(app.$("audio-state").textContent, "音声オン");
+});
 test("Android reports a missing driver app", async (t) => {
   const app = await setup(t, {
     configureConnection: false,

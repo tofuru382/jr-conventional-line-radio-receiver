@@ -24,3 +24,7 @@
 -keepclassmembers class io.jrradio.receiver.MainActivity$Bridge {
     @android.webkit.JavascriptInterface <methods>;
 }
+# JNI entry points implemented in Rust (native_audio.rs).
+-keepclasseswithmembernames class io.jrradio.receiver.NativeBridge {
+    native <methods>;
+}

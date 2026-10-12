@@ -4,7 +4,37 @@
 //! Android the selected channel is played here instead of through Web Audio.
 //! The UI only reports what to play; a dedicated thread drains the session's
 //! monitor queue and writes PCM to the device, with the screen on or off.
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
+};
+
+/// Set when the audio route is lost (headphones unplugged, Bluetooth dropped).
+/// Playback then stays silent rather than falling back to the loudspeaker,
+/// until the user turns listening on again.
+static OUTPUT_LOST: AtomicBool = AtomicBool::new(false);
+/// Counts route losses so the UI can notice each one exactly once.
+static OUTPUT_LOST_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn mark_output_lost() {
+    OUTPUT_LOST.store(true, Ordering::SeqCst);
+    OUTPUT_LOST_EVENTS.fetch_add(1, Ordering::SeqCst);
+}
+pub fn output_lost_events() -> u64 {
+    OUTPUT_LOST_EVENTS.load(Ordering::SeqCst)
+}
+
+/// Called by NativeBridge.audioBecomingNoisy() (Kotlin) when Android reports
+/// AudioManager.ACTION_AUDIO_BECOMING_NOISY.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_io_jrradio_receiver_NativeBridge_audioBecomingNoisy(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+) {
+    mark_output_lost();
+}
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 pub struct Settings {
@@ -25,7 +55,14 @@ pub struct NativeMonitor {
 
 impl NativeMonitor {
     pub fn update(&self, settings: Settings, receiver: &crate::Receiver) -> Result<(), String> {
-        *self.settings.lock().map_err(|e| e.to_string())? = settings;
+        {
+            let mut current = self.settings.lock().map_err(|e| e.to_string())?;
+            // Turning listening back on is the user's consent to play again.
+            if settings.enabled && !current.enabled {
+                OUTPUT_LOST.store(false, Ordering::SeqCst);
+            }
+            *current = settings;
+        }
         #[cfg(target_os = "android")]
         {
             let (settings, receiver) = (self.settings.clone(), receiver.clone());
@@ -55,13 +92,13 @@ impl NativeMonitor {
 
 #[cfg(target_os = "android")]
 mod android {
-    use super::Settings;
+    use super::{mark_output_lost, Settings, OUTPUT_LOST};
     use ndk::audio::{
         AudioDirection, AudioFormat, AudioPerformanceMode, AudioSharingMode, AudioStream,
         AudioStreamBuilder,
     };
     use std::{
-        sync::{Arc, Mutex},
+        sync::{atomic::Ordering, Arc, Mutex},
         time::{Duration, Instant},
     };
 
@@ -118,8 +155,9 @@ mod android {
                     .unwrap_or_default(),
                 Err(_) => Vec::new(),
             };
-            if !current.enabled || audio.is_empty() {
-                if stream.is_some() && (!current.enabled || last_audio.elapsed() > IDLE_CLOSE) {
+            let enabled = current.enabled && !OUTPUT_LOST.load(Ordering::SeqCst);
+            if !enabled || audio.is_empty() {
+                if stream.is_some() && (!enabled || last_audio.elapsed() > IDLE_CLOSE) {
                     stream = None;
                 }
                 std::thread::sleep(Duration::from_millis(20));
@@ -141,9 +179,11 @@ mod android {
                 scaled.clear();
                 scaled.extend(frame.pcm.iter().map(|&s| (s as f32 * gain) as i16));
                 if let Err(e) = write(stream.as_ref().unwrap(), &scaled) {
-                    // e.g. headphones unplugged: reopen on the next frame.
+                    // Usually the output device went away. Never reopen on
+                    // whatever route is left (the loudspeaker) by ourselves.
                     eprintln!("audio monitor: {e}");
                     stream = None;
+                    mark_output_lost();
                     break;
                 }
             }
