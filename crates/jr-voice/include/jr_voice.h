@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 /* ABI 2. Seven uint32_t fields; size is 28 bytes. Radio acceptance and
- * corrected-bit statistics belong to the managed frame decoder. */
+ * corrected-bit statistics belong to the receiver frame decoder. */
 typedef struct {
     uint32_t finished, failed, synthesized, output,
         last_decode_us, maximum_frame_us, maximum_flush_us;
@@ -26,6 +26,8 @@ JR_VOICE_API int32_t JR_VOICE_CALL jr_voice_reset(void *handle);
 /* Serialized access; no retained caller buffers. Process 158 CELP bits packed
  * LSB-first into 20 bytes (top two bits must be zero). Indices strictly increase
  * across both process and advance. Drain read() after process/advance/flush.
+ * Continuous input has four frames (160 ms) of lookahead; the first output
+ * arrives on the fifth accepted contiguous frame. Flush emits the tail.
  * Result: 0 success; negative means invalid call/payload (-1), stream state
  * (-2), undrained output (-3), or internal failure (-4). Internal failures
  * require reset; Rust panics do not cross this C ABI. */

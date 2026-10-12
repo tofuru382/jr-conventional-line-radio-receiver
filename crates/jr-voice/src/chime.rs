@@ -1,6 +1,6 @@
-//! Classify and synthesize the two production chime families.
+//! Classify and synthesize chimes for passenger broadcasts and call channels.
 use crate::models::chime_data as m;
-use crate::numeric::{round_even, sample, PI};
+use crate::numeric::{sample, PI};
 use crate::predictor::{native_bit, Controls, FeatureRecord};
 use crate::vocoder::{Pcm, Vocoder, VoiceNoise};
 
@@ -30,7 +30,7 @@ fn evidence(records: &mut [FeatureRecord], index: usize) {
         for (j, &local) in POSITIONS.iter().enumerate() {
             word |= u32::from(records[index].features[40 + native_bit(half, local)] < 0.0) << j;
         }
-        m::RY_PATTERNS
+        m::PASSENGER_BROADCAST_PATTERNS
             .iter()
             .any(|&target| (word ^ target).count_ones() <= 2)
     });
@@ -71,7 +71,7 @@ fn features(controls: &Controls, periods: &[f32; 4]) -> [f32; 76] {
     output
 }
 pub struct ChimeSynth {
-    ry: Vocoder,
+    passenger_broadcast: Vocoder,
     noise: VoiceNoise,
     noise_history: [f32; 64],
     phase: [f32; 11],
@@ -84,7 +84,7 @@ pub struct ChimeSynth {
 impl Default for ChimeSynth {
     fn default() -> Self {
         Self {
-            ry: Vocoder::default(),
+            passenger_broadcast: Vocoder::default(),
             noise: VoiceNoise::default(),
             noise_history: [0.0; 64],
             phase: [0.0; 11],
@@ -100,22 +100,23 @@ impl ChimeSynth {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
-    fn dch(&mut self, input: &[f32; 76]) -> Result<Pcm, ()> {
+    fn call_channel(&mut self, input: &[f32; 76]) -> Result<Pcm, ()> {
         let mut pcm = [0; 320];
         for h in 0..2 {
             let normalized: [f32; 38] = std::array::from_fn(|j| {
-                ((input[h * 38 + j] - m::D_MEAN[j]) / m::D_SCALE[j]).clamp(-6.0, 6.0)
+                ((input[h * 38 + j] - m::CALL_CHANNEL_MEAN[j]) / m::CALL_CHANNEL_SCALE[j])
+                    .clamp(-6.0, 6.0)
             });
-            let mut target = m::D_BIAS;
+            let mut target = m::CALL_CHANNEL_BIAS;
             for k in 0..24 {
                 let mut distance = 0.0;
                 for j in 0..38 {
-                    let delta = normalized[j] - m::D_CENTERS[k * 38 + j];
+                    let delta = normalized[j] - m::CALL_CHANNEL_CENTERS[k * 38 + j];
                     distance += delta * delta;
                 }
-                let weight = (-distance / m::D_WIDTH[0]).exp();
+                let weight = (-distance / m::CALL_CHANNEL_WIDTH[0]).exp();
                 for j in 0..12 {
-                    target[j] += weight * m::D_WEIGHT[k * 12 + j];
+                    target[j] += weight * m::CALL_CHANNEL_WEIGHT[k * 12 + j];
                 }
             }
             for x in &mut target {
@@ -124,13 +125,13 @@ impl ChimeSynth {
             let mut fundamental = [0.0; 4];
             let mut peak = 0.0_f32;
             for j in 0..11 {
-                if m::D_HARMONICS[j] == 1 {
-                    fundamental[m::D_BANKS[j] as usize] = target[j];
+                if m::CALL_CHANNEL_HARMONICS[j] == 1 {
+                    fundamental[m::CALL_CHANNEL_BANKS[j] as usize] = target[j];
                     peak = peak.max(target[j]);
                 }
             }
             for j in 0..11 {
-                if fundamental[m::D_BANKS[j] as usize] < 0.12 * peak {
+                if fundamental[m::CALL_CHANNEL_BANKS[j] as usize] < 0.12 * peak {
                     target[j] = 0.0;
                 }
             }
@@ -145,7 +146,7 @@ impl ChimeSynth {
             for j in 0..11 {
                 cosine[j] = self.phase[j].cos();
                 sine[j] = self.phase[j].sin();
-                let step = 2.0 * PI * m::D_FREQUENCY[j] / 8000.0;
+                let step = 2.0 * PI * m::CALL_CHANNEL_FREQUENCY[j] / 8000.0;
                 step_cos[j] = step.cos();
                 step_sin[j] = step.sin();
                 self.phase[j] = (self.phase[j] + 160.0 * step) % (2.0 * PI);
@@ -166,7 +167,7 @@ impl ChimeSynth {
                 let mut noise = 0.0;
                 for j in 0..64 {
                     noise += self.noise_history[self.noise_cursor.wrapping_sub(j) & 63]
-                        * m::D_IMPULSE[j];
+                        * m::CALL_CHANNEL_IMPULSE[j];
                 }
                 self.noise_cursor = (self.noise_cursor + 1) & 63;
                 value += noise * (self.previous[11] + (target[11] - self.previous[11]) * ramp);
@@ -193,16 +194,17 @@ impl ChimeSynth {
         let x = features(controls, periods);
         self.replacement = if family == 1 {
             if self.family != 1 {
-                self.ry.reset();
+                self.passenger_broadcast.reset();
             }
             let mut modified = *controls;
             for h in 0..2 {
-                let mut y = m::RY_BIAS;
+                let mut y = m::PASSENGER_BROADCAST_BIAS;
                 for k in 0..38 {
-                    let normalized =
-                        ((x[h * 38 + k] - m::RY_MEAN[k]) / m::RY_SCALE[k]).clamp(-6.0, 6.0);
+                    let normalized = ((x[h * 38 + k] - m::PASSENGER_BROADCAST_MEAN[k])
+                        / m::PASSENGER_BROADCAST_SCALE[k])
+                        .clamp(-6.0, 6.0);
                     for j in 0..34 {
-                        y[j] += normalized * m::RY_WEIGHT[k * 34 + j];
+                        y[j] += normalized * m::PASSENGER_BROADCAST_WEIGHT[k * 34 + j];
                     }
                 }
                 for j in 0..2 {
@@ -214,26 +216,29 @@ impl ChimeSynth {
                     modified[6 + h * 32 + j] = y[j + 2].clamp(-4.0, 4.0);
                 }
             }
-            self.ry.process(&modified, true, false)?
+            self.passenger_broadcast.process(&modified, true, false)?
         } else {
-            self.dch(&x)?
+            self.call_channel(&x)?
         };
         self.family = family;
         Ok(())
     }
-    pub fn blend(&self, end: bool, pcm: &mut Pcm) {
-        if self.family == 0 {
-            return;
-        }
-        for (i, x) in pcm.iter_mut().enumerate() {
-            let mut gain = 1.0;
-            if self.old_family != self.family && i < 40 {
-                gain = 0.5 - 0.5 * (PI * i as f32 / 39.0).cos();
+    pub fn mix_coefficients(&self, end: bool) -> ([f32; 320], [f32; 320]) {
+        let mut weight = [1.0; 320];
+        let mut offset = [0.0; 320];
+        if self.family != 0 {
+            for i in 0..320 {
+                let mut gain = 1.0;
+                if self.old_family != self.family && i < 40 {
+                    gain = 0.5 - 0.5 * (PI * i as f32 / 39.0).cos();
+                }
+                if end && i >= 280 {
+                    gain = 0.5 + 0.5 * (PI * (i - 280) as f32 / 39.0).cos();
+                }
+                weight[i] = 1.0 - gain;
+                offset[i] = self.replacement[i] as f32 * gain;
             }
-            if end && i >= 280 {
-                gain = 0.5 + 0.5 * (PI * (i - 280) as f32 / 39.0).cos();
-            }
-            *x = round_even(self.replacement[i] as f32 * gain + *x as f32 * (1.0 - gain)) as i16;
         }
+        (weight, offset)
     }
 }

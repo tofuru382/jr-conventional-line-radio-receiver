@@ -902,9 +902,9 @@ mod tests {
                         },
                     ));
                 }
-                // 560 ms of PCM arrives together, with 120 ms synthesis
+                // 560 ms of PCM arrives together, with 160 ms synthesis
                 // lookahead plus the final 40 ms radio frame already read.
-                c.progress_us = 200_000 + (first + 13) as u64 * 40_000 + 160_000;
+                c.progress_us = 200_000 + (first + 13) as u64 * 40_000 + 200_000;
                 drop(c);
                 let (status, audio) = session.snapshot_with_monitor(Some(id), automatic);
                 assert_eq!(

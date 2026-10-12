@@ -277,6 +277,7 @@
       </section>
       <div class="workspace-navigation">
         <nav aria-label="受信情報への移動">
+          <button id="route-open" type="button" disabled aria-haspopup="dialog">路線から選ぶ</button>
           <a href="#operation-title">運行把握モニタ</a>
           <a href="#messages-title">受信データ</a>
         </nav>
@@ -287,6 +288,7 @@
           <span id="audio-state" class="muted">音声待機</span>
         </div>
       </div>
+      <p id="route-feedback" class="route-feedback" role="status"></p>
       <div class="workspace">
         <div class="workspace-tools">
           <details id="channels-panel" class="card channels panel-disclosure">
@@ -551,7 +553,7 @@
       <footer>
         <span
           >JR Cconventional-line Radio Receiver
-          <span class="version">v1.3.0</span></span
+          <span class="version">v1.4.0</span></span
         >
         <button
           id="about-open"
@@ -581,7 +583,7 @@
       </p>
       <dl class="about-metadata">
         <dt>バージョン</dt>
-        <dd>v1.3.0</dd>
+        <dd>v1.4.0</dd>
         <dt>Author</dt>
         <dd class="about-author">
           <span>KIRISHIKI Yudai</span>
@@ -592,6 +594,45 @@
       </dl>
       <div class="about-actions">
         <button id="about-close" type="button" autofocus>閉じる</button>
+      </div>
+    </dialog>
+    <dialog id="route-dialog" aria-labelledby="route-title" aria-describedby="route-intro">
+      <div class="route-shell">
+        <div class="route-heading">
+          <div><h2 id="route-title">路線から受信対象を選ぶ</h2>
+            <p id="route-intro">区間を選び、対応する音声・データ波をまとめて指定します。</p></div>
+          <button id="route-close" type="button">閉じる</button>
+        </div>
+        <div class="route-content">
+          <section class="route-search-pane" aria-label="路線・区間を探す">
+            <label for="route-profile">受信プリセット<select id="route-profile"></select></label>
+            <label for="route-search">路線名・区間を検索<input id="route-search" type="search" placeholder="例：中央、甲府、D6" autocomplete="off" autofocus aria-describedby="route-search-hint" /></label>
+            <p id="route-search-hint" class="muted">複数選択できます。区間ごとの割当・変則割当を反映します。</p>
+            <p id="route-result-count" class="muted" role="status"></p>
+            <ul id="route-results" aria-label="路線・区間" role="list"></ul>
+            <div id="route-no-results" class="route-empty" hidden>
+              <p>「<span id="route-query"></span>」に一致する区間がありません。</p>
+              <button id="route-search-clear" type="button">検索を解除</button>
+            </div>
+            <p id="route-no-data" class="route-empty" hidden>このプリセットには路線情報がありません。閉じてチャンネル一覧から周波数を選択してください。</p>
+          </section>
+          <section class="route-preview" aria-labelledby="route-preview-title">
+            <div class="route-preview-heading"><h3 id="route-preview-title">受信対象の確認</h3><button id="route-clear" type="button">選択を解除</button></div>
+            <p id="route-selected-count" class="route-selection-count" role="status">0 区間 · 0 波</p>
+            <p id="route-chosen-empty" class="muted">選択した区間がここに表示されます。</p>
+            <ul id="route-chosen" aria-label="選択した区間" role="list"></ul>
+            <label class="check-label route-common-label" for="route-common"><input id="route-common" type="checkbox" aria-describedby="route-common-hint" />旅客一斉情報も受信</label>
+            <p id="route-common-hint" class="muted"></p>
+            <ul id="route-frequencies" aria-label="適用する周波数" role="list"></ul>
+            <p class="route-scope-note">同じ周波数を使う別路線も受信します。掲載区間は電波の到達範囲を示すものではありません。</p>
+          </section>
+        </div>
+        <div class="route-actions">
+          <p id="route-effect"></p>
+          <p id="route-locked" class="field-hint" hidden>受信中・処理中は参照のみできます。受信を停止してから適用してください。</p>
+          <p id="route-error" class="field-error" role="alert" hidden></p>
+          <div><button id="route-cancel" type="button">キャンセル</button><button id="route-apply" type="button" class="primary">受信対象に適用</button></div>
+        </div>
       </div>
     </dialog>
   </body>

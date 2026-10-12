@@ -233,7 +233,7 @@ impl Pipeline {
         audio.extend(self.flush_idle(frame.bit_offset)?);
         Ok(audio)
     }
-    // Drain the 120 ms synthesis lookahead after 100 ms without voice. This
+    // Drain the 160 ms synthesis lookahead after 100 ms without voice. This
     // does not end the inferred call: the monitor allows a full second of loss.
     fn flush_idle(&mut self, bit_offset: u64) -> Result<Vec<Audio>, String> {
         if self

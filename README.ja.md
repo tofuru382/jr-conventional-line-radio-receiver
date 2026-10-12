@@ -2,7 +2,7 @@
 
 [English](README.md) | 日本語
 
-バージョン: **v1.3.0**
+バージョン: **v1.4.0**
 
 Author: KIRISHIKI Yudai <yudai.kirishiki@protonmail.com>
 
@@ -28,7 +28,7 @@ cargo run --release -p jr-receiver-desktop
 
 受信処理には `--release` を使用してください。`Cargo.lock` を同梱しています。
 GitHub Actions で Linux x86_64、Windows x64、macOS Apple Silicon / Intel の GUI・CLI バイナリを生成します。
-手動実行は成果物の生成のみ、`v1.3.0` のようなバージョンと一致するタグの push は GitHub Release への公開まで行います。
+手動実行は成果物の生成のみ、`v1.4.0` のようなバージョンと一致するタグの push は GitHub Release への公開まで行います。
 Windows 版は SoapySDR DLL を同梱し、Linux / macOS はシステムの SoapySDR 0.8 を使用します。
 ビルド方法・実行時の依存関係・CI / 公開手順は [リリースガイド](docs/RELEASE.ja.md) を参照してください。
 ローカルでのビルド・起動確認は Linux のみで、インストーラーの生成・配布者による署名・公証は行いません。
@@ -36,7 +36,7 @@ Windows 版は SoapySDR DLL を同梱し、Linux / macOS はシステムの Soap
 ## 同時受信
 
 設定は [`ui/radio-presets.json`](ui/radio-presets.json) の独自 JSON です。チャンネル定義と受信プロファイルを分離し、
-GUI / CLI の組み込みプリセットとして共用します。参照 TOML のコピーや変換には依存しません。
+GUI / CLI の組み込みプリセットとして共用します。
 デスクトップアプリでは同じ形式の外部 JSON ファイルも読み込めます。外部ファイルの変更に再ビルドは不要です。
 外部ファイルは、停止中に「チャンネル一覧」→「プリセットファイル」→「JSON ファイルを選択」から読み込みます。
 同じ場所の「再読み込み」で編集を反映し、「組み込みに戻す」で標準の3社へ戻せます。
@@ -45,6 +45,7 @@ GUI / CLI の組み込みプリセットとして共用します。参照 TOML �
    ローカル SDR は「SoapySDR デバイス」に切り替え、「検索」で選択します。
    必要なら詳細設定に SoapySDR 引数、RX 番号、アンテナを指定します。
 2. 受信プリセットを選び、受信する波をチェックします。初期状態は JR 東日本の割当22波です。
+   **「路線から選ぶ」**はチャンネル一覧を開かずに使えます。路線名・区間の駅名・D番号で検索し、複数区間を選んで周波数を確認してから適用します。受信は「受信を開始」を押して開始します。[路線選択と外部ファイルへの路線情報の追加](docs/ROUTES.ja.md)も参照してください。
    組み込みプロファイルは JR 東日本（22波）・JR 東海（3波）・JR 西日本（19波）の3種類です。各社の割当周波数だけを含みます。
    一覧は **「簡易」表示**が初期値です。周波数・割当・同期状態をタイルで表示し、画面幅に応じて列数を調整します。
    「詳細」に切り替えると、形式・音声件数・データ件数を表で確認できます。切替は受信・録音・選択波・検索条件に影響しません。
@@ -168,7 +169,7 @@ UTF-8、1行1オブジェクトです。約500 msごとと停止時にバッフ�
 | `raw-frames.jsonl` | 同期器が切り出した48バイトの無線フレームを、受信順のまま96桁の `raw_hex` に格納。デスクランブル・訂正前の値を保持し、音声・データの検証に失敗したフレームも含む。IQ サンプルそのものではない。 |
 | `data-messages.jsonl` | 復号器が出力した電文ごとの `message`。種別、識別子、送信日時（取得できた場合）、復号した項目、電文の `raw_hex`、フレーム範囲を保持。音声チャンネル情報や未解釈の電文種別も含む。分割電文は組み立て完了時に出力。 |
 
-運行把握電文は `message.kind: "OperationSummary"` と、追加の `message.operation_summary` に出力します。`rows` には `line`（線区）、`delayed`（遅延数）、`on_line`（在線数）、`delay_classes`（3～9分・10～19分・20分以上の順）、`max_delay_min`（最大遅延分）、`train_no`（列車番号）、行の元データ `raw_hex` を格納します。未提供の数値・列車番号はJSONの `null` です。`message.timestamp` は運行把握電文では常にJSONの `null` とし、外側の `received_at` はPCでの復号日時です。未解明の前置部を日時として解釈・検証せず、受信日時による代用もしません。`message.raw_hex` は結合後の圧縮本文、`prefix_hex` は前置部、`expanded_hex` は展開後の表を保持します。`prefix_sum_matches` は観測された加算値との一致だけを示し、一般則が未確定のため、追加の検証済みチェックサムとは扱いません。遅延階級の表記は提示された参照画面に基づきます。
+運行把握電文は `message.kind: "OperationSummary"` と、追加の `message.operation_summary` に出力します。`rows` には `line`（線区）、`delayed`（遅延数）、`on_line`（在線数）、`delay_classes`（3～9分・10～19分・20分以上の順）、`max_delay_min`（最大遅延分）、`train_no`（列車番号）、行の元データ `raw_hex` を格納します。未提供の数値・列車番号はJSONの `null` です。`message.timestamp` は運行把握電文では常にJSONの `null` とし、外側の `received_at` はPCでの復号日時です。未解明の前置部を日時として解釈・検証せず、受信日時による代用もしません。`message.raw_hex` は結合後の圧縮本文、`prefix_hex` は前置部、`expanded_hex` は展開後の表を保持します。`prefix_sum_matches` は観測された加算値との一致だけを示し、一般則が未確定のため、追加の検証済みチェックサムとは扱いません。
 
 両者とも `schema_version: 1`、`received_at`、`channel_id`、`label`、`frequency_hz`、`format`、
 `epoch`、`index`、`bit_offset` を持ちます。`received_at` は復号時の PC の UTC 時刻で、送信機の時計ではありません。
@@ -205,7 +206,7 @@ cargo run --release -p jr-receiver -- inspect-wave input.wav
 cargo run --release -p jr-receiver -- \
   decode-wave input.wav 352600000 new-output east 10
 
-# 参照プラグインの frames.bin / indices.txt を音声・データへ復号
+# 保存した frames.bin / indices.txt を音声・データへ復号
 cargo run --release -p jr-receiver -- \
   decode-frames captured-stream new-decoded-output slotted
 ```
@@ -227,7 +228,7 @@ cargo run --release -p jr-receiver --no-default-features -- --help
 ## 実装と検証
 
 - `crates/jr-conventional-dsp`：DSP、周波数変換・フィルター・タイミング／搬送波同期・等化。
-- `crates/jr-voice`：CELP 合成。モデルはバイナリ値を維持し、実行ファイルに内蔵。
+- [`crates/jr-voice`](crates/jr-voice/README.md)：純 Rust の CELP 合成、バージョン 1.2.0。現在・次フレームの合成候補を比較します。先読みは合計 160 ms。固定モデル係数は実行ファイルに内蔵します。
   実際の係数は `src/models/` にあります。
 - `crates/receiver-core`：同期、音声チャネル復号、RS / CRC、データ組み立て、LH5、日英テキスト、SoapySDR / RTL-TCP、同時受信ワーカー。
 - `src-tauri` / `ui`：日本語 GUI、受信制御、選択波の Web Audio 再生。
@@ -239,7 +240,7 @@ IQ は一回だけ取得し、参照カウント付きバッファを各チャ�
 IQ キューは各波 8 ブロック、TCP 入力はバーストに備えて 32 ブロックです（240 kS/s 時に最大 1.28 秒）。
 TCP ヘッダー待ちは最大 3 秒、ストリーム無通信は 5 秒でエラーにし、切断を終了状態と区別します。
 UI スナップショットは約 180 ms 間隔、各波のデータ履歴は最大 128 件、音声モニターキューは最大 5 秒です。
-リアルタイム再生は 400 ms の揺らぎ吸収用バッファを確保して開始し、画面の詳細表示を更新する前に、音声出力の時計に沿って PCM を連続して再生予約します。到着が少し遅れても再生中の音声を止めません。受信側と音声出力側の時計の差は再生速度を緩やかに調整して補正し（最大 ±0.5%）、まとめて届く入力と画面更新間隔の揺らぎを吸収できるよう、再生予約は最大 1.5 秒に制限します。これらの調整はモニター再生のみに適用し、録音 WAV のサンプルには影響しません。
+リアルタイム再生は 440 ms の揺らぎ吸収用バッファを確保して開始し、画面の詳細表示を更新する前に、音声出力の時計に沿って PCM を連続して再生予約します。到着が少し遅れても再生中の音声を止めません。受信側と音声出力側の時計の差は再生速度を緩やかに調整して補正し（最大 ±0.5%）、まとめて届く入力と画面更新間隔の揺らぎを吸収できるよう、再生予約は最大 1.5 秒に制限します。これらの調整はモニター再生のみに適用し、録音 WAV のサンプルには影響しません。
 停止時は取得・処理スレッドを join し、再開時には新しい状態を生成します。
 
 ```sh

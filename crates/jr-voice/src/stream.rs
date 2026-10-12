@@ -1,9 +1,10 @@
-//! Indexed payload stream. Gaps drain lookahead, fade edges and reset synthesis.
+//! Indexed receiver with four-frame total lookahead and bounded gap draining.
 use crate::chime::ChimeSynth;
 use crate::correction::Correction;
-use crate::numeric::{round_even, PI};
+use crate::numeric::Numeric;
+use crate::planner::{Input, Planner};
 use crate::predictor::{Payload, Prediction, Predictor, LOOKAHEAD};
-use crate::vocoder::{Pcm, Vocoder};
+use crate::vocoder::Pcm;
 
 #[derive(Clone, Copy)]
 struct QueuedFrame {
@@ -18,12 +19,13 @@ pub struct Output {
 pub struct VoiceStream {
     predictor: Predictor,
     correction: Correction,
-    vocoder: Vocoder,
+    numeric: Numeric,
+    planner: Planner,
     chime: ChimeSynth,
-    held: Option<Output>,
     next_index: u64,
     fade_in: bool,
-    queue: [QueuedFrame; LOOKAHEAD + 1],
+    known_missing: bool,
+    queue: [QueuedFrame; LOOKAHEAD + 2],
     head: usize,
     count: usize,
     last_fed: Option<u32>,
@@ -38,15 +40,16 @@ impl Default for VoiceStream {
         Self {
             predictor: Predictor::default(),
             correction: Correction::default(),
-            vocoder: Vocoder::default(),
+            numeric: Numeric::default(),
+            planner: Planner::default(),
             chime: ChimeSynth::default(),
-            held: None,
             next_index: 0,
             fade_in: false,
+            known_missing: false,
             queue: [QueuedFrame {
                 payload: [0; 20],
                 index: 0,
-            }; LOOKAHEAD + 1],
+            }; LOOKAHEAD + 2],
             head: 0,
             count: 0,
             last_fed: None,
@@ -78,11 +81,20 @@ impl VoiceStream {
         if self.count == self.queue.len() {
             return Err(());
         }
+        self.known_missing = false;
         self.queue[(self.head + self.count) % self.queue.len()] = QueuedFrame { index, payload };
         self.count += 1;
         self.advance()
     }
+    pub fn missing_frame(&mut self) -> Result<(), ()> {
+        self.known_missing = true;
+        self.advance()
+    }
+    fn can_produce(&self, budget: usize, before: u32) -> bool {
+        budget != 0 && (self.synthesized == before || !self.planner.has_pending())
+    }
     pub fn advance(&mut self) -> Result<(), ()> {
+        let before = self.synthesized;
         let mut budget = 1;
         while self.count != 0 {
             let frame = self.queue[self.head];
@@ -91,39 +103,52 @@ impl VoiceStream {
                 .is_some_and(|last| frame.index as u64 != last as u64 + 1);
             if gap {
                 if self.predictor.pending() != 0 {
-                    if budget == 0 {
+                    if !self.can_produce(budget, before) {
                         return Ok(());
                     }
-                    let prediction = self.predictor.emit()?;
-                    self.render(prediction)?;
+                    let p = self.predictor.emit()?;
+                    self.render(p, true)?;
                     budget -= 1;
                     continue;
                 }
-                self.predictor.reset();
-                if let Some(held) = &mut self.held {
-                    fade(&mut held.pcm[240..], false);
+                if self.planner.has_pending() {
+                    if self.synthesized != before {
+                        return Ok(());
+                    }
+                    if let Some(output) = self.planner.finish()? {
+                        self.emit(output)?;
+                    }
                 }
-                self.emit_frame()?;
-                self.vocoder.reset();
+                self.predictor.reset();
                 self.correction.reset();
                 self.chime.reset();
+                self.planner = Planner::default();
                 self.fade_in = true;
                 self.last_fed = None;
             }
-            let will_render = self.predictor.pending() == LOOKAHEAD;
-            if will_render && budget == 0 {
+            let will_produce = self.predictor.pending() == LOOKAHEAD;
+            if will_produce && !self.can_produce(budget, before) {
                 return Ok(());
             }
             if self.last_fed.is_none() {
                 self.next_index = frame.index as u64;
             }
-            if let Some(prediction) = self.predictor.decode(&frame.payload)? {
-                self.render(prediction)?;
+            if let Some(p) = self.predictor.decode(&frame.payload)? {
+                self.render(p, false)?;
             }
-            budget -= usize::from(will_render);
+            budget -= usize::from(will_produce);
             self.last_fed = Some(frame.index);
             self.head = (self.head + 1) % self.queue.len();
             self.count -= 1;
+        }
+        // A missing slot proves a discontinuity, but retain the final control until
+        // EOF or a restart determines whether its trailing fade is required.
+        if self.known_missing && self.predictor.pending() > 1 && self.can_produce(budget, before) {
+            let p = self.predictor.emit()?;
+            self.render(p, false)?;
+        }
+        if self.synthesized.wrapping_sub(before) > 1 {
+            return Err(());
         }
         Ok(())
     }
@@ -132,50 +157,48 @@ impl VoiceStream {
             self.advance()?;
         }
         while self.predictor.pending() != 0 {
-            let prediction = self.predictor.emit()?;
-            self.render(prediction)?;
+            let p = self.predictor.emit()?;
+            self.render(p, false)?;
         }
-        self.emit_frame()
+        if let Some(output) = self.planner.finish()? {
+            self.emit(output)?;
+        }
+        Ok(())
     }
-    fn render(&mut self, p: Prediction) -> Result<(), ()> {
-        self.emit_frame()?;
+    fn render(&mut self, p: Prediction, draining_gap: bool) -> Result<(), ()> {
         let corrected = self
             .correction
-            .process(&p.bits, &p.controls, &mut self.vocoder.numeric)?;
+            .process(&p.bits, &p.controls, &mut self.numeric)?;
         self.chime.render(&p.controls, &p.periods, p.chime)?;
-        let mut pcm = self.vocoder.process(&corrected, true, true)?;
-        self.chime.blend(p.chime_end, &mut pcm);
-        if self.fade_in {
-            fade(&mut pcm[..80], true);
+        let (weight, offset) = self.chime.mix_coefficients(p.chime_end);
+        let mut payload = [0; 20];
+        for i in 0..158 {
+            payload[i / 8] |= p.bits[i] << (i % 8);
+        }
+        let input = Input {
+            key: u32::try_from(self.next_index).map_err(|_| ())?,
+            payload,
+            controls: corrected,
+            weight,
+            offset,
+            fade_in: self.fade_in,
+            fade_out: draining_gap && self.predictor.pending() == 0,
+        };
+        if let Some(output) = self.planner.push(input)? {
+            self.emit(output)?;
         }
         self.fade_in = false;
-        self.held = Some(Output {
-            index: u32::try_from(self.next_index).map_err(|_| ())?,
-            pcm,
-        });
         self.next_index += 1;
+        Ok(())
+    }
+    fn emit(&mut self, frame: Output) -> Result<(), ()> {
+        if self.output_count == self.output.len() {
+            return Err(());
+        }
+        self.output[(self.output_head + self.output_count) % self.output.len()] = frame;
+        self.output_count += 1;
         self.synthesized = self.synthesized.wrapping_add(1);
-        if self.predictor.pending() != 0 {
-            self.emit_frame()?;
-        }
+        self.emitted = self.emitted.wrapping_add(1);
         Ok(())
-    }
-    fn emit_frame(&mut self) -> Result<(), ()> {
-        if let Some(frame) = self.held.take() {
-            if self.output_count == self.output.len() {
-                return Err(());
-            }
-            self.output[(self.output_head + self.output_count) % self.output.len()] = frame;
-            self.output_count += 1;
-            self.emitted = self.emitted.wrapping_add(1);
-        }
-        Ok(())
-    }
-}
-fn fade(pcm: &mut [i16], fade_in: bool) {
-    let denominator = pcm.len().saturating_sub(1).max(1) as f32;
-    for (i, sample) in pcm.iter_mut().enumerate() {
-        let gain = 0.5 - 0.5 * (PI * i as f32 / denominator).cos();
-        *sample = round_even(*sample as f32 * if fade_in { gain } else { 1.0 - gain }) as i16;
     }
 }

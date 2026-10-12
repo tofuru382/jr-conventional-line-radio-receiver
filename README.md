@@ -2,7 +2,7 @@
 
 English | [日本語](README.ja.md)
 
-Version: **v1.3.0**
+Version: **v1.4.0**
 
 Author: KIRISHIKI Yudai <yudai.kirishiki@protonmail.com>
 
@@ -29,7 +29,7 @@ cargo run --release -p jr-receiver-desktop
 
 Use `--release` for reception. The repository includes `Cargo.lock`.
 GitHub Actions builds GUI and CLI binaries for Linux x86_64, Windows x64, and macOS Apple Silicon / Intel.
-Manual workflow runs only generate artifacts. Pushing a tag that matches the product version, such as `v1.3.0`, also publishes a GitHub Release.
+Manual workflow runs only generate artifacts. Pushing a tag that matches the product version, such as `v1.4.0`, also publishes a GitHub Release.
 Windows archives include the SoapySDR DLL; Linux and macOS use the system's SoapySDR 0.8 installation.
 See the [release guide](docs/RELEASE.md) for build instructions, runtime dependencies, CI, and publishing.
 Local build and startup checks have been performed on Linux only. Installers, publisher signatures, and notarization are not provided.
@@ -37,7 +37,7 @@ Local build and startup checks have been performed on Linux only. Installers, pu
 ## Simultaneous reception
 
 [`ui/radio-presets.json`](ui/radio-presets.json) uses a custom JSON structure that separates channel definitions from receive profiles.
-The GUI and CLI share these built-in presets. They do not depend on copying or converting the reference TOML files.
+The GUI and CLI share these built-in presets.
 The desktop app can also load external JSON files with the same structure, without rebuilding.
 While reception is stopped, open “チャンネル一覧” (Channels) → “プリセットファイル” (Preset file) → “JSON ファイルを選択” (Select JSON file).
 Use “再読み込み” (Reload) to apply edits, or “組み込みに戻す” (Restore built-in presets) to return to the three default operator profiles.
@@ -46,6 +46,7 @@ Use “再読み込み” (Reload) to apply edits, or “組み込みに戻す�
    For local hardware, choose “SoapySDR デバイス” (SoapySDR device) and use “検索” (Find) to select a device.
    Advanced settings accept SoapySDR arguments, an RX channel index, and an antenna name.
 2. Choose a receive profile and check the channels to receive. The default is the 22 channels allocated to JR East.
+   Alternatively, select **“路線から選ぶ” (Choose by line)** above the collapsed channel list. Search by line, section endpoint, or D number, select one or more sections, review their frequencies, then apply. Reception starts only when you select “受信を開始”. See [route selection and external route metadata](docs/ROUTES.md).
    The three built-in profiles cover JR East (22 channels), JR Central (3 channels), and JR West (19 channels), with only each operator's allocated frequencies.
    The default “簡易” (Compact) view shows frequency, allocation, and synchronization status in tiles that adapt to the window width.
    “詳細” (Detailed) shows the format and voice/data counts in a table. Switching views does not affect reception, recording, the selected channel, or search filters.
@@ -169,7 +170,7 @@ The UI history limit, paused display, and duplicate aggregation do not affect ou
 | `raw-frames.jsonl` | Each 48-byte radio frame extracted by the synchronizer, retained in reception order as a 96-character `raw_hex` string before descrambling or error correction. Includes frames that fail voice or data validation. Does not contain IQ samples. |
 | `data-messages.jsonl` | One `message` per decoder output, including its type, identity, transmission timestamp when available, decoded fields, message `raw_hex`, and frame range. Includes voice-channel information and uninterpreted message types. Fragmented messages are emitted after assembly. |
 
-Operation tables use `message.kind: "OperationSummary"` and an additional `message.operation_summary` object. Its `rows` contain `line`, `delayed`, `on_line`, `delay_classes` (3–9, 10–19, 20+ minutes), `max_delay_min`, `train_no`, and the original row `raw_hex`; unavailable numeric/train fields are JSON `null`. `message.timestamp` is always JSON `null` for operation tables; the outer `received_at` remains the computer's decoding time. The unknown prefix bytes are not parsed or validated as a date, and reception time is not substituted for message time. `message.raw_hex` preserves the assembled compressed body; `prefix_hex` and `expanded_hex` preserve the prefix and decompressed table. `prefix_sum_matches` records an observed byte-sum relationship whose general protocol meaning is unconfirmed; it is not an additional verified checksum guarantee. The class labels follow the supplied reference display.
+Operation tables use `message.kind: "OperationSummary"` and an additional `message.operation_summary` object. Its `rows` contain `line`, `delayed`, `on_line`, `delay_classes` (3–9, 10–19, 20+ minutes), `max_delay_min`, `train_no`, and the original row `raw_hex`; unavailable numeric/train fields are JSON `null`. `message.timestamp` is always JSON `null` for operation tables; the outer `received_at` remains the computer's decoding time. The unknown prefix bytes are not parsed or validated as a date, and reception time is not substituted for message time. `message.raw_hex` preserves the assembled compressed body; `prefix_hex` and `expanded_hex` preserve the prefix and decompressed table. `prefix_sum_matches` records an observed byte-sum relationship whose general protocol meaning is unconfirmed; it is not an additional verified checksum guarantee.
 
 Both formats include `schema_version: 1`, `received_at`, `channel_id`, `label`, `frequency_hz`, `format`, `epoch`, `index`, and `bit_offset`.
 `received_at` is the computer's UTC time at decoding, not the transmitter's clock.
@@ -207,7 +208,7 @@ cargo run --release -p jr-receiver -- inspect-wave input.wav
 cargo run --release -p jr-receiver -- \
   decode-wave input.wav 352600000 new-output east 10
 
-# Decode frames.bin / indices.txt from the reference plugin into voice and data.
+# Decode saved frames.bin / indices.txt files into voice and data.
 cargo run --release -p jr-receiver -- \
   decode-frames captured-stream new-decoded-output slotted
 ```
@@ -229,7 +230,7 @@ cargo run --release -p jr-receiver --no-default-features -- --help
 ## Implementation and validation
 
 - `crates/jr-conventional-dsp`: DSP for frequency translation, filtering, timing/carrier synchronization, and equalization.
-- `crates/jr-voice`: CELP synthesis. Coefficients retain their binary values and are compiled into the executable from `src/models/`.
+- [`crates/jr-voice`](crates/jr-voice/README.md): pure Rust CELP synthesis, version 1.2.0. The decoder compares current-frame and next-frame synthesis candidates with 160 ms total lookahead. Fixed model coefficients are compiled into the executable.
 - `crates/receiver-core`: synchronization, voice-channel decoding, RS / CRC, data assembly, LH5, Japanese/English text, SoapySDR / RTL-TCP, and concurrent receive workers.
 - `src-tauri` / `ui`: Japanese GUI, reception controls, and Web Audio playback of the selected channel.
 - `crates/receiver-cli`: device enumeration, RTL-TCP monitoring, and IQ / frame-file decoding.
@@ -240,7 +241,7 @@ Source overflow or queue loss invalidates continuity for the affected stream and
 IQ queues hold eight blocks per channel. The TCP input queue holds 32 blocks to absorb bursts, or up to 1.28 seconds at 240 kS/s.
 TCP header reads time out after three seconds; five seconds without stream data is an error. Disconnects are distinguished from normal completion.
 UI snapshots update roughly every 180 ms. Data history is limited to 128 messages per channel, and the audio monitor queue to five seconds.
-Live playback starts with a 400 ms jitter buffer and schedules subsequent PCM frames continuously on the audio clock, before rendering UI details. Small arrival delays do not cancel playing audio. A gradual playback-rate adjustment (at most ±0.5%) compensates for receiver/output clock drift; the scheduled playback queue is capped at 1.5 seconds to accommodate batched input and poll jitter. These adjustments affect monitoring only, not recorded WAV samples.
+Live playback starts with a 440 ms jitter buffer and schedules subsequent PCM frames continuously on the audio clock, before rendering UI details. Small arrival delays do not cancel playing audio. A gradual playback-rate adjustment (at most ±0.5%) compensates for receiver/output clock drift; the scheduled playback queue is capped at 1.5 seconds to accommodate batched input and poll jitter. These adjustments affect monitoring only, not recorded WAV samples.
 Stopping joins input and processing threads. Restarting creates fresh state.
 
 ```sh

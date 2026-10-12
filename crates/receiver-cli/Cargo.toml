@@ -12,4 +12,3 @@ soapy = ["receiver-core/soapy"]
 [dependencies]
 receiver-core = { path = "../receiver-core", default-features = false }
 serde_json.workspace = true
-

@@ -4,6 +4,7 @@ use crate::numeric::{affine, normalize_in_place, sample, Numeric};
 use crate::predictor::Controls;
 pub type Pcm = [i16; 320];
 
+#[derive(Clone)]
 pub struct VoiceNoise {
     state: u128,
 }
@@ -28,7 +29,9 @@ impl VoiceNoise {
             + 2.0 * 3.0_f32.sqrt() * ((self.next_u64() >> 11) as f32 * (1.0 / 9007199254740992.0))
     }
 }
+#[derive(Clone)]
 pub struct Vocoder {
+    pub original_choice: usize,
     pub numeric: Numeric,
     noise: VoiceNoise,
     previous_features: [f32; 28],
@@ -50,6 +53,7 @@ pub struct Vocoder {
 impl Default for Vocoder {
     fn default() -> Self {
         Self {
+            original_choice: 4,
             numeric: Numeric::default(),
             noise: VoiceNoise::default(),
             previous_features: [0.0; 28],
@@ -132,7 +136,7 @@ impl Vocoder {
         }
         self.phase = (self.phase + 80.0 / period) % 1.0;
     }
-    fn apply_policy(&mut self, values: &mut Controls) {
+    fn apply_policy(&mut self, values: &mut Controls, action: Option<usize>) {
         if m::VOICING_ALWAYS_NEUTRAL {
             return;
         }
@@ -167,14 +171,21 @@ impl Vocoder {
         let mut costs = [0.0; 2];
         affine(&input, m::VOICING_WEIGHT, m::VOICING_BIAS.data, &mut costs);
         let (low, high) = (costs[0].clamp(-40.0, 40.0), costs[1].clamp(-40.0, 40.0));
-        let exponent = if low < 0.0 && low <= high {
-            0.5
+        self.original_choice = if low < 0.0 && low <= high {
+            0
         } else if high < 0.0 {
-            2.0
+            8
         } else {
-            return;
+            4
         };
-        for x in &mut values[70..74] {
+        let selected = action.unwrap_or(self.original_choice);
+        for i in 70..74 {
+            let choice = if i < 72 { selected / 3 } else { selected % 3 };
+            if choice == 1 {
+                continue;
+            }
+            let exponent = if choice == 0 { 0.5 } else { 2.0 };
+            let x = &mut values[i];
             *x = (-(exponent * (-x.clamp(0.0, 1.0)).ln_1p()).exp_m1()).clamp(0.0, 1.0);
         }
     }
@@ -212,11 +223,23 @@ impl Vocoder {
         native_period: bool,
         separate_spectra: bool,
     ) -> Result<Pcm, ()> {
+        self.process_with_action(parameters, native_period, separate_spectra, None)
+    }
+    pub fn process_with_action(
+        &mut self,
+        parameters: &Controls,
+        native_period: bool,
+        separate_spectra: bool,
+        action: Option<usize>,
+    ) -> Result<Pcm, ()> {
+        if action.is_some_and(|a| a > 8) {
+            return Err(());
+        }
         if !parameters.iter().all(|x| x.is_finite()) {
             return Err(());
         }
         let mut values = *parameters;
-        self.apply_policy(&mut values);
+        self.apply_policy(&mut values, action);
         self.apply_spectrum(&mut values, separate_spectra);
         let levels: [f32; 4] = std::array::from_fn(|i| values[i].clamp(-120.0, -3.0));
         let mut pcm = [0.0; 320];

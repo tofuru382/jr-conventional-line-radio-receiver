@@ -23,10 +23,8 @@ export function buildCatalog(config) {
           .filter((c) => c.note)
           .map((c) => [String(c.frequency_hz), c.note]),
       ),
-      channel_lines: Object.fromEntries(
-        selected
-          .filter((c) => c.lines)
-          .map((c) => [String(c.frequency_hz), c.lines]),
+      routes: (set.routes ?? []).filter((r) =>
+        [...r.voice_hz, r.data_hz].every((hz) => selected.some((c) => c.frequency_hz === hz)),
       ),
       channels: selected
         .map((c) => ({

@@ -2,6 +2,7 @@ import { makeInput } from "./config.mjs";
 import { buildCatalog } from "./presets.mjs";
 import { AudioPlayer } from "./audio.mjs";
 import { OperationMonitorView } from "./operation-monitor.mjs";
+import { RoutePicker } from "./route-picker.mjs";
 const operationMonitor = new OperationMonitorView(document);
 let sessionReplay = false;
 const $ = (id) => document.getElementById(id);
@@ -87,6 +88,23 @@ let bundledCatalog = [],
 let context, gain, audioPlayer;
 const rows = new Map(),
   messageNodes = new Map();
+const routePicker = new RoutePicker(document, async (preset, selection) => {
+  if (running || busy) throw new Error("受信を停止してから適用してください。");
+  if (preset.id !== activePresetId) {
+    $("region").value = preset.id;
+    await loadPresets(true);
+  }
+  enabled = new Set(selection.channels.map((c) => c.id));
+  // Reception targets do not change the listener's manual audio selection.
+  const names = selection.routes.slice(0, 2).map((r) => `${r.line}（${r.section}）`).join("、");
+  const more = selection.routes.length > 2 ? ` ほか${selection.routes.length - 2}区間` : "";
+  $("route-feedback").textContent =
+    `${names}${more} · ${enabled.size} 波を受信対象にしました。「受信を開始」で受信します。`;
+  setControls();
+  filterRows();
+  await persistPreferences();
+});
+$("route-open").addEventListener("click", () => routePicker.open(activePresetId, enabled));
 const kinds = {
   ServiceInformation: "旅客一斉情報",
   OperationSummary: "運行把握",
@@ -331,6 +349,8 @@ $("preferences-retry").addEventListener("click", async () => {
   } else await flushPreferences();
 });
 function setControls() {
+  $("route-open").disabled = busy || !presetCatalog.length;
+  routePicker.setBlocked(running || busy);
   $("settings").disabled = running || busy;
   $("region").disabled = running || busy || !channels.length;
   $("preset-browse").disabled = !native || running || busy;
@@ -553,18 +573,27 @@ function receiveCheck(c) {
   );
   check.addEventListener("change", () => {
     check.checked ? enabled.add(c.id) : enabled.delete(c.id);
+    $("route-feedback").textContent = "";
     setControls();
   });
   const label = el("label", undefined, "row-check");
   label.append(check);
   return { check, label };
 }
-// Known lines using the channel's group (reference examples, not exhaustive).
+// Lines whose listed sections use this frequency, from the preset's route
+// table (docs/ROUTES.ja.md). The common wave serves every line.
 function channelLines(id) {
-  return (
-    presetCatalog.find((p) => p.id === activePresetId)?.channel_lines?.[id] ??
-    ""
+  const preset = presetCatalog.find((p) => p.id === activePresetId);
+  const channel = channels.find((c) => c.id === id);
+  if (!preset || !channel) return "";
+  if (channel.format === "common") return "全線区共通";
+  const hz = channel.frequency_hz;
+  const lines = new Set(
+    (preset.routes ?? [])
+      .filter((r) => r.data_hz === hz || r.voice_hz.includes(hz))
+      .map((r) => r.line),
   );
+  return [...lines].join("・");
 }
 function channelButton(c, simple = false) {
   const button = el("button", undefined, "channel-select");
@@ -579,7 +608,7 @@ function channelButton(c, simple = false) {
   const lines = channelLines(c.id);
   if (lines) {
     const node = el("span", lines, "channel-lines");
-    node.title = `使用例：${lines}`;
+    node.title = lines;
     identity.append(node);
   }
   button.append(identity);
@@ -711,7 +740,7 @@ function select(id, manual = false) {
   const lines = c ? channelLines(c.id) : "";
   $("selected-label").textContent = c
     ? c.label +
-      (lines ? ` · 使用例：${lines}` : "") +
+      (lines ? ` · ${lines}` : "") +
       (note ? ` · ${note}` : "")
     : "プリセットを読み込んでください";
   const summary = c
@@ -925,6 +954,7 @@ async function loadPresets(applyTuning = false) {
     resetAudio();
     channels = next;
     activePresetId = id;
+    $("route-feedback").textContent = "";
     clearError();
     for (const metric of [
       "total-locked",
@@ -945,7 +975,7 @@ async function loadPresets(applyTuning = false) {
       Math.max(...channels.map((c) => c.frequency_hz)) / 1e6
     ).toFixed(5);
     $("band-note").textContent =
-      `${channels.length} 波 · 音声とデータを並列復号`;
+      `割当 ${channels.length} 波 · チェックした波を並列復号`;
     $("all-label").textContent = `全 ${channels.length} 波を受信`;
     $("preset-note").textContent =
       `${preset.note} 変則割当は選択波の詳細に表示。件数は受信開始からの累計。`;
@@ -980,6 +1010,7 @@ function showPresetError(error) {
 function installCatalog(catalog, preferred) {
   const retained = catalog.some((p) => p.id === preferred);
   presetCatalog = catalog;
+  routePicker.setCatalog(catalog);
   $("region").replaceChildren(
     ...catalog.map((p) => {
       const option = el("option", p.label);
@@ -1046,6 +1077,7 @@ $("device").addEventListener("change", () => {
 $("scan").addEventListener("click", scan);
 $("region").addEventListener("change", () => loadPresets(true).catch(fail));
 $("all").addEventListener("change", () => {
+  $("route-feedback").textContent = "";
   enabled = new Set($("all").checked ? channels.map((c) => c.id) : []);
   for (const [id, r] of rows) r.check.checked = enabled.has(id);
   setControls();
@@ -1075,9 +1107,9 @@ function updateSource() {
   $("source-hint").textContent = wave
     ? "I は左、Q は右のステレオ WAV。サンプルレートはファイルから取得します。"
     : tcp && platform.android
-      ? `ドングルを挿して「RTL-SDR ドライバーを起動」を押し、ドライバーが起動したら「受信を開始」を押してください。${channels.length} 波を同時受信します。`
+      ? "ドングルを挿して「RTL-SDR ドライバーを起動」を押し、ドライバーが起動したら「受信を開始」を押してください。選択した波を同時受信します。"
       : tcp
-      ? `利用するサーバーの IP アドレスとポートを入力してください。接続設定は自動保存されます。${channels.length} 波を同時受信します。RTL-TCP は設定値の読み戻しとサーバー側の欠落通知に対応していません。`
+      ? "利用するサーバーの IP アドレスとポートを入力してください。接続設定は自動保存されます。選択した波を同時受信します。RTL-TCP は設定値の読み戻しとサーバー側の欠落通知に対応していません。"
       : "SoapySDR 対応デバイスを検索するか、詳細設定にデバイス引数を入力してください。接続設定は自動保存されます。";
 }
 $("input-kind").addEventListener("change", () => {

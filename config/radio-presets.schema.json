@@ -31,10 +31,6 @@
         "frequency_hz": { "$ref": "#/$defs/frequency" },
         "label": { "$ref": "#/$defs/label" },
         "service": { "$ref": "#/$defs/service" },
-        "lines": {
-          "type": "string",
-          "description": "Known lines or sections using this channel (reference only)."
-        },
         "note": { "type": "string" }
       }
     },
@@ -49,12 +45,36 @@
           "const": "downlink",
           "description": "Version 1 supports base-station downlink decoding only."
         },
+        "routes": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "$ref": "#/$defs/route" }
+        },
         "channels": {
           "type": "array",
           "minItems": 1,
           "maxItems": 64,
           "items": { "$ref": "#/$defs/channel" }
         }
+      }
+    },
+    "route_text": { "type": "string", "pattern": "\\S", "maxLength": 200 },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "line", "section", "designation", "voice_hz", "data_hz"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "line": { "$ref": "#/$defs/route_text" },
+        "section": { "$ref": "#/$defs/route_text" },
+        "designation": { "$ref": "#/$defs/route_text" },
+        "voice_hz": {
+          "type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/frequency" },
+          "description": "Voice 1 and voice 2 in order, including any nonstandard assignment. Must reference voice channels in this set."
+        },
+        "data_hz": { "$ref": "#/$defs/frequency", "description": "Must reference a data channel in this set." },
+        "note": { "type": "string", "maxLength": 500 }
       }
     },
     "capture": {

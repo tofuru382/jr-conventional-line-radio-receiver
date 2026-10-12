@@ -130,11 +130,11 @@ for (const clockRate of [0.999, 1, 1.001]) {
         count = 0;
       for (let poll = 0; poll < 10000; poll++) {
         // The UI polls independently of a source delivering 560 ms at once.
-        // Three frames remain in the voice decoder's synthesis lookahead.
+        // Four frames remain in the voice decoder's synthesis lookahead.
         advance(time);
         const available = Math.max(
           0,
-          Math.floor((time * clockRate) / 0.56) * 14 - 3,
+          Math.floor((time * clockRate) / 0.56) * 14 - 4,
         );
         player.enqueue(burst(index, available - index), "a");
         for (const node of nodes) {

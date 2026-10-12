@@ -89,6 +89,7 @@ fn rotations() -> &'static [Complex; 256] {
         })
     })
 }
+#[derive(Clone)]
 pub struct Numeric {
     work: [Complex; 512],
 }

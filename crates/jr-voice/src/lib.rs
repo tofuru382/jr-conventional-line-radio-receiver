@@ -1,10 +1,14 @@
-//! Rust CELP decoder, C ABI 2. Radio/channel decoding belongs to the C# host.
+//! Rust CELP decoder, C ABI 2. Radio/channel decoding belongs to the receiver host.
 // Explicit indexed loops make the binary32 reduction order auditable.
 #![allow(clippy::needless_range_loop)]
 mod chime;
 mod correction;
 mod models;
 mod numeric;
+mod plan_acoustics;
+mod plan_features;
+mod plan_target;
+mod planner;
 mod predictor;
 pub mod receiver;
 mod stream;
@@ -166,7 +170,7 @@ pub unsafe extern "C" fn jr_voice_advance(handle: *mut c_void, index: u32) -> i3
     d.guard(
         |d| {
             d.last_index = Some(index);
-            d.voice.advance()
+            d.voice.missing_frame()
         },
         false,
     )

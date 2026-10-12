@@ -1,4 +1,6 @@
 //! Safe owned interface; preserves the C ABI acceptance and retirement policy.
+//! Synthesis looks ahead four frames (160 ms). Drain output after each operation;
+//! pass `None` for missing slots and flush at EOF to emit the buffered tail.
 use super::Decoder;
 pub use crate::stream::Output;
 
@@ -17,7 +19,7 @@ impl Voice {
                 d.last_index = Some(index);
                 match payload {
                     Some(p) => d.voice.push(index, p),
-                    None => d.voice.advance(),
+                    None => d.voice.missing_frame(),
                 }
             },
             false,

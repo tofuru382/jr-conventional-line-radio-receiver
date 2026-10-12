@@ -1457,3 +1457,82 @@ body:has(#about-dialog[open]) {
     margin-block-end: 2px;
   }
 }
+
+/* A route choice is a draft until its frequency preview is applied. */
+.route-feedback:empty { display: none; }
+.route-feedback { margin-block: 0 16px; color: var(--muted); overflow-wrap: anywhere; }
+#route-dialog {
+  width: min(62rem, calc(100% - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius);
+  overscroll-behavior: contain;
+  overflow: auto;
+}
+#route-dialog::backdrop { background: var(--bg); opacity: .8; }
+body:has(#route-dialog[open]) { overflow: hidden; }
+.route-shell { display: flex; flex-direction: column; max-height: calc(100dvh - 34px); }
+.route-heading { display: flex; flex-shrink: 0; gap: 24px; justify-content: space-between; align-items: start; padding: 24px; }
+.route-heading h2 { margin: 0 0 6px; font-size: var(--text-title); line-height: 1.4; }
+.route-heading p { color: var(--muted); margin: 0; }
+.route-heading button { flex-shrink: 0; }
+.route-content { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 24px; padding: 0 24px 24px; overflow: auto; min-height: 0; overscroll-behavior: contain; }
+.route-search-pane, .route-preview { min-width: 0; }
+.route-search-pane > label { display: grid; gap: 6px; margin-block-end: 16px; }
+.route-search-pane .muted, .route-preview .muted, .route-scope-note { font-size: var(--text-caption); }
+#route-result-count { margin-block: 12px 8px; font-variant-numeric: tabular-nums; }
+#route-results, #route-chosen, #route-frequencies { list-style: none; padding: 0; margin: 0; }
+#route-results { max-height: 26rem; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--control-border); border-radius: var(--radius-control); padding: 4px; }
+.route-option { display: flex; gap: 12px; padding: 12px 10px; cursor: pointer; border-radius: var(--radius-control); align-items: start; }
+.route-option input { margin-block-start: 3px; }
+.route-option-copy { display: grid; gap: 4px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.route-option-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.route-option strong { font-weight: 600; font-size: var(--text-body); color: var(--text); }
+.route-designation { font-variant-numeric: tabular-nums; white-space: nowrap; font-size: var(--text-caption); color: var(--muted); }
+.route-section { color: var(--muted); }
+.route-option-note { font-size: var(--text-caption); color: var(--muted); }
+.route-option:has(input:checked) { background: var(--selected); }
+.route-preview-heading { display: flex; gap: 12px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+.route-preview h3 { font-size: var(--text-heading); margin: 0; }
+.route-selection-count { font-size: var(--text-title); font-weight: 600; font-variant-numeric: tabular-nums; margin-block: 12px; }
+#route-chosen li { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-block: 8px; }
+#route-chosen span { min-width: 0; overflow-wrap: anywhere; }
+#route-chosen button { flex-shrink: 0; padding-inline: 10px; }
+.route-common-label { margin-block: 24px 6px; }
+#route-common-hint { margin: 0 0 16px; }
+#route-frequencies li { display: grid; gap: 2px; padding-block: 8px; }
+#route-frequencies bdi { font-variant-numeric: tabular-nums; font-weight: 600; }
+#route-frequencies span { font-size: var(--text-caption); color: var(--muted); overflow-wrap: anywhere; }
+.route-scope-note { margin-block: 16px; color: var(--muted); }
+.route-empty { padding: 16px; background: var(--surface-raised); border-radius: var(--radius-control); overflow-wrap: anywhere; }
+.route-empty button { margin-block-start: 12px; }
+.route-actions { flex-shrink: 0; padding: 16px 24px 24px; border-block-start: 1px solid var(--line); background: var(--surface); }
+.route-actions p { margin: 0 0 12px; overflow-wrap: anywhere; }
+.route-actions > div { display: flex; gap: 12px; justify-content: end; flex-wrap: wrap; }
+@media (hover: hover) { .route-option:hover { background: var(--surface-raised); } .route-option:has(input:checked):hover { background: var(--selected); } }
+@media (min-width: 48.01rem) and (min-height: 36rem) {
+  .route-shell { height: min(48rem, calc(100dvh - 34px)); }
+  .route-content { flex: 1; overflow: hidden; grid-template-rows: minmax(0, 1fr); }
+  .route-search-pane { display: flex; flex-direction: column; min-height: 0; }
+  .route-search-pane > :not(#route-results) { flex-shrink: 0; }
+  #route-results { flex: 1; min-height: 0; max-height: none; }
+  .route-preview { overflow: auto; padding-inline: 2px 8px; }
+  #route-frequencies li { grid-template-columns: max-content minmax(0, 1fr); column-gap: 12px; align-items: baseline; }
+}
+@media (max-width: 48rem) {
+  .route-content { grid-template-columns: minmax(0, 1fr); }
+  #route-results { max-height: 18rem; }
+  .route-heading { padding: 16px; gap: 12px; }
+  .route-content { padding: 0 16px 16px; }
+  .route-actions { padding: 12px 16px 16px; }
+  #route-dialog :is(input, select) { font-size: 1rem; }
+}
+@media (max-width: 26rem) {
+  .route-heading { flex-wrap: wrap; }
+  .route-actions > div > button { width: 100%; }
+}
