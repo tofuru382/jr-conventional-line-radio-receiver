@@ -1556,7 +1556,7 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   width: 100%;
   justify-content: center;
 }
-.android #channels-table .channel-lines {
+.simple #channels-table .channel-lines {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;

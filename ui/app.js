@@ -1139,16 +1139,18 @@ $("driver-start").addEventListener("click", async () => {
     fail(e);
   }
 });
-const androidName = "JR-CLRR For Android";
 // Android: drop the SoapySDR source and the desktop file/folder pickers, whose
 // results (content:// URIs) cannot be opened as paths. Paths can still be typed.
-// The phone layout also has no search features, only the detailed channel
-// list, and a mute toggle in the top bar.
 function applyAndroidLayout() {
   document.documentElement.classList.add("android");
   $("input-kind").querySelector('option[value="sdr"]')?.remove();
   for (const id of ["browse", "record-browse", "preset-browse"])
     $(id).hidden = true;
+}
+// JR-CLRR builds (Android and macOS): no search features, only the detailed
+// channel list, a mute toggle in the top bar, and the build's own name.
+function applySimpleLayout(name) {
+  document.documentElement.classList.add("simple");
   // No route picker or channel search.
   $("route-open").hidden = true;
   $("route-feedback").hidden = true;
@@ -1170,15 +1172,19 @@ function applyAndroidLayout() {
   $("listen").closest(".listening-control").hidden = true;
   renderMute();
   // Name.
-  document.title = androidName;
-  document.querySelector(".topbar h1").textContent = androidName;
+  document.title = name;
+  document.querySelector(".topbar h1").textContent = name;
   document.querySelector(".topbar .eyebrow").textContent =
     "JR 在来線デジタル列車無線受信";
-  $("about-product").textContent = androidName;
+  $("about-product").textContent = name;
+  const edition = platform.android ? "Android 版" : "Mac 版";
+  const decoder =
+    platform.voice_decoder === "v1.3" || (platform.android && !platform.voice_decoder)
+      ? "（音声の復号は軽量な v1.3 の復号器）"
+      : "";
   $("about-description").textContent =
-    "KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした Android 版（音声の復号は軽量な v1.3 の復号器）";
-  document.querySelector("footer > span").firstChild.textContent =
-    `${androidName} `;
+    `KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした ${edition}${decoder}`;
+  document.querySelector("footer > span").firstChild.textContent = `${name} `;
 }
 function renderMute() {
   const mute = $("mute-toggle");
@@ -1187,6 +1193,14 @@ function renderMute() {
   mute.setAttribute("aria-pressed", String(muted));
   mute.textContent = muted ? "ミュート中" : "音声オン";
   mute.title = muted ? "タップで音声を再開" : "タップでミュート";
+}
+// The Mac app bundles SoapySDR and the RTL-SDR module: use the dongle directly
+// unless an RTL-TCP server or an IQ file was set up on purpose.
+function adoptMacDefaults() {
+  if ($("input-kind").value === "rtl_tcp" && !$("host").value.trim()) {
+    $("input-kind").value = "sdr";
+    void persistPreferences();
+  }
 }
 function adoptAndroidDefaults() {
   let changed = false;
@@ -1483,6 +1497,11 @@ try {
       // Older backends have no platform command; they are desktop builds.
     }
     if (platform.android) applyAndroidLayout();
+    // Older backends report only `android`; Android builds are always simple.
+    const simpleName =
+      platform.name ?? (platform.android ? "JR-CLRR For Android" : null);
+    if ((platform.simple ?? platform.android) && simpleName)
+      applySimpleLayout(simpleName);
     nativeAudio = platform.android;
   }
   bundledCatalog = native
@@ -1495,6 +1514,7 @@ try {
       );
   await restorePreferences(true);
   if (platform.android) adoptAndroidDefaults();
+  else if (platform.simple) adoptMacDefaults();
   busy = false;
   setControls();
   updateSource();

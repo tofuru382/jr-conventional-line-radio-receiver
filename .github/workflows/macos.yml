@@ -1,0 +1,128 @@
+name: macOS app
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  app:
+    # Apple Silicon. Produces "JR-CLRR For Mac.app" in a DMG with SoapySDR and
+    # the RTL-SDR module bundled, so no Homebrew is needed on the user's Mac.
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-arm64-app
+
+      - name: Install SoapySDR, the RTL-SDR module and bundling tools
+        run: |
+          brew install pkgconf soapysdr soapyrtlsdr dylibbundler
+          echo "PKG_CONFIG_PATH=$(brew --prefix soapysdr)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+
+      - run: npm ci
+
+      - name: Build the app bundle
+        run: |
+          set -o pipefail
+          npm run tauri -- build --bundles app --ci 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Bundle SoapySDR and the RTL-SDR module into the app
+        run: |
+          set -euo pipefail
+          app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' | head -n 1)
+          test -n "$app" || { echo "No .app was produced" >&2; exit 1; }
+          echo "APP=$app" >> "$GITHUB_ENV"
+          exe="$app/Contents/MacOS/$(ls "$app/Contents/MacOS" | head -n 1)"
+          modules="$app/Contents/Resources/SoapySDR/modules0.8"
+          mkdir -p "$modules" "$app/Contents/Frameworks"
+          cp "$(brew --prefix soapyrtlsdr)/lib/SoapySDR/modules0.8/librtlsdrSupport.so" "$modules/"
+          # Copy libSoapySDR, librtlsdr, libusb (and their dependencies) into
+          # Frameworks and point the executable and the module at them.
+          # stdin from /dev/null: fail instead of waiting for an interactive answer.
+          dylibbundler -of -b -cd \
+            -x "$exe" -x "$modules/librtlsdrSupport.so" \
+            -s "$(brew --prefix soapysdr)/lib" -s "$(brew --prefix librtlsdr)/lib" -s "$(brew --prefix libusb)/lib" \
+            -d "$app/Contents/Frameworks/" -p "@executable_path/../Frameworks/" < /dev/null
+          echo "--- executable"; otool -L "$exe"
+          echo "--- module"; otool -L "$modules/librtlsdrSupport.so"
+          if otool -L "$exe" "$modules/librtlsdrSupport.so" "$app"/Contents/Frameworks/*.dylib | grep -E '/opt/homebrew|/usr/local/(opt|Cellar)'; then
+            echo "::error::Homebrew paths remain in the bundle" >&2; exit 1
+          fi
+          # Changing load commands invalidates signatures: re-sign ad hoc
+          # (Apple Silicon refuses unsigned code). This is not a Developer ID.
+          find "$app/Contents/Frameworks" "$modules" -type f \( -name '*.dylib' -o -name '*.so' \) \
+            -exec codesign --force --sign - {} \;
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Check the bundled module loads without Homebrew
+        run: |
+          set -euo pipefail
+          frameworks="$APP/Contents/Frameworks"
+          modules="$APP/Contents/Resources/SoapySDR/modules0.8"
+          brew uninstall --ignore-dependencies soapyrtlsdr soapysdr librtlsdr
+          cat > "$RUNNER_TEMP/check.c" <<'EOF'
+          #include <stdio.h>
+          #include <dlfcn.h>
+          int main(int argc, char **argv) {
+            void *soapy = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
+            if (!soapy) { printf("libSoapySDR: %s\n", dlerror()); return 1; }
+            void *module = dlopen(argv[2], RTLD_NOW);
+            if (!module) { printf("module: %s\n", dlerror()); return 1; }
+            printf("bundled SoapySDR and RTL-SDR module load\n");
+            return 0;
+          }
+          EOF
+          clang -o "$RUNNER_TEMP/check" "$RUNNER_TEMP/check.c"
+          # @executable_path in the bundled libraries resolves next to Contents/MacOS.
+          cp "$RUNNER_TEMP/check" "$APP/Contents/MacOS/bundle-check"
+          "$APP/Contents/MacOS/bundle-check" "$(ls "$frameworks"/libSoapySDR*.dylib | head -n 1)" "$modules/librtlsdrSupport.so"
+          rm "$APP/Contents/MacOS/bundle-check"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+
+      - name: Make the DMG
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dmg" dist
+          cp -R "$APP" "$RUNNER_TEMP/dmg/"
+          ln -s /Applications "$RUNNER_TEMP/dmg/Applications"
+          hdiutil create -volname "JR-CLRR For Mac" -srcfolder "$RUNNER_TEMP/dmg" -ov -format UDZO \
+            dist/JR-CLRR-For-Mac-arm64.dmg
+          ls -lh dist
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          [ -f "$log" ] || exit 0
+          emit() { python3 -c 'import sys; t=sys.stdin.read()[-60000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
+          grep -nE "error(\[E[0-9]+\])?:|^error|failed|not found|cannot find" "$log" | grep -v "Compiling\|Downloaded" | head -n 80 | emit "Error lines"
+          tail -n 120 "$log" | emit "Build log tail"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jr-clrr-for-mac-arm64
+          path: dist/JR-CLRR-For-Mac-arm64.dmg
+          if-no-files-found: error
+          retention-days: 30

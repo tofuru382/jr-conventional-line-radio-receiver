@@ -173,12 +173,30 @@ fn set_native_monitor(
 struct Platform {
     android: bool,
     soapy: bool,
+    /// The simplified JR-CLRR layout (Android and macOS builds of this fork).
+    simple: bool,
+    name: Option<&'static str>,
+    /// "v1.3" when the lighter voice decoder (crates/jr-voice-lite) is used.
+    voice_decoder: &'static str,
 }
 #[tauri::command]
 fn platform() -> Platform {
     Platform {
         android: cfg!(target_os = "android"),
         soapy: cfg!(not(target_os = "android")),
+        simple: cfg!(any(target_os = "android", target_os = "macos")),
+        name: if cfg!(target_os = "android") {
+            Some("JR-CLRR For Android")
+        } else if cfg!(target_os = "macos") {
+            Some("JR-CLRR For Mac")
+        } else {
+            None
+        },
+        voice_decoder: if cfg!(target_os = "android") {
+            "v1.3"
+        } else {
+            "v1.5"
+        },
     }
 }
 /// Starts the "Rtl-sdr driver" app (marto.rtl_tcp_andro), which owns the USB
@@ -202,8 +220,29 @@ fn start_rtl_driver(app: tauri::AppHandle, port: u16) -> Result<(), String> {
         Err("ドライバーの起動は Android 版のみ対応しています。".into())
     }
 }
+/// Inside "JR-CLRR For Mac.app" the SoapySDR RTL-SDR module is bundled in
+/// Contents/Resources/SoapySDR/modules0.8 (see .github/workflows/macos.yml), so
+/// the dongle works without Homebrew. A user-set plugin path wins.
+#[cfg(target_os = "macos")]
+fn use_bundled_soapy_modules() {
+    if std::env::var_os("SOAPY_SDR_PLUGIN_PATH").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if let Some(dir) = exe
+        .parent()
+        .map(|d| d.join("../Resources/SoapySDR/modules0.8"))
+        .filter(|d| d.is_dir())
+    {
+        std::env::set_var("SOAPY_SDR_PLUGIN_PATH", dir);
+    }
+}
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    use_bundled_soapy_modules();
     let builder = tauri::Builder::default();
     #[cfg(target_os = "android")]
     let builder = builder.plugin(tauri_plugin_opener::init());

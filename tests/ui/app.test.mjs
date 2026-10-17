@@ -437,6 +437,32 @@ test("Android layout has no search, only the detailed list, a top mute toggle an
   assert.equal($("listen").checked, true);
   assert.equal(monitor().enabled, true);
 });
+test("Mac uses the simplified layout but keeps SoapySDR, pickers and Web Audio", async (t) => {
+  const app = await setup(t, {
+    configureConnection: false,
+    platformInfo: { android: false, soapy: true, simple: true, name: "JR-CLRR For Mac", voice_decoder: "v1.5" },
+  });
+  const { $ } = app;
+  const root = app.w.document.documentElement;
+  assert.ok(root.classList.contains("simple"));
+  assert.equal(root.classList.contains("android"), false);
+  assert.equal(app.w.document.title, "JR-CLRR For Mac");
+  assert.match($("about-description").textContent, /Mac 版$/);
+  assert.equal($("route-open").hidden, true);
+  assert.equal($("channel-search").closest("label").hidden, true);
+  assert.equal($("channels-table").hidden, false);
+  assert.ok($("mute-toggle"));
+  assert.ok($("input-kind").querySelector('option[value="sdr"]'));
+  assert.equal($("input-kind").value, "sdr");
+  assert.equal($("driver-group").hidden, true);
+  for (const id of ["browse", "record-browse", "preset-browse"])
+    assert.equal($(id).hidden, false, id);
+  $("listen").checked = true;
+  await app.click("start");
+  await app.poll();
+  assert.equal(app.calls.some((c) => c.command === "set_native_monitor"), false);
+  assert.ok(app.calls.filter((c) => c.command === "snapshot").every((c) => !("audio" in c.args)));
+});
 test("Android reports a missing driver app", async (t) => {
   const app = await setup(t, {
     configureConnection: false,
