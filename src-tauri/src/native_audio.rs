@@ -61,12 +61,24 @@ mod android {
         AudioStreamBuilder,
     };
     use std::{
+        collections::VecDeque,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
     const SAMPLE_RATE: i32 = 8000;
     const IDLE_CLOSE: Duration = Duration::from_secs(10);
+    /// Jitter buffer: decoded PCM arrives in bursts (synthesis lookahead,
+    /// RTL-TCP delivering ~0.5 s at once). Collect this much before (re)starting
+    /// playback so the device never runs dry in the middle of a word.
+    const PREBUFFER: usize = (SAMPLE_RATE as usize) * 400 / 1000;
+    /// Start anyway once input has paused this long (the end of a short call).
+    const PREBUFFER_WAIT: Duration = Duration::from_millis(250);
+    /// Below this many queued device frames with nothing pending, playback has
+    /// effectively run dry: rebuffer before playing the next audio.
+    const LOW_WATER: i64 = (SAMPLE_RATE as i64) * 40 / 1000;
+    /// Device-side capacity, so a burst can be queued without blocking long.
+    const CAPACITY: i32 = SAMPLE_RATE * 3 / 2;
 
     fn open() -> Result<AudioStream, String> {
         let stream = AudioStreamBuilder::new()
@@ -77,12 +89,20 @@ mod android {
                     .sample_rate(SAMPLE_RATE)
                     .channel_count(1)
                     .format(AudioFormat::PCM_I16)
+                    .buffer_capacity_in_frames(CAPACITY)
                     // Usage/content type need API 28; the default is media.
                     .open_stream()
             })
             .map_err(|e| format!("{e:?}"))?;
+        // Use the whole capacity (the default buffer size is often one burst).
+        let _ = stream.set_buffer_size_in_frames(stream.buffer_capacity_in_frames());
         stream.request_start().map_err(|e| format!("{e:?}"))?;
         Ok(stream)
+    }
+
+    /// Frames written to the device but not yet played.
+    fn queued(stream: &AudioStream) -> i64 {
+        (stream.frames_written() - stream.frames_read()).max(0)
     }
 
     /// Blocking write; the device's consumption paces the loop.
@@ -106,7 +126,8 @@ mod android {
     pub fn run(settings: Arc<Mutex<Settings>>, receiver: crate::Receiver) {
         let mut stream: Option<AudioStream> = None;
         let mut last_audio = Instant::now();
-        let mut scaled = Vec::new();
+        let mut pending: VecDeque<i16> = VecDeque::new();
+        let mut playing = false;
         loop {
             let current = settings.lock().map(|s| s.clone()).unwrap_or_default();
             // Always drain the queue so unheard PCM never piles up and replays
@@ -118,34 +139,60 @@ mod android {
                     .unwrap_or_default(),
                 Err(_) => Vec::new(),
             };
-            if !current.enabled || audio.is_empty() {
-                if stream.is_some() && (!current.enabled || last_audio.elapsed() > IDLE_CLOSE) {
-                    stream = None;
-                }
+            if !current.enabled {
+                pending.clear();
+                playing = false;
+                stream = None;
                 std::thread::sleep(Duration::from_millis(20));
                 continue;
             }
-            last_audio = Instant::now();
+            if !audio.is_empty() {
+                last_audio = Instant::now();
+                let gain = current.volume.clamp(0.0, 1.0);
+                for frame in &audio {
+                    pending.extend(frame.pcm.iter().map(|&s| (s as f32 * gain) as i16));
+                }
+            }
+            // Ran dry (nothing pending and the device nearly empty): the next
+            // audio is buffered again instead of being played frame by frame.
+            if playing
+                && pending.is_empty()
+                && stream.as_ref().is_none_or(|s| queued(s) < LOW_WATER)
+            {
+                playing = false;
+            }
+            if !playing
+                && !pending.is_empty()
+                && (pending.len() >= PREBUFFER || last_audio.elapsed() >= PREBUFFER_WAIT)
+            {
+                playing = true;
+            }
+            if !playing || pending.is_empty() {
+                if pending.is_empty() && stream.is_some() && last_audio.elapsed() > IDLE_CLOSE {
+                    stream = None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
             if stream.is_none() {
                 match open() {
                     Ok(s) => stream = Some(s),
                     Err(e) => {
                         eprintln!("audio monitor: cannot open output: {e}");
+                        pending.clear();
+                        playing = false;
                         std::thread::sleep(Duration::from_millis(500));
                         continue;
                     }
                 }
             }
-            let gain = current.volume.clamp(0.0, 1.0);
-            for frame in audio {
-                scaled.clear();
-                scaled.extend(frame.pcm.iter().map(|&s| (s as f32 * gain) as i16));
-                if let Err(e) = write(stream.as_ref().unwrap(), &scaled) {
-                    // e.g. headphones unplugged: reopen on the next frame.
-                    eprintln!("audio monitor: {e}");
-                    stream = None;
-                    break;
-                }
+            let pcm = pending.make_contiguous().to_vec();
+            pending.clear();
+            if let Err(e) = write(stream.as_ref().unwrap(), &pcm) {
+                // e.g. headphones unplugged: reopen on the next audio.
+                eprintln!("audio monitor: {e}");
+                stream = None;
+                playing = false;
             }
         }
     }
