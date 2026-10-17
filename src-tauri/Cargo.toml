@@ -28,6 +28,8 @@ tauri-plugin-dialog = "2"
 receiver-core = { path = "../crates/receiver-core", features = ["soapy"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+# Phones run the lighter v1.3 voice decoder (crates/jr-voice-lite).
+receiver-core = { path = "../crates/receiver-core", default-features = false, features = ["lite-voice"] }
 tauri-plugin-opener = "2"
 ndk = { version = "0.9", features = ["audio", "api-level-26"] }
 

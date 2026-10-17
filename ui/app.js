@@ -1176,7 +1176,7 @@ function applyAndroidLayout() {
     "JR 在来線デジタル列車無線受信";
   $("about-product").textContent = androidName;
   $("about-description").textContent =
-    "KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした Android 版";
+    "KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした Android 版（音声の復号は軽量な v1.3 の復号器）";
   document.querySelector("footer > span").firstChild.textContent =
     `${androidName} `;
 }

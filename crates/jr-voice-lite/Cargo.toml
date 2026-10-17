@@ -1,0 +1,14 @@
+# The v1.3 voice decoder (jr_conventional_voice 1.1.0 from upstream v1.3.0,
+# commit 1e67813), kept unchanged for the Android build. It is about 20x
+# lighter than the current decoder, which phones cannot always run in real
+# time for several channels at once. See docs/ANDROID.ja.md. The only change
+# from upstream: `#[no_mangle]` is removed from the C ABI functions so both
+# decoders can be linked into one binary.
+[package]
+name = "jr_conventional_voice_lite"
+version = "1.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["rlib"]

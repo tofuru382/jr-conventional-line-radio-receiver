@@ -4,7 +4,10 @@ use crate::{
     voice_frame, Complex32,
 };
 use jr_conventional_dsp::receiver::Dsp;
+#[cfg(not(feature = "lite-voice"))]
 use jr_conventional_voice::receiver::Voice;
+#[cfg(feature = "lite-voice")]
+use jr_conventional_voice_lite::receiver::Voice;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 

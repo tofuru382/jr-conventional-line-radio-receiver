@@ -8,10 +8,13 @@ publish.workspace = true
 [features]
 default = ["soapy"]
 soapy = []
+# Use the v1.3 voice decoder (about 20x lighter). Enabled by the Android app.
+lite-voice = ["dep:jr_conventional_voice_lite"]
 
 [dependencies]
 jr_conventional_dsp = { path = "../jr-conventional-dsp" }
 jr_conventional_voice = { path = "../jr-voice" }
+jr_conventional_voice_lite = { path = "../jr-voice-lite", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 encoding_rs = "0.8"
