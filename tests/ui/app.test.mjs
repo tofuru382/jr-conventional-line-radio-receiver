@@ -463,6 +463,29 @@ test("Mac uses the simplified layout but keeps SoapySDR, pickers and Web Audio",
   assert.equal(app.calls.some((c) => c.command === "set_native_monitor"), false);
   assert.ok(app.calls.filter((c) => c.command === "snapshot").every((c) => !("audio" in c.args)));
 });
+test("Android can switch between its own player and Web Audio", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  $("listen").checked = true;
+  await app.click("start");
+  await app.poll();
+  const box = $("native-output");
+  assert.equal(box.checked, true);
+  box.checked = false;
+  box.dispatchEvent(new app.w.Event("change"));
+  await app.poll();
+  const last = app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args.settings;
+  assert.equal(last.inactive, true);
+  assert.equal(last.enabled, false);
+  assert.ok(!("audio" in app.calls.filter((c) => c.command === "snapshot").at(-1).args));
+  box.checked = true;
+  box.dispatchEvent(new app.w.Event("change"));
+  await app.poll();
+  const back = app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args.settings;
+  assert.equal(back.enabled, true);
+  assert.equal(back.inactive, undefined);
+  assert.equal(app.calls.filter((c) => c.command === "snapshot").at(-1).args.audio, false);
+});
 test("Android reports a missing driver app", async (t) => {
   const app = await setup(t, {
     configureConnection: false,

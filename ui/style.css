@@ -1563,3 +1563,6 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   line-clamp: 2;
   overflow: hidden;
 }
+.output-choice {
+  margin-block-start: 12px;
+}

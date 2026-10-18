@@ -14,6 +14,9 @@ pub struct Settings {
     pub automatic: bool,
     /// Linear gain, 0.0–1.0 (the UI's volume slider / 100).
     pub volume: f32,
+    /// The WebView's Web Audio player owns the monitor queue: do not drain it.
+    #[serde(default)]
+    pub inactive: bool,
 }
 
 #[derive(Default, Clone)]
@@ -130,6 +133,13 @@ mod android {
         let mut playing = false;
         loop {
             let current = settings.lock().map(|s| s.clone()).unwrap_or_default();
+            if current.inactive {
+                pending.clear();
+                playing = false;
+                stream = None;
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             // Always drain the queue so unheard PCM never piles up and replays
             // later; it is only written to the device while listening.
             let audio = match receiver.0.lock() {

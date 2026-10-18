@@ -2,6 +2,20 @@ use std::path::{Path, PathBuf};
 use tauri::Manager;
 
 pub fn default_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // Android: prefer the shared Download folder, which file manager and music
+    // apps can open and which survives uninstalling the app. Android 11+ lets
+    // apps create files there without permissions; otherwise (or if it fails)
+    // fall back to the app-specific Music folder below.
+    #[cfg(target_os = "android")]
+    {
+        let root = std::env::var_os("EXTERNAL_STORAGE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/storage/emulated/0"));
+        let shared = root.join("Download").join("JR-CLRR").join("Recordings");
+        if std::fs::create_dir_all(&shared).is_ok() && writable(&shared) {
+            return Ok(shared);
+        }
+    }
     let music = app
         .path()
         .audio_dir()
@@ -12,6 +26,14 @@ pub fn default_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(music
         .join("JR Cconventional-line Radio Receiver")
         .join("Recordings"))
+}
+
+#[cfg(target_os = "android")]
+fn writable(directory: &Path) -> bool {
+    let probe = directory.join(".jr-clrr-write-test");
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
 }
 
 // Only the application's default is created automatically. Custom paths retain

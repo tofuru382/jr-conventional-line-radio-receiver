@@ -33,6 +33,46 @@ function syncNativeMonitor() {
     fail(e);
   });
 }
+// Android output choice (kept per device): the app's own AAudio player, which
+// keeps playing in the background, or the WebView's Web Audio player used by
+// the desktop app (foreground only). Mainly for comparing the two.
+const outputKey = "jr-clrr.native-output";
+function nativeOutputPreferred() {
+  try {
+    return localStorage.getItem(outputKey) !== "off";
+  } catch {
+    return true;
+  }
+}
+function addOutputChoice() {
+  const label = el("label", undefined, "check-label output-choice");
+  label.htmlFor = "native-output";
+  const box = el("input");
+  box.id = "native-output";
+  box.type = "checkbox";
+  box.checked = nativeAudio;
+  label.append(box, "端末で直接再生（裏に回しても再生）");
+  box.addEventListener("change", () => {
+    try {
+      localStorage.setItem(outputKey, box.checked ? "on" : "off");
+    } catch {
+      // Not persisted; the choice still applies now.
+    }
+    // Stop the old path before starting the other.
+    if (nativeAudio) {
+      nativeMonitorState = "";
+      invoke("set_native_monitor", {
+        settings: { enabled: false, selected: null, automatic: false, volume: 0, inactive: true },
+      }).catch(() => {});
+    }
+    nativeAudio = box.checked;
+    resetAudio();
+    if (nativeAudio) syncNativeMonitor();
+    else prepareAudio().catch(fail);
+    setControls();
+  });
+  document.querySelector(".audio-controls").append(label);
+}
 function syncBackgroundService() {
   if (!platform.android || serviceReceiving === running) return;
   serviceReceiving = running;
@@ -1502,7 +1542,8 @@ try {
       platform.name ?? (platform.android ? "JR-CLRR For Android" : null);
     if ((platform.simple ?? platform.android) && simpleName)
       applySimpleLayout(simpleName);
-    nativeAudio = platform.android;
+    nativeAudio = platform.android && nativeOutputPreferred();
+    if (platform.android) addOutputChoice();
   }
   bundledCatalog = native
     ? await invoke("preset_catalog")
