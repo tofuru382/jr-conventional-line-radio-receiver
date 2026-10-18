@@ -489,6 +489,13 @@ test("Android can switch between its own player and Web Audio", async (t) => {
   assert.equal(back.inactive, undefined);
   assert.equal(app.calls.filter((c) => c.command === "snapshot").at(-1).args.audio, false);
 });
+test("Android plays a test sound through its own player without receiving", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  assert.ok(app.$("test-sound"));
+  await app.click("test-sound");
+  assert.equal(app.calls.filter((c) => c.command === "play_test_sound").length, 1);
+  assert.equal(app.calls.some((c) => c.command === "start"), false);
+});
 test("Android lists saved recordings and plays one in the app", async (t) => {
   const recordings = [
     {
@@ -555,6 +562,7 @@ test("desktop keeps SoapySDR and pickers and never shows the driver button", asy
   assert.ok($("input-kind").querySelector('option[value="sdr"]'));
   assert.equal($("driver-group").hidden, true);
   assert.equal($("mute-toggle"), null);
+  assert.equal($("test-sound"), null);
   assert.equal($("route-open").hidden, false);
   for (const id of ["browse", "record-browse", "preset-browse"])
     assert.equal($(id).hidden, false, id);

@@ -72,6 +72,63 @@ function addOutputChoice() {
     setControls();
   });
   document.querySelector(".audio-controls").append(label);
+  addTestSound();
+}
+// Three rising tones through the chosen output, so the playback path can be
+// checked without any radio signal (same as native_audio::test_tone).
+function testTone() {
+  const rate = 8000,
+    tone = rate * 0.3,
+    gap = rate * 0.1,
+    fade = rate * 0.015;
+  const pcm = [];
+  for (const hz of [523.25, 659.25, 783.99]) {
+    for (let i = 0; i < tone; i++) {
+      const edge = Math.min(Math.min(i, tone - 1 - i) / fade, 1);
+      pcm.push(Math.sin((2 * Math.PI * hz * i) / rate) * edge * 0.5);
+    }
+    for (let i = 0; i < gap; i++) pcm.push(0);
+  }
+  return pcm;
+}
+async function playTestSound() {
+  if (nativeAudio) {
+    await invoke("play_test_sound");
+    return;
+  }
+  if (!context) {
+    context = new AudioContext();
+    gain = context.createGain();
+    gain.connect(context.destination);
+    audioPlayer = new AudioPlayer(context, gain);
+  }
+  await context.resume();
+  const pcm = testTone();
+  const buffer = context.createBuffer(1, pcm.length, 8000);
+  buffer.getChannelData(0).set(pcm);
+  const node = context.createBufferSource();
+  node.buffer = buffer;
+  node.connect(context.destination);
+  node.start();
+}
+function addTestSound() {
+  const row = el("div", undefined, "test-sound");
+  const button = el("button", "テスト音を鳴らす");
+  button.type = "button";
+  button.id = "test-sound";
+  const note = el(
+    "p",
+    "「ポーン・ポーン・ポーン」と高くなる音が3回きれいに鳴れば、音の出口は正常です。受信していなくても試せます。",
+    "field-hint",
+  );
+  note.id = "test-sound-note";
+  button.addEventListener("click", () => {
+    playTestSound().catch((e) => {
+      note.textContent = `テスト音を鳴らせませんでした: ${e.message ?? e}`;
+    });
+  });
+  row.append(button, note);
+  document.querySelector(".audio-controls").append(row);
 }
 // In-app recordings browser (Android): the app-specific folder cannot be
 // opened from the phone's file manager, so list and play recordings here.

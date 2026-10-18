@@ -203,6 +203,13 @@ fn set_native_monitor(
 ) -> Result<(), String> {
     monitor.update(settings, &receiver)
 }
+#[tauri::command]
+fn play_test_sound(
+    receiver: tauri::State<'_, Receiver>,
+    monitor: tauri::State<'_, native_audio::NativeMonitor>,
+) -> Result<(), String> {
+    monitor.play_test(&receiver)
+}
 /// What the frontend needs to adapt to the host: Android has no SoapySDR and
 /// no folder picker, but can start an on-device RTL-TCP driver app.
 #[derive(serde::Serialize)]
@@ -296,6 +303,7 @@ pub fn run() {
             platform,
             start_rtl_driver,
             set_native_monitor,
+            play_test_sound,
             list_recordings,
             read_recording,
             devices,

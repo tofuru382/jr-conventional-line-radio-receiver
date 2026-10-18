@@ -1567,6 +1567,17 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   margin-block-start: 12px;
 }
 
+.test-sound {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  margin-block-start: 12px;
+}
+
+.test-sound .field-hint {
+  margin: 0;
+}
+
 /* Android: in-app recordings browser. */
 .recordings-body {
   display: grid;
