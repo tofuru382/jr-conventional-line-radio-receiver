@@ -275,6 +275,21 @@
         </details>
         <p id="recording-error" class="field-error" role="alert" hidden></p>
       </section>
+      <details id="recordings-browser" class="card recordings-browser" hidden>
+        <summary class="panel-summary">
+          <h2>録音を聞く</h2>
+          <span id="recordings-count" class="panel-summary-meta">保存した通話を一覧から再生</span>
+        </summary>
+        <div class="recordings-body">
+          <div class="recordings-toolbar">
+            <button id="recordings-refresh" type="button">一覧を更新</button>
+            <p id="recordings-status" class="muted" role="status"></p>
+          </div>
+          <audio id="recordings-player" controls preload="none" hidden></audio>
+          <p id="recordings-now" class="muted" hidden></p>
+          <div id="recordings-list"></div>
+        </div>
+      </details>
       <div class="workspace-navigation">
         <nav aria-label="受信情報への移動">
           <button id="route-open" type="button" disabled aria-haspopup="dialog">路線から選ぶ</button>

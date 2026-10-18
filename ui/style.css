@@ -1566,3 +1566,37 @@ body:has(#route-dialog[open]) { overflow: hidden; }
 .output-choice {
   margin-block-start: 12px;
 }
+
+/* Android: in-app recordings browser. */
+.recordings-body {
+  display: grid;
+  gap: 12px;
+  padding: 0 24px 24px;
+}
+.recordings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+.recordings-toolbar p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+#recordings-player {
+  width: 100%;
+}
+.recording-session {
+  border-block-start: 1px solid var(--line);
+  padding-block: 8px;
+}
+.recording-session > summary {
+  cursor: pointer;
+  padding-block: 6px;
+}
+.recording-play {
+  display: block;
+  width: 100%;
+  text-align: start;
+  margin-block-start: 6px;
+}

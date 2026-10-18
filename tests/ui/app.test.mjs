@@ -80,6 +80,7 @@ async function setup(
     presetFiles = { path: null, catalogs: {} },
     platformInfo = null,
     driverError = null,
+    recordings = [],
   } = {},
 ) {
   const dom = new JSDOM(html, {
@@ -231,6 +232,8 @@ async function setup(
             }
             if (command === "devices") return structuredClone(devices);
             if (command === "platform") return structuredClone(platformInfo);
+            if (command === "list_recordings") return structuredClone(recordings);
+            if (command === "read_recording") return new ArrayBuffer(8);
             if (command === "start_rtl_driver") {
               if (driverError) throw new Error(driverError);
               return null;
@@ -485,6 +488,42 @@ test("Android can switch between its own player and Web Audio", async (t) => {
   assert.equal(back.enabled, true);
   assert.equal(back.inactive, undefined);
   assert.equal(app.calls.filter((c) => c.command === "snapshot").at(-1).args.audio, false);
+});
+test("Android lists saved recordings and plays one in the app", async (t) => {
+  const recordings = [
+    {
+      name: "recording-20261018T133100.000Z-001",
+      directory: "/sdcard/Download/JR-CLRR/Recordings/recording-20261018T133100.000Z-001",
+      root: "/sdcard/Download/JR-CLRR/Recordings",
+      incomplete: false,
+      files: [
+        { name: "352606250Hz-000001.wav", path: "/sdcard/Download/JR-CLRR/Recordings/recording-20261018T133100.000Z-001/352606250Hz-000001.wav", bytes: 44 + 16000 * 12 },
+      ],
+    },
+  ];
+  const app = await setup(t, { platformInfo: { android: true, soapy: false }, recordings });
+  const { $ } = app;
+  app.w.URL.createObjectURL = () => "blob:recording";
+  app.w.URL.revokeObjectURL = () => {};
+  assert.equal($("recordings-browser").hidden, false);
+  $("recordings-browser").open = true;
+  $("recordings-browser").dispatchEvent(new app.w.Event("toggle"));
+  await tick();
+  await tick();
+  assert.equal($("recordings-count").textContent, "1 回の保存 · 1 件");
+  const button = $("recordings-list").querySelector(".recording-play");
+  assert.equal(button.textContent, "▶ 352.60625 MHz · #1 · 12 秒");
+  assert.match($("recordings-list").querySelector("summary").textContent, /^10\/18 22:31:00 · 1 件$/);
+  button.click();
+  await tick();
+  await tick();
+  assert.equal(app.calls.filter((c) => c.command === "read_recording").at(-1).args.path, recordings[0].files[0].path);
+  assert.equal($("recordings-player").hidden, false);
+  assert.equal($("recordings-player").getAttribute("src") ?? $("recordings-player").src, "blob:recording");
+});
+test("desktop hides the recordings browser", async (t) => {
+  const { $ } = await setup(t, { platformInfo: { android: false, soapy: true } });
+  assert.equal($("recordings-browser").hidden, true);
 });
 test("Android reports a missing driver app", async (t) => {
   const app = await setup(t, {

@@ -3,6 +3,7 @@ mod icon;
 mod native_audio;
 mod preferences;
 mod recording_directory;
+mod recordings;
 
 use receiver_core::{
     pipeline,
@@ -159,6 +160,41 @@ fn snapshot(
         }
     }
 }
+/// Folders that may hold recordings: the defaults plus the configured folder.
+fn recording_roots(app: &tauri::AppHandle, directory: Option<String>) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.extend(recording_directory::default_directory(app).ok());
+    candidates.extend(recording_directory::app_music_directory(app).ok());
+    candidates.extend(
+        directory
+            .filter(|d| !d.trim().is_empty())
+            .map(|d| std::path::PathBuf::from(d.trim())),
+    );
+    recordings::roots(candidates)
+}
+#[tauri::command]
+async fn list_recordings(
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<Vec<recordings::RecordingSession>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(recordings::list(&recording_roots(&app, directory)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn read_recording(
+    path: String,
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        recordings::read(&recording_roots(&app, directory), &path).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[tauri::command]
 fn set_native_monitor(
     settings: native_audio::Settings,
@@ -260,6 +296,8 @@ pub fn run() {
             platform,
             start_rtl_driver,
             set_native_monitor,
+            list_recordings,
+            read_recording,
             devices,
             load_preferences,
             save_preferences,

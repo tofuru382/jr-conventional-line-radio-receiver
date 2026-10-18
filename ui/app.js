@@ -73,6 +73,98 @@ function addOutputChoice() {
   });
   document.querySelector(".audio-controls").append(label);
 }
+// In-app recordings browser (Android): the app-specific folder cannot be
+// opened from the phone's file manager, so list and play recordings here.
+let recordingUrl = null;
+function recordingTime(name) {
+  const m = /^recording-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/.exec(name);
+  if (!m) return name;
+  const date = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(date);
+}
+function recordingLabel(file) {
+  const m = /^(\d+)Hz-0*(\d+)\.wav$/i.exec(file.name);
+  const seconds = Math.max(0, (file.bytes - 44) / 16000);
+  const length = seconds >= 1 ? `${Math.round(seconds)} 秒` : "1 秒未満";
+  return m
+    ? `${(Number(m[1]) / 1e6).toFixed(5)} MHz · #${m[2]} · ${length}`
+    : `${file.name} · ${length}`;
+}
+async function playRecording(session, file) {
+  try {
+    $("recordings-status").textContent = "読み込み中…";
+    const data = await invoke("read_recording", {
+      path: file.path,
+      directory: $("record-directory").value.trim() || null,
+    });
+    // Raw IPC responses arrive as an ArrayBuffer; older IPC paths send an array.
+    const bytes = Array.isArray(data) ? new Uint8Array(data) : data;
+    const blob = new Blob([bytes], { type: "audio/wav" });
+    if (recordingUrl) URL.revokeObjectURL(recordingUrl);
+    recordingUrl = URL.createObjectURL(blob);
+    const player = $("recordings-player");
+    player.src = recordingUrl;
+    player.hidden = false;
+    $("recordings-now").textContent = `再生中：${recordingTime(session.name)} · ${recordingLabel(file)}`;
+    $("recordings-now").hidden = false;
+    $("recordings-status").textContent = session.incomplete
+      ? "保存中のファイルは、保存を停止すると最後まで再生できます。"
+      : "";
+    await Promise.resolve(player.play?.()).catch(() => {});
+  } catch (e) {
+    $("recordings-status").textContent = String(e.message ?? e);
+  }
+}
+async function refreshRecordings() {
+  const list = $("recordings-list");
+  $("recordings-status").textContent = "読み込み中…";
+  try {
+    const sessions =
+      (await invoke("list_recordings", {
+        directory: $("record-directory").value.trim() || null,
+      })) ?? [];
+    list.replaceChildren();
+    const total = sessions.reduce((n, s) => n + s.files.length, 0);
+    $("recordings-count").textContent = `${sessions.length} 回の保存 · ${total} 件`;
+    $("recordings-status").textContent = sessions.length
+      ? `保存先：${[...new Set(sessions.map((s) => s.root))].join("、")}`
+      : "録音はまだありません。保存をオンにして受信すると、通話ごとにここに追加されます。";
+    sessions.forEach((session, i) => {
+      const group = el("details", undefined, "recording-session");
+      group.open = i === 0;
+      const summary = el(
+        "summary",
+        `${recordingTime(session.name)} · ${session.files.length} 件${session.incomplete ? " · 保存中" : ""}`,
+      );
+      group.append(summary);
+      if (!session.files.length) group.append(el("p", "音声のファイルはありません。", "muted"));
+      for (const file of session.files) {
+        const button = el("button", `▶ ${recordingLabel(file)}`, "recording-play");
+        button.type = "button";
+        button.addEventListener("click", () => playRecording(session, file));
+        group.append(button);
+      }
+      list.append(group);
+    });
+  } catch (e) {
+    $("recordings-status").textContent = String(e.message ?? e);
+  }
+}
+function addRecordingsBrowser() {
+  $("recordings-browser").hidden = false;
+  $("recordings-browser").addEventListener("toggle", () => {
+    if ($("recordings-browser").open) void refreshRecordings();
+  });
+  $("recordings-refresh").addEventListener("click", () => void refreshRecordings());
+}
 function syncBackgroundService() {
   if (!platform.android || serviceReceiving === running) return;
   serviceReceiving = running;
@@ -1543,7 +1635,10 @@ try {
     if ((platform.simple ?? platform.android) && simpleName)
       applySimpleLayout(simpleName);
     nativeAudio = platform.android && nativeOutputPreferred();
-    if (platform.android) addOutputChoice();
+    if (platform.android) {
+      addOutputChoice();
+      addRecordingsBrowser();
+    }
   }
   bundledCatalog = native
     ? await invoke("preset_catalog")

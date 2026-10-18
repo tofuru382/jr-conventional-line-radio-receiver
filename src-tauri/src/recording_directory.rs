@@ -16,6 +16,12 @@ pub fn default_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
             return Ok(shared);
         }
     }
+    app_music_directory(app)
+}
+
+/// The original default: the OS Music folder (on Android the app-specific
+/// Android/data/<id>/files/Music, which is removed on uninstall).
+pub fn app_music_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let music = app
         .path()
         .audio_dir()
