@@ -163,6 +163,7 @@ fn rtl_tcp_disconnect_is_a_failure_after_all_22_workers_drain() {
                 center_hz: 352603125,
                 gain_db: None,
                 ppm: 0,
+                reconnect_seconds: 0,
             },
         },
         channels: presets("east"),
@@ -210,6 +211,7 @@ fn stopping_during_rtl_tcp_handshake_closes_connection_without_failure() {
                 center_hz: 352603125,
                 gain_db: None,
                 ppm: 0,
+                reconnect_seconds: 0,
             },
         },
         channels: presets("east"),
@@ -317,4 +319,56 @@ fn recorded_iq_runs_all_22_workers_in_real_time() {
     println!("{}", serde_json::to_string(&final_status).unwrap());
     fs::remove_dir_all(output).unwrap();
     session.stop();
+}
+
+#[test]
+fn rtl_tcp_drop_reconnects_and_keeps_receiving() {
+    use std::{io::Read, net::TcpListener, sync::mpsc};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (release, wait) = mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        // First connection: a little IQ, then the driver app goes away.
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"RTL0\0\0\0\x05\0\0\0\x1d").unwrap();
+        stream.read_exact(&mut [0; 20]).unwrap();
+        stream.write_all(&vec![127; 9600 * 2]).unwrap();
+        drop(stream);
+        // Second connection: the restarted driver keeps streaming.
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.write_all(b"RTL0\0\0\0\x05\0\0\0\x1d").unwrap();
+        stream.read_exact(&mut [0; 20]).unwrap();
+        stream.write_all(&vec![127; 9600 * 2]).unwrap();
+        let _ = wait.recv_timeout(Duration::from_secs(20));
+    });
+    let mut session = Session::start(Config {
+        input: Input::RtlTcp {
+            radio: receiver_core::rtl_tcp::Config {
+                host: "127.0.0.1".into(),
+                port,
+                sample_rate: 240000,
+                center_hz: 352603125,
+                gain_db: None,
+                ppm: 0,
+                reconnect_seconds: 60,
+            },
+        },
+        channels: presets("east"),
+    })
+    .unwrap();
+    let start = Instant::now();
+    let status = loop {
+        let (status, _) = session.snapshot(None);
+        assert!(status.running, "{:?}", status.error);
+        if status.reconnects == 1 && !status.reconnecting {
+            break status;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "no reconnection");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.state, "receiving");
+    assert!(status.error.is_none());
+    release.send(()).unwrap();
+    session.stop();
+    server.join().unwrap();
 }

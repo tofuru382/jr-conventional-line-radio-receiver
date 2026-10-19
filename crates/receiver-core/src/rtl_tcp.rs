@@ -18,6 +18,13 @@ pub struct Config {
     pub gain_db: Option<f64>,
     #[serde(default)]
     pub ppm: i32,
+    /// Keep trying to reconnect this long after the server stops or drops
+    /// the connection (0: fail at once).
+    #[serde(default = "default_reconnect_seconds")]
+    pub reconnect_seconds: u32,
+}
+fn default_reconnect_seconds() -> u32 {
+    RECONNECT_LIMIT.as_secs() as u32
 }
 impl Config {
     pub fn validate(&self) -> Result<SocketAddr, String> {
@@ -175,6 +182,85 @@ impl RtlTcp {
     }
 }
 
+/// Wait between reconnection attempts.
+const RETRY_EVERY: Duration = Duration::from_secs(2);
+/// Default: give up (and report the original error) after this long without a server.
+pub const RECONNECT_LIMIT: Duration = Duration::from_secs(60);
+
+/// RTL-TCP input that reconnects on its own when the server stops sending or
+/// drops the connection (an on-phone driver app can restart or briefly lose
+/// its USB dongle). The lost span is reported once as a discontinuity, so the
+/// pipelines resynchronise instead of splicing unrelated IQ together.
+pub struct Reconnecting {
+    config: Config,
+    inner: Option<RtlTcp>,
+    lost_at: Option<Instant>,
+    next_attempt: Instant,
+    /// Why the connection was lost (reported if reconnection fails).
+    cause: String,
+    /// Failed attempts in the current outage.
+    pub failed_attempts: u32,
+    /// Successful reconnections in this session.
+    pub reconnects: u64,
+}
+impl Reconnecting {
+    pub fn open(config: &Config, stop: &AtomicBool) -> Result<Self, String> {
+        Ok(Self {
+            inner: Some(RtlTcp::open(config, stop)?),
+            config: config.clone(),
+            lost_at: None,
+            next_attempt: Instant::now(),
+            cause: String::new(),
+            failed_attempts: 0,
+            reconnects: 0,
+        })
+    }
+    pub fn reconnecting(&self) -> bool {
+        self.inner.is_none()
+    }
+    pub fn read(&mut self, output: &mut [Complex32], stop: &AtomicBool) -> Result<Read, String> {
+        if let Some(inner) = self.inner.as_mut() {
+            match inner.read(output) {
+                Ok(read) => return Ok(read),
+                Err(e) if self.config.reconnect_seconds == 0 => return Err(e),
+                Err(e) => {
+                    self.inner = None;
+                    self.lost_at = Some(Instant::now());
+                    self.next_attempt = Instant::now() + Duration::from_millis(500);
+                    self.cause = e;
+                    self.failed_attempts = 0;
+                    return Ok(Read::Discontinuity);
+                }
+            }
+        }
+        let limit = Duration::from_secs(self.config.reconnect_seconds.into());
+        if self.lost_at.is_some_and(|t| t.elapsed() >= limit) {
+            return Err(format!(
+                "{}（{} 秒間自動で再接続を試みましたが、つながりませんでした）",
+                self.cause,
+                limit.as_secs()
+            ));
+        }
+        if Instant::now() < self.next_attempt || stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+            return Ok(Read::Timeout);
+        }
+        match RtlTcp::open(&self.config, stop) {
+            Ok(inner) => {
+                self.inner = Some(inner);
+                self.lost_at = None;
+                self.failed_attempts = 0;
+                self.reconnects += 1;
+            }
+            Err(_) => {
+                self.failed_attempts += 1;
+                self.next_attempt = Instant::now() + RETRY_EVERY;
+            }
+        }
+        Ok(Read::Timeout)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +277,7 @@ mod tests {
             center_hz: 352603125,
             gain_db: Some(19.7),
             ppm: -12,
+            reconnect_seconds: 60,
         }
     }
     fn header(s: &mut TcpStream) {
@@ -250,6 +337,73 @@ mod tests {
         assert!(error.contains("5 秒間"));
         release.send(()).unwrap();
         server.join().unwrap();
+    }
+    #[test]
+    fn dropped_server_is_reconnected_after_one_discontinuity() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            for byte in [10u8, 20] {
+                let (mut s, _) = listener.accept().unwrap();
+                header(&mut s);
+                let mut commands = [0; 25];
+                s.read_exact(&mut commands).unwrap();
+                s.write_all(&[byte; 4]).unwrap();
+                // Closing at once: the driver app restarted or lost USB.
+            }
+        });
+        let stop = AtomicBool::new(false);
+        let mut input = Reconnecting::open(&config(port), &stop).unwrap();
+        let mut iq = [Complex32::default(); 2];
+        let mut reads = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while reads
+            .iter()
+            .filter(|r| matches!(r, Read::Samples(_)))
+            .count()
+            < 2
+        {
+            assert!(Instant::now() < deadline, "no reconnection: {reads:?}");
+            let read = input.read(&mut iq, &stop).unwrap();
+            if matches!(read, Read::Discontinuity) {
+                assert!(input.reconnecting());
+            }
+            if !matches!(read, Read::Timeout) {
+                reads.push(read);
+            }
+        }
+        assert!(matches!(reads[0], Read::Samples(2)));
+        assert!(matches!(reads[1], Read::Discontinuity));
+        assert!(matches!(reads[2], Read::Samples(2)));
+        assert_eq!(iq[0].real, (20.0 - 127.5) / 128.0);
+        assert_eq!(input.reconnects, 1);
+        assert!(!input.reconnecting());
+        server.join().unwrap();
+    }
+    #[test]
+    fn reconnection_gives_up_with_the_original_cause() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            header(&mut s);
+            let mut commands = [0; 25];
+            s.read_exact(&mut commands).unwrap();
+            // The listener closes with the thread: nothing to reconnect to.
+        });
+        let stop = AtomicBool::new(false);
+        let mut input = Reconnecting::open(&config(port), &stop).unwrap();
+        server.join().unwrap();
+        let mut iq = [Complex32::default(); 2];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !input.reconnecting() {
+            assert!(Instant::now() < deadline);
+            input.read(&mut iq, &stop).unwrap();
+        }
+        input.lost_at = Some(Instant::now() - RECONNECT_LIMIT);
+        let error = input.read(&mut iq, &stop).unwrap_err();
+        assert!(error.contains("接続を閉じ"), "{error}");
+        assert!(error.contains("再接続"), "{error}");
     }
     #[test]
     fn header_wait_can_be_cancelled_and_wrong_protocol_is_rejected() {

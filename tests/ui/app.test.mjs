@@ -441,6 +441,26 @@ test("Android layout has the route picker but no search, only the detailed list,
   assert.equal($("listen").checked, true);
   assert.equal(monitor().enabled, true);
 });
+test("Android shows reconnection and restarts a driver that does not answer", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  await app.click("start");
+  const launches = () => app.calls.filter((c) => c.command === "start_rtl_driver");
+  app.setSnapshot({ status: { ...status(), reconnecting: true, reconnect_failures: 0, reconnects: 0 }, audio: [] });
+  await app.poll();
+  assert.equal($("state").textContent, "再接続中");
+  assert.equal($("error").hidden, true);
+  assert.equal(launches().length, 0);
+  app.setSnapshot({ status: { ...status(), reconnecting: true, reconnect_failures: 1, reconnects: 0 }, audio: [] });
+  await app.poll();
+  await app.poll();
+  assert.equal(launches().length, 1);
+  assert.equal(launches()[0].args.port, Number($("port").value));
+  app.setSnapshot({ status: { ...status(), reconnecting: false, reconnect_failures: 0, reconnects: 1 }, audio: [] });
+  await app.poll();
+  assert.equal($("state").textContent, "受信中");
+  assert.match($("capture-info").textContent, /自動再接続 1 回/);
+});
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;

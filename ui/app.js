@@ -1316,6 +1316,28 @@ function fillDriverEndpoint() {
     }
   return changed;
 }
+// RTL-TCP reconnects by itself when the driver app stops streaming. If the
+// on-phone driver does not answer (it closed its service), start it again;
+// Android only lets an app open another app while it is on screen.
+const driverRelaunch = { at: 0, count: 0 };
+function relaunchDriverIfNeeded(s) {
+  if (!s.reconnecting) {
+    driverRelaunch.count = 0;
+    return;
+  }
+  if (
+    !platform.android ||
+    $("input-kind").value !== "rtl_tcp" ||
+    !["127.0.0.1", "localhost"].includes($("host").value.trim()) ||
+    s.reconnect_failures < 1 ||
+    driverRelaunch.count >= 3 ||
+    Date.now() - driverRelaunch.at < 15000
+  )
+    return;
+  driverRelaunch.at = Date.now();
+  driverRelaunch.count++;
+  invoke("start_rtl_driver", { port: Number($("port").value) }).catch(() => {});
+}
 $("driver-start").addEventListener("click", async () => {
   clearError();
   if (fillDriverEndpoint()) void persistPreferences();
@@ -1606,20 +1628,22 @@ async function poll() {
           else resetAudio();
           syncNativeMonitor();
         }
-        const stateLabel =
-          {
-            starting: "準備中",
-            receiving: "受信中",
-            stopped: "停止中",
-            completed: "再生完了",
-            failed: "受信エラー",
-          }[s.state] ?? s.state;
+        const stateLabel = s.reconnecting
+          ? "再接続中"
+          : ({
+              starting: "準備中",
+              receiving: "受信中",
+              stopped: "停止中",
+              completed: "再生完了",
+              failed: "受信エラー",
+            }[s.state] ?? s.state);
+        relaunchDriverIfNeeded(s);
         if ($("state").textContent !== stateLabel)
           $("state").textContent = stateLabel;
         $("state").classList.toggle("active", s.running);
         if (s.error) fail(s.error);
         $("capture-info").textContent = s.sample_rate
-          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}`
+          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}`
           : s.running
             ? "接続を準備しています"
             : "未接続 · 受信設定と接続先を確認してください";

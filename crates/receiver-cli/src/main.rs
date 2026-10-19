@@ -72,6 +72,7 @@ fn run() -> Result<()> {
                     .unwrap_or(preset.center_hz as u32),
                 gain_db: a.get(6).map(|s| s.parse()).transpose()?,
                 ppm: 0,
+                reconnect_seconds: 60,
             };
             let mut session = Session::start(Config {
                 input: Input::RtlTcp { radio },

@@ -83,6 +83,12 @@ pub struct Overview {
     pub recording: RecordingStatus,
     pub selected_channel: Option<String>,
     pub active_calls: Vec<String>,
+    /// RTL-TCP lost its server and is reconnecting automatically.
+    pub reconnecting: bool,
+    /// Failed attempts in the current outage (the server is not answering).
+    pub reconnect_failures: u32,
+    /// Successful automatic reconnections in this session.
+    pub reconnects: u64,
 }
 struct Shared {
     state: String,
@@ -91,6 +97,7 @@ struct Shared {
     center: f64,
     overflows: u64,
     progress: f64,
+    reconnection: (bool, u32, u64),
 }
 pub struct Session {
     stop: Arc<AtomicBool>,
@@ -107,7 +114,7 @@ struct Block {
 }
 enum Source {
     Wave(IqWave),
-    RtlTcp(crate::rtl_tcp::RtlTcp),
+    RtlTcp(crate::rtl_tcp::Reconnecting),
     #[cfg(feature = "soapy")]
     Sdr(crate::source::Sdr),
     #[cfg(test)]
@@ -128,7 +135,7 @@ impl Source {
     fn open(input: &Input, stop: &AtomicBool) -> Result<(Self, f64, f64), String> {
         match input {
             Input::RtlTcp { radio } => {
-                let s = crate::rtl_tcp::RtlTcp::open(radio, stop)?;
+                let s = crate::rtl_tcp::Reconnecting::open(radio, stop)?;
                 Ok((
                     Self::RtlTcp(s),
                     radio.sample_rate as f64,
@@ -155,9 +162,18 @@ impl Source {
             }
         }
     }
-    fn read(&mut self, buf: &mut [Complex32]) -> Result<Option<Read>, String> {
+    /// RTL-TCP reconnection state: (reconnecting, failed attempts, reconnects).
+    fn reconnection(&self) -> (bool, u32, u64) {
         match self {
-            Self::RtlTcp(s) => s.read(buf).map(Some),
+            Self::RtlTcp(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
+            #[cfg(test)]
+            Self::Gated { source, .. } => source.reconnection(),
+            _ => (false, 0, 0),
+        }
+    }
+    fn read(&mut self, buf: &mut [Complex32], stop: &AtomicBool) -> Result<Option<Read>, String> {
+        match self {
+            Self::RtlTcp(s) => s.read(buf, stop).map(Some),
             Self::Wave(w) => {
                 let n = w.read(buf).map_err(|e| e.to_string())?;
                 Ok(if n == 0 { None } else { Some(Read::Samples(n)) })
@@ -167,7 +183,7 @@ impl Source {
             #[cfg(test)]
             Self::Gated { source, permits } => {
                 match permits.recv_timeout(Duration::from_millis(20)) {
-                    Ok(()) => source.read(buf),
+                    Ok(()) => source.read(buf, stop),
                     Err(mpsc::RecvTimeoutError::Timeout) => Ok(Some(Read::Timeout)),
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         Err("Test source gate disconnected".into())
@@ -198,6 +214,7 @@ impl Session {
             center: 0.0,
             overflows: 0,
             progress: 0.0,
+            reconnection: (false, 0, 0),
         }));
         let channels: Vec<_> = config
             .channels
@@ -339,6 +356,9 @@ impl Session {
                 recording: self.recorder.snapshot(),
                 selected_channel: selected.map(String::from),
                 active_calls,
+                reconnecting: s.reconnection.0,
+                reconnect_failures: s.reconnection.1,
+                reconnects: s.reconnection.2,
             },
             audio,
         )
@@ -547,7 +567,12 @@ fn run(
     let mut buf = vec![Complex32::default(); (rate * 0.04).round().clamp(384.0, 65536.0) as usize];
     let result = (|| -> Result<(), String> {
         while !stop.load(Ordering::Relaxed) {
-            match source.read(&mut buf)? {
+            let read = source.read(&mut buf, stop)?;
+            let reconnection = source.reconnection();
+            if shared.lock().unwrap().reconnection != reconnection {
+                shared.lock().unwrap().reconnection = reconnection;
+            }
+            match read {
                 None => break,
                 Some(Read::Timeout) => continue,
                 Some(Read::Discontinuity) => {
@@ -798,6 +823,7 @@ mod tests {
                 center: 352603125.0,
                 overflows: 0,
                 progress: 0.0,
+                reconnection: (false, 0, 0),
             })),
             channels: configs
                 .iter()
