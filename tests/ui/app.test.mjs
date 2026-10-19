@@ -409,11 +409,12 @@ test("Android plays audio natively and holds the background service while receiv
   assert.deepEqual(service, [true, false]);
   assert.equal(monitor().enabled, false);
 });
-test("Android layout has no search, only the detailed list, a top mute toggle and its own name", async (t) => {
+test("Android layout has the route picker but no search, only the detailed list, a top mute toggle and its own name", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
   assert.ok(app.w.document.documentElement.classList.contains("android"));
-  assert.equal($("route-open").hidden, true);
+  assert.equal($("route-open").hidden, false);
+  assert.equal($("route-feedback").hidden, false);
   assert.equal($("channel-search").closest("label").hidden, true);
   assert.equal($("view-detailed").closest(".view-switch").hidden, true);
   assert.equal($("channels-table").hidden, false);
@@ -440,6 +441,19 @@ test("Android layout has no search, only the detailed list, a top mute toggle an
   assert.equal($("listen").checked, true);
   assert.equal(monitor().enabled, true);
 });
+test("Android chooses receive targets by route", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.equal($("total-enabled").textContent, "22");
+  await app.click("route-open");
+  assert.equal($("route-dialog").open, true);
+  app.input("route-search", "甲府 小淵沢");
+  [...$("route-results").children].find((n) => !n.hidden).querySelector("input").click();
+  await app.click("route-apply");
+  assert.equal($("route-dialog").open, false);
+  assert.equal($("total-enabled").textContent, "4");
+  assert.match($("route-feedback").textContent, /4 波を受信対象にしました/);
+});
 test("Mac uses the simplified layout but keeps SoapySDR, pickers and Web Audio", async (t) => {
   const app = await setup(t, {
     configureConnection: false,
@@ -451,7 +465,7 @@ test("Mac uses the simplified layout but keeps SoapySDR, pickers and Web Audio",
   assert.equal(root.classList.contains("android"), false);
   assert.equal(app.w.document.title, "JR-CLRR For Mac");
   assert.match($("about-description").textContent, /Mac 版$/);
-  assert.equal($("route-open").hidden, true);
+  assert.equal($("route-open").hidden, false);
   assert.equal($("channel-search").closest("label").hidden, true);
   assert.equal($("channels-table").hidden, false);
   assert.ok($("mute-toggle"));

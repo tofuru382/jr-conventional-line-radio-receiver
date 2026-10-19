@@ -1340,9 +1340,7 @@ function applyAndroidLayout() {
 // channel list, a mute toggle in the top bar, and the build's own name.
 function applySimpleLayout(name) {
   document.documentElement.classList.add("simple");
-  // No route picker or channel search.
-  $("route-open").hidden = true;
-  $("route-feedback").hidden = true;
+  // Targets are chosen by route ("路線から選ぶ") or per channel; no search box.
   $("channel-search").closest("label").hidden = true;
   $("filter-note").hidden = true;
   // Detailed list only.
