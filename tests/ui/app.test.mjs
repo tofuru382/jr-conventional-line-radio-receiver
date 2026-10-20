@@ -1314,6 +1314,8 @@ test("JSONL outputs can be selected without audio and empty output choices are r
     audio: false,
     raw_frames: true,
     data_messages: true,
+    min_clip_ms: 1000,
+    join_resync_ms: 2000,
   });
   assert.equal(ui.$("output-data").matches(":disabled"), true);
   ui.$("recording-settings").open = false;
@@ -1521,7 +1523,7 @@ test("recording starts with the OS default folder without a picker and preserves
     ),
     {
       directory: defaultRecordingDirectory,
-      options: { audio: true, raw_frames: false, data_messages: false },
+      options: { audio: true, raw_frames: false, data_messages: false, min_clip_ms: 1000, join_resync_ms: 2000 },
     },
   );
   assert.equal(ui.$("recording-state").textContent, "保存中");
@@ -1593,7 +1595,7 @@ test("recording validates its folder, is independent of monitoring, and stops wi
     ),
     {
       directory: "/tmp/recordings",
-      options: { audio: true, raw_frames: false, data_messages: false },
+      options: { audio: true, raw_frames: false, data_messages: false, min_clip_ms: 1000, join_resync_ms: 2000 },
     },
   );
   assert.equal(ui.$("recording-state").textContent, "保存中");

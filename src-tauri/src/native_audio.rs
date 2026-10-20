@@ -212,6 +212,9 @@ mod android {
     const PREBUFFER_WAIT: Duration = Duration::from_millis(250);
     /// Written per loop turn (100 ms), so mute and channel changes apply soon.
     const CHUNK: usize = (INPUT_RATE as usize) / 10;
+    /// A burst this short with nothing around it is a falsely accepted noise
+    /// frame (heard as a "ブツ"), not speech: it is not played (160 ms).
+    const NOISE_BURST: usize = (INPUT_RATE as usize) * 160 / 1000;
 
     struct Output {
         stream: AudioStream,
@@ -333,6 +336,13 @@ mod android {
                     .is_none_or(|o| queued(&o.stream) < o.low_water)
             {
                 playing = false;
+            }
+            if !playing
+                && !pending.is_empty()
+                && pending.len() < NOISE_BURST
+                && last_audio.elapsed() >= PREBUFFER_WAIT
+            {
+                pending.clear();
             }
             if !playing
                 && !pending.is_empty()

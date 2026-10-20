@@ -275,6 +275,7 @@ fn recorded_iq_runs_all_22_workers_in_real_time() {
                 audio: true,
                 raw_frames: true,
                 data_messages: true,
+                ..Default::default()
             },
         )
         .unwrap();

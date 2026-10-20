@@ -587,6 +587,7 @@ $("auto-select").addEventListener("change", () => {
   renderSelectionMode();
   syncNativeMonitor();
 });
+const clipRules = { min_clip_ms: 1000, join_resync_ms: 2000 };
 function outputOptions() {
   return {
     audio: $("output-audio").checked,
@@ -712,7 +713,12 @@ async function startRecording(automatic = false) {
     busy = true;
     setControls();
     await flushPreferences();
-    recordingStatus = await invoke("start_recording", { directory, options });
+    recordingStatus = await invoke("start_recording", {
+      directory,
+      // Weak signals resync mid-call and decode isolated noise frames: keep a
+      // call in one file and drop WAVs shorter than one second.
+      options: { ...options, ...clipRules },
+    });
     recordingEnabled = true;
     await flushPreferences();
   } catch (e) {

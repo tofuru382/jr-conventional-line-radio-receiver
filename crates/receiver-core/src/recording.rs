@@ -36,6 +36,13 @@ pub struct OutputOptions {
     pub audio: bool,
     pub raw_frames: bool,
     pub data_messages: bool,
+    /// Delete WAV files shorter than this (isolated noise bursts). 0 keeps all.
+    #[serde(default)]
+    pub min_clip_ms: u32,
+    /// Keep writing the same WAV across a resynchronization when the previous
+    /// audio on that channel arrived within this many milliseconds. 0 splits.
+    #[serde(default)]
+    pub join_resync_ms: u32,
 }
 impl Default for OutputOptions {
     fn default() -> Self {
@@ -43,6 +50,8 @@ impl Default for OutputOptions {
             audio: true,
             raw_frames: false,
             data_messages: false,
+            min_clip_ms: 0,
+            join_resync_ms: 0,
         }
     }
 }
@@ -254,8 +263,11 @@ struct Track {
     number: u64,
     clip: Option<Clip>,
     last: Option<(u64, u32)>,
+    /// Wall-clock time of the last audio written on this channel.
+    last_at: Option<std::time::Instant>,
 }
 struct Writer {
+    options: OutputOptions,
     directory: PathBuf,
     started_at: String,
     tracks: HashMap<String, Track>,
@@ -365,6 +377,7 @@ impl Writer {
                     number: 0,
                     clip: None,
                     last: None,
+                    last_at: None,
                 },
             );
         }
@@ -420,6 +433,7 @@ impl Writer {
         let raw = jsonl("raw-frames.jsonl", options.raw_frames)?;
         let messages = jsonl("data-messages.jsonl", options.data_messages)?;
         Ok(Self {
+            options,
             raw,
             messages,
             raw_frames: 0,
@@ -495,17 +509,41 @@ impl Writer {
         serde_json::to_writer(&mut *file, value).map_err(|e| e.to_string())?;
         file.write_all(b"\n").map_err(|e| e.to_string())
     }
-    fn close(track: &mut Track, index: &mut File) -> Result<(), String> {
+    /// Finalizes the track's WAV. Returns the samples of a clip deleted for
+    /// being shorter than `min_samples` (0 when kept).
+    fn close(
+        track: &mut Track,
+        index: &mut File,
+        directory: &Path,
+        min_samples: u64,
+    ) -> Result<u64, String> {
         if let Some(clip) = track.clip.take() {
             let samples = clip.wave.samples();
             clip.wave
                 .finish()
                 .map_err(|e| format!("{} の WAV を確定できません：{e}", clip.name))?;
+            if samples < min_samples {
+                fs::remove_file(directory.join(&clip.name))
+                    .map_err(|e| format!("{} を削除できません：{e}", clip.name))?;
+                // Reuse the number so files stay consecutive.
+                track.number -= 1;
+                return Ok(samples);
+            }
             serde_json::to_writer(&mut *index,&serde_json::json!({
                 "file":clip.name,"channel_id":track.config.id,"frequency_hz":track.config.frequency_hz,
                 "label":track.config.label,"epoch":clip.epoch,"first_index":clip.first_index,"last_index":clip.last_index,"samples":samples
             })).map_err(|e|e.to_string())?;
             index.write_all(b"\n").map_err(|e| e.to_string())?;
+        }
+        Ok(0)
+    }
+    fn close_track(&mut self, id: &str) -> Result<(), String> {
+        let min = u64::from(self.options.min_clip_ms) * 8;
+        let track = self.tracks.get_mut(id).unwrap();
+        let dropped = Self::close(track, &mut self.index, &self.directory, min)?;
+        if dropped > 0 {
+            self.files -= 1;
+            self.pcm_samples -= dropped;
         }
         Ok(())
     }
@@ -526,14 +564,22 @@ impl Writer {
             .last
             .filter(|(epoch, _)| *epoch == audio.epoch)
             .map_or(0, |(_, index)| (audio.index - index - 1) as u64 * 320);
+        // A resynchronization in the middle of a call keeps the same file
+        // when the channel was heard moments ago (weak signals resync often).
+        let join = track.last_at.is_some_and(|t| {
+            t.elapsed() <= std::time::Duration::from_millis(self.options.join_resync_ms.into())
+        });
+        // Compare with the last frame written, not the clip's first epoch: a
+        // joined clip continues in the new epoch.
+        let resync = track.last.is_some_and(|(epoch, _)| epoch != audio.epoch);
         let split = track.clip.as_ref().is_some_and(|c| {
-            c.epoch != audio.epoch
-                || gap > GAP_SAMPLES
-                || c.samples + gap + 320 > self.segment_samples
+            resync && !join || gap > GAP_SAMPLES || c.samples + gap + 320 > self.segment_samples
         });
         if split {
-            Self::close(track, &mut self.index)?;
+            let id = audio.channel.clone();
+            self.close_track(&id)?;
         }
+        let track = self.tracks.get_mut(&audio.channel).unwrap();
         if track.clip.is_none() {
             track.number += 1;
             // Only validated integer frequency and our own counter enter paths.
@@ -566,12 +612,14 @@ impl Writer {
         clip.samples += 320;
         clip.last_index = audio.index;
         track.last = Some((audio.epoch, audio.index));
+        track.last_at = Some(std::time::Instant::now());
         self.pcm_samples += 320;
         Ok(())
     }
     fn finish(mut self, mut error: Option<String>) -> (u64, u64, Option<String>, bool) {
-        for track in self.tracks.values_mut() {
-            if let Err(e) = Self::close(track, &mut self.index) {
+        let ids: Vec<String> = self.tracks.keys().cloned().collect();
+        for id in ids {
+            if let Err(e) = self.close_track(&id) {
                 error.get_or_insert(e);
             }
         }
@@ -703,6 +751,70 @@ mod tests {
         );
     }
     #[test]
+    fn resyncs_in_a_call_join_one_file_and_short_noise_bursts_are_dropped() {
+        let temp = Temp::new();
+        let channels = presets("east")[..2].to_vec();
+        let r = Recorder::default();
+        let options = OutputOptions {
+            min_clip_ms: 1000,
+            join_resync_ms: 2000,
+            ..Default::default()
+        };
+        let dir = PathBuf::from(
+            r.start_with_options(&temp.0, &channels, options)
+                .unwrap()
+                .directory
+                .unwrap(),
+        );
+        // Channel 0: a 1.2 s call broken by two resynchronizations.
+        for (epoch, value) in [(0u64, 1i16), (1, 2), (2, 3)] {
+            for index in 0..10 {
+                r.push(&pcm(&channels[0], epoch, index, value));
+            }
+        }
+        // Channel 1: a lone 80 ms burst (noise), then a 1.2 s call after a
+        // long silence that must start its own numbering at 1.
+        r.push(&pcm(&channels[1], 0, 0, 9));
+        r.push(&pcm(&channels[1], 0, 1, 9));
+        for index in 0..30 {
+            r.push(&pcm(&channels[1], 0, 500 + index, 5));
+        }
+        let s = r.stop();
+        assert_eq!(s.state, "completed", "{:?}", s.error);
+        assert_eq!(s.files, 2);
+        assert_eq!(s.pcm_samples, 2 * 30 * 320);
+        assert_eq!(
+            read_pcm(&dir.join("352537500Hz-000001.wav")),
+            [vec![1; 3200], vec![2; 3200], vec![3; 3200]].concat()
+        );
+        assert_eq!(read_pcm(&dir.join("352543750Hz-000001.wav")), vec![5; 9600]);
+        assert!(!dir.join("352543750Hz-000002.wav").exists());
+        let index = fs::read_to_string(dir.join("files.jsonl")).unwrap();
+        assert_eq!(index.lines().count(), 2);
+    }
+    #[test]
+    fn a_session_of_only_noise_bursts_saves_nothing() {
+        let temp = Temp::new();
+        let channels = presets("east")[..1].to_vec();
+        let r = Recorder::default();
+        let options = OutputOptions {
+            min_clip_ms: 1000,
+            join_resync_ms: 2000,
+            ..Default::default()
+        };
+        let dir = PathBuf::from(
+            r.start_with_options(&temp.0, &channels, options)
+                .unwrap()
+                .directory
+                .unwrap(),
+        );
+        r.push(&pcm(&channels[0], 0, 0, 9));
+        let s = r.stop();
+        assert_eq!((s.files, s.pcm_samples), (0, 0));
+        assert!(s.discarded);
+        assert!(!dir.exists());
+    }
+    #[test]
     fn long_gaps_and_size_limit_rotate_before_wav_overflow_and_ids_cannot_escape_directory() {
         let temp = Temp::new();
         let mut channels = presets("east")[..1].to_vec();
@@ -800,7 +912,8 @@ mod tests {
                 OutputOptions {
                     audio: false,
                     raw_frames: false,
-                    data_messages: false
+                    data_messages: false,
+                    ..Default::default()
                 }
             )
             .is_err());
@@ -811,11 +924,13 @@ mod tests {
                 audio: false,
                 raw_frames: true,
                 data_messages: false,
+                ..Default::default()
             },
             OutputOptions {
                 audio: false,
                 raw_frames: false,
                 data_messages: true,
+                ..Default::default()
             },
         ] {
             let dir = PathBuf::from(
@@ -876,6 +991,7 @@ mod tests {
                 audio: false,
                 raw_frames: false,
                 data_messages: true,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -922,6 +1038,7 @@ mod tests {
                 audio: false,
                 raw_frames: true,
                 data_messages: true,
+                ..Default::default()
             },
         )
         .unwrap();
