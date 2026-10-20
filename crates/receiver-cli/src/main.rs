@@ -77,6 +77,7 @@ fn run() -> Result<()> {
             let mut session = Session::start(Config {
                 input: Input::RtlTcp { radio },
                 channels: preset.channels,
+                voice_decoder: Default::default(),
             })?;
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(seconds) {

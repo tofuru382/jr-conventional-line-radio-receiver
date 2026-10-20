@@ -1920,6 +1920,10 @@ name = "jr_conventional_voice_lite"
 version = "1.1.0"
 
 [[package]]
+name = "jr_conventional_voice_v14"
+version = "1.2.0"
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2772,6 +2776,7 @@ dependencies = [
  "jr_conventional_dsp",
  "jr_conventional_voice",
  "jr_conventional_voice_lite",
+ "jr_conventional_voice_v14",
  "pkg-config",
  "serde",
  "serde_json",

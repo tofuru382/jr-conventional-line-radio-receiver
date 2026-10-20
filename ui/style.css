@@ -1567,6 +1567,21 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   margin-block-start: 12px;
 }
 
+.decoder-choice {
+  display: grid;
+  gap: 6px;
+  margin-block-start: 12px;
+}
+
+.decoder-choice label {
+  display: grid;
+  gap: 6px;
+}
+
+.decoder-choice .field-hint {
+  margin: 0;
+}
+
 .test-sound {
   display: grid;
   gap: 6px;

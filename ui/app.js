@@ -549,6 +549,7 @@ function setControls() {
   $("start").disabled = !native || running || busy || !channels.length;
   $("stop").disabled = !running || busy;
   $("selected-format").disabled = running || busy || !channels.length;
+  if ($("voice-decoder")) $("voice-decoder").disabled = running || busy;
   $("preferences-retry").disabled = busy || (preferencesLoadFailed && running);
   $("total-enabled").textContent = enabled.size;
   renderMute();
@@ -1401,14 +1402,64 @@ function applySimpleLayout(name) {
   document.querySelector(".topbar .eyebrow").textContent =
     "JR 在来線デジタル列車無線受信";
   $("about-product").textContent = name;
+  renderAbout();
+  document.querySelector("footer > span").firstChild.textContent = `${name} `;
+}
+function renderAbout() {
   const edition = platform.android ? "Android 版" : "Mac 版";
-  const decoder =
-    platform.voice_decoder === "v1.3" || (platform.android && !platform.voice_decoder)
+  const choice = $("voice-decoder")?.value;
+  const decoder = choice
+    ? `（音声の復号は ${decoders[choice].name} の復号器）`
+    : platform.voice_decoder === "v1.3" || (platform.android && !platform.voice_decoder)
       ? "（音声の復号は軽量な v1.3 の復号器）"
       : "";
   $("about-description").textContent =
     `KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした ${edition}${decoder}`;
-  document.querySelector("footer > span").firstChild.textContent = `${name} `;
+}
+// Voice decoder generations (receiver-core VoiceDecoder). Later ones sound more
+// natural and need more CPU; the choice is kept per device.
+const decoders = {
+  v13: { name: "v1.3", label: "v1.3（軽い・機械的な声）" },
+  v14: { name: "v1.4", label: "v1.4（中間）" },
+  v15: { name: "v1.5", label: "v1.5（高音質・重い）" },
+};
+const decoderKey = "jr-clrr.voice-decoder";
+function addDecoderChoice() {
+  const fallback = platform.voice_decoder === "v1.3" || platform.android ? "v13" : "v15";
+  let saved = null;
+  try {
+    saved = localStorage.getItem(decoderKey);
+  } catch {
+    // Not persisted; use the platform default.
+  }
+  const wrap = el("div", undefined, "decoder-choice");
+  const label = el("label", "音声の復号器");
+  label.htmlFor = "voice-decoder";
+  const select = el("select");
+  select.id = "voice-decoder";
+  for (const [value, d] of Object.entries(decoders)) {
+    const option = el("option", d.label);
+    option.value = value;
+    select.append(option);
+  }
+  select.value = decoders[saved] ? saved : fallback;
+  label.append(select);
+  const hint = el(
+    "p",
+    "受信を停止してから変更できます。「処理欠落」が増え続けるときは軽いものにしてください。",
+    "field-hint",
+  );
+  select.addEventListener("change", () => {
+    try {
+      localStorage.setItem(decoderKey, select.value);
+    } catch {
+      // The choice still applies to the next reception.
+    }
+    renderAbout();
+  });
+  wrap.append(label, hint);
+  document.querySelector(".audio-controls").append(wrap);
+  renderAbout();
 }
 function renderMute() {
   const mute = $("mute-toggle");
@@ -1487,7 +1538,11 @@ $("start").addEventListener("click", async () => {
     });
     await flushPreferences();
     await invoke("start", {
-      config: { input, channels: activeChannels },
+      config: {
+        input,
+        channels: activeChannels,
+        ...($("voice-decoder") ? { voice_decoder: $("voice-decoder").value } : {}),
+      },
     });
     running = true;
     syncBackgroundService();
@@ -1726,8 +1781,10 @@ try {
     // Older backends report only `android`; Android builds are always simple.
     const simpleName =
       platform.name ?? (platform.android ? "JR-CLRR For Android" : null);
-    if ((platform.simple ?? platform.android) && simpleName)
+    if ((platform.simple ?? platform.android) && simpleName) {
       applySimpleLayout(simpleName);
+      addDecoderChoice();
+    }
     nativeAudio = platform.android && nativeOutputPreferred();
     if (platform.android) {
       addOutputChoice();

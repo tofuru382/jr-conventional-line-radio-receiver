@@ -219,7 +219,7 @@ struct Platform {
     /// The simplified JR-CLRR layout (Android and macOS builds of this fork).
     simple: bool,
     name: Option<&'static str>,
-    /// "v1.3" when the lighter voice decoder (crates/jr-voice-lite) is used.
+    /// Default voice decoder of the selector ("v1.3" on phones, "v1.5" on Mac).
     voice_decoder: &'static str,
 }
 #[tauri::command]

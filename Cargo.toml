@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/jr-conventional-dsp", "crates/jr-voice", "crates/jr-voice-lite", "crates/receiver-core", "crates/receiver-cli", "src-tauri"]
+members = ["crates/jr-conventional-dsp", "crates/jr-voice", "crates/jr-voice-lite", "crates/jr-voice-v14", "crates/receiver-core", "crates/receiver-cli", "src-tauri"]
 default-members = ["crates/receiver-core", "crates/receiver-cli"]
 resolver = "2"
 

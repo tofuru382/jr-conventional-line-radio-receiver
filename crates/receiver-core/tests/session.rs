@@ -60,6 +60,7 @@ fn all_22_workers_receive_the_same_iq_and_finish_without_drops() {
             center_hz: 352603125.0,
         },
         channels: presets("east"),
+        voice_decoder: Default::default(),
     })
     .unwrap();
     let final_status = wait_for_session_end(&session);
@@ -86,6 +87,7 @@ fn cancellation_joins_workers_and_new_session_has_no_old_state() {
                 center_hz: 352603125.0,
             },
             channels: presets("west"),
+            voice_decoder: Default::default(),
         })
         .unwrap();
         session.stop();
@@ -106,6 +108,7 @@ fn invalid_bandwidth_fails_the_session_before_any_channel_runs() {
             center_hz: 300000000.0,
         },
         channels: presets("east"),
+        voice_decoder: Default::default(),
     })
     .unwrap();
     let start = Instant::now();
@@ -167,6 +170,7 @@ fn rtl_tcp_disconnect_is_a_failure_after_all_22_workers_drain() {
             },
         },
         channels: presets("east"),
+        voice_decoder: Default::default(),
     })
     .unwrap();
     let status = wait_for_session_end(&session);
@@ -215,6 +219,7 @@ fn stopping_during_rtl_tcp_handshake_closes_connection_without_failure() {
             },
         },
         channels: presets("east"),
+        voice_decoder: Default::default(),
     })
     .unwrap();
     wait.recv_timeout(timeout)
@@ -259,6 +264,7 @@ fn recorded_iq_runs_all_22_workers_in_real_time() {
             center_hz: center,
         },
         channels: presets("east"),
+        voice_decoder: Default::default(),
     })
     .unwrap();
     let start = Instant::now();
@@ -355,6 +361,7 @@ fn rtl_tcp_drop_reconnects_and_keeps_receiving() {
             },
         },
         channels: presets("east"),
+        voice_decoder: Default::default(),
     })
     .unwrap();
     let start = Instant::now();

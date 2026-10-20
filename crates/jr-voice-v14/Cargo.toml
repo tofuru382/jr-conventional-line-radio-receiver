@@ -1,0 +1,13 @@
+# The v1.4 voice decoder (jr_conventional_voice 1.2.0 from upstream v1.4.0,
+# tag commit 3f29c21), kept unchanged so the apps can offer it as a middle choice:
+# about 7x heavier than v1.3 and 3x lighter than the current decoder. See
+# docs/ANDROID.ja.md. The only change from upstream: `#[no_mangle]` is removed
+# from the C ABI functions so all decoders can be linked into one binary.
+[package]
+name = "jr_conventional_voice_v14"
+version = "1.2.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["rlib"]

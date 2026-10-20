@@ -31,6 +31,9 @@ pub enum Input {
 pub struct Config {
     pub input: Input,
     pub channels: Vec<ChannelConfig>,
+    /// Voice decoder for every channel of this session.
+    #[serde(default)]
+    pub voice_decoder: crate::pipeline::VoiceDecoder,
 }
 #[derive(Clone, Serialize)]
 pub struct ChannelStatus {
@@ -446,7 +449,7 @@ fn run(
     let pipelines = config
         .channels
         .into_iter()
-        .map(|c| Pipeline::new(c, rate, center))
+        .map(|c| Pipeline::with_decoder(c, rate, center, config.voice_decoder))
         .collect::<Result<Vec<_>, _>>()?;
     let mut senders = Vec::new();
     let mut handles = Vec::new();
@@ -708,6 +711,7 @@ mod tests {
                         center_hz: 352603125.0,
                     },
                     channels: crate::pipeline::presets("east"),
+                    voice_decoder: Default::default(),
                 },
                 move |input, stop| {
                     let (source, rate, center) = Source::open(input, stop)?;

@@ -480,6 +480,22 @@ test("a saving session without any call reports that nothing was saved", async (
   assert.match($("recording-summary").textContent, /何も保存しませんでした/);
   assert.equal($("recording-output").hidden, true);
 });
+test("Android chooses the voice decoder, remembers it and sends it with the session", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  const select = $("voice-decoder");
+  assert.equal(select.value, "v13");
+  assert.deepEqual([...select.options].map((o) => o.value), ["v13", "v14", "v15"]);
+  select.value = "v14";
+  select.dispatchEvent(new app.w.Event("change"));
+  assert.equal(app.w.localStorage.getItem("jr-clrr.voice-decoder"), "v14");
+  assert.match($("about-description").textContent, /v1\.4 の復号器/);
+  await app.click("start");
+  const start = app.calls.find((c) => c.command === "start");
+  assert.equal(start.args.config.voice_decoder, "v14");
+  await app.poll();
+  assert.equal(select.disabled, true);
+});
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
@@ -503,7 +519,8 @@ test("Mac uses the simplified layout but keeps SoapySDR, pickers and Web Audio",
   assert.ok(root.classList.contains("simple"));
   assert.equal(root.classList.contains("android"), false);
   assert.equal(app.w.document.title, "JR-CLRR For Mac");
-  assert.match($("about-description").textContent, /Mac 版$/);
+  assert.match($("about-description").textContent, /Mac 版（音声の復号は v1\.5 の復号器）$/);
+  assert.equal($("voice-decoder").value, "v15");
   assert.equal($("route-open").hidden, false);
   assert.equal($("channel-search").closest("label").hidden, true);
   assert.equal($("channels-table").hidden, false);
@@ -616,6 +633,8 @@ test("desktop keeps SoapySDR and pickers and never shows the driver button", asy
   assert.equal($("driver-group").hidden, true);
   assert.equal($("mute-toggle"), null);
   assert.equal($("test-sound"), null);
+  assert.equal($("voice-decoder"), null);
+  assert.ok(!("voice_decoder" in app.calls.find((c) => c.command === "start").args.config));
   assert.equal($("route-open").hidden, false);
   for (const id of ["browse", "record-browse", "preset-browse"])
     assert.equal($(id).hidden, false, id);
