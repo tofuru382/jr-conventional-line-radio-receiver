@@ -369,9 +369,13 @@ mod android {
     };
 
     const IDLE_CLOSE: Duration = Duration::from_secs(10);
-    /// Device-side buffer. The DSP threads keep the CPU busy; a deep device
-    /// buffer rides out moments when this thread is not scheduled in time.
-    const DEVICE_BUFFER_MS: i32 = 300;
+    /// Requested device buffer (about 300 ms at 48 kHz). The whole capacity
+    /// is used: some devices only start a stream once its buffer is full, so
+    /// a buffer size below the capacity could keep playback from starting.
+    const DEVICE_CAPACITY: i32 = 14_400;
+    /// No device progress for this long with audio queued: the device waits
+    /// for a full buffer before starting, so top it up with silence.
+    const START_KICK: Duration = Duration::from_millis(250);
 
     struct Output {
         stream: AudioStream,
@@ -389,8 +393,7 @@ mod android {
                     .performance_mode(AudioPerformanceMode::None)
                     .channel_count(1)
                     .format(AudioFormat::PCM_I16)
-                    // About one second at 48 kHz; the device may grant less.
-                    .buffer_capacity_in_frames(48_000)
+                    .buffer_capacity_in_frames(DEVICE_CAPACITY)
                     // Usage/content type need API 28; the default is media.
                     .open_stream()
             })
@@ -403,8 +406,7 @@ mod android {
                 stream.format()
             ));
         }
-        let wanted = (rate * DEVICE_BUFFER_MS / 1000).min(stream.buffer_capacity_in_frames());
-        let _ = stream.set_buffer_size_in_frames(wanted);
+        let _ = stream.set_buffer_size_in_frames(stream.buffer_capacity_in_frames());
         stream.request_start().map_err(|e| format!("{e:?}"))?;
         Ok(Output {
             stream,
@@ -452,6 +454,8 @@ mod android {
         let mut playout = Playout::default();
         let mut listening = false;
         let mut idle_since: Option<Instant> = None;
+        // Device progress, to notice a stream that has not started playing.
+        let mut last_read = (0i64, Instant::now());
         loop {
             let current = settings.lock().map(|s| s.clone()).unwrap_or_default();
             // Drain the queue unless Web Audio owns it, so unheard PCM never
@@ -496,6 +500,20 @@ mod android {
             let (queued, low_water) = output
                 .as_ref()
                 .map_or((0, 1), |o| (queued(&o.stream), o.low_water));
+            if let Some(o) = output.as_ref() {
+                let read = o.stream.frames_read();
+                if read != last_read.0 {
+                    last_read = (read, now);
+                } else if queued > 0 && now.duration_since(last_read.1) >= START_KICK {
+                    // Queued audio is not being played: fill the rest of the
+                    // buffer with silence so the device starts.
+                    let room = (o.stream.buffer_size_in_frames() as i64 - queued).max(0);
+                    if room > 0 {
+                        let _ = write(&o.stream, &vec![0; room as usize]);
+                    }
+                    last_read = (read, now);
+                }
+            }
             let step = playout.step(now, queued, low_water);
             if let Ok(mut s) = stats.lock() {
                 s.underruns = playout.underruns;
@@ -530,7 +548,10 @@ mod android {
             };
             if output.is_none() {
                 match open() {
-                    Ok(o) => output = Some(o),
+                    Ok(o) => {
+                        last_read = (o.stream.frames_read(), now);
+                        output = Some(o);
+                    }
                     Err(e) => {
                         eprintln!("audio monitor: cannot open output: {e}");
                         playout.clear();
