@@ -70,6 +70,9 @@ pub struct RecordingStatus {
     pub data_messages: u64,
     pub options: OutputOptions,
     pub error: Option<String>,
+    /// Nothing was saved (no call, no selected JSONL rows): the session
+    /// folder was removed instead of being kept empty.
+    pub discarded: bool,
 }
 impl Default for RecordingStatus {
     fn default() -> Self {
@@ -84,6 +87,7 @@ impl Default for RecordingStatus {
             data_messages: 0,
             options: OutputOptions::default(),
             error: None,
+            discarded: false,
         }
     }
 }
@@ -160,10 +164,11 @@ impl Recorder {
             }));
             let mut s = state.lock().unwrap();
             match result {
-                Ok((files, samples, error)) => {
+                Ok((files, samples, error, discarded)) => {
                     s.files = files;
                     s.pcm_samples = samples;
                     s.error = error.or(s.error.take());
+                    s.discarded = discarded && s.error.is_none();
                 }
                 Err(_) => s.error = Some("保存処理が異常終了しました。保存先の INCOMPLETE と出力ファイル を確認してください。".into()),
             }
@@ -275,6 +280,59 @@ fn create_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())
 }
+/// Files a session folder holds before anything is recorded.
+const SESSION_FILES: [&str; 6] = [
+    "INCOMPLETE",
+    "session.json",
+    "result.json",
+    "files.jsonl",
+    "raw-frames.jsonl",
+    "data-messages.jsonl",
+];
+/// Removes a `recording-*` folder that recorded nothing: only the session's
+/// own bookkeeping files, with empty indexes. Anything else (a WAV, a JSONL
+/// row, a file someone put there) keeps the folder.
+fn remove_empty_session(directory: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return false;
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { return false };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(&known) = SESSION_FILES.iter().find(|n| **n == name) else {
+            return false;
+        };
+        let Ok(meta) = entry.metadata() else {
+            return false;
+        };
+        if !meta.is_file() || known.ends_with(".jsonl") && meta.len() != 0 {
+            return false;
+        }
+        names.push(known);
+    }
+    names
+        .iter()
+        .all(|name| fs::remove_file(directory.join(name)).is_ok())
+        && fs::remove_dir(directory).is_ok()
+}
+/// Empty sessions left by an app that was killed before it could stop.
+fn remove_empty_sessions(parent: &Path) {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("recording-")
+            && path.is_dir()
+        {
+            remove_empty_session(&path);
+        }
+    }
+}
 impl Writer {
     fn create(
         parent: &Path,
@@ -310,6 +368,7 @@ impl Writer {
                 },
             );
         }
+        remove_empty_sessions(parent);
         let instant = now();
         let stem = format!("recording-{}", instant.format("%Y%m%dT%H%M%S%.3fZ"));
         let mut directory = None;
@@ -510,7 +569,7 @@ impl Writer {
         self.pcm_samples += 320;
         Ok(())
     }
-    fn finish(mut self, mut error: Option<String>) -> (u64, u64, Option<String>) {
+    fn finish(mut self, mut error: Option<String>) -> (u64, u64, Option<String>, bool) {
         for track in self.tracks.values_mut() {
             if let Err(e) = Self::close(track, &mut self.index) {
                 error.get_or_insert(e);
@@ -533,7 +592,14 @@ impl Writer {
                 error = Some(e.to_string());
             }
         }
-        (self.files, self.pcm_samples, error)
+        let (files, samples) = (self.files, self.pcm_samples);
+        let empty =
+            error.is_none() && files == 0 && self.raw_frames == 0 && self.data_messages == 0;
+        let directory = self.directory.clone();
+        // Close every handle first (Windows cannot remove open files).
+        drop(self);
+        let discarded = empty && remove_empty_session(&directory);
+        (files, samples, error, discarded)
     }
 }
 
@@ -647,7 +713,7 @@ mod tests {
         for (index, value) in [(0, 1), (1, 2), (2, 3), (10000, 4)] {
             w.audio(&pcm(&channels[0], 0, index, value)).unwrap();
         }
-        let (files, samples, error) = w.finish(None);
+        let (files, samples, error, _) = w.finish(None);
         assert!(error.is_none());
         assert_eq!((files, samples), (3, 1280));
         assert_eq!(
@@ -758,13 +824,42 @@ mod tests {
                     .directory
                     .unwrap(),
             );
-            r.stop();
             assert_eq!(dir.join("raw-frames.jsonl").exists(), options.raw_frames);
             assert_eq!(
                 dir.join("data-messages.jsonl").exists(),
                 options.data_messages
             );
+            // Nothing arrived: the session leaves no empty folder behind.
+            let status = r.stop();
+            assert!(status.discarded);
+            assert!(status.error.is_none());
+            assert!(!dir.exists());
         }
+    }
+    #[test]
+    fn sessions_with_a_call_are_kept_and_leftover_empty_ones_are_removed() {
+        let temp = Temp::new();
+        let configs = presets("east")[..1].to_vec();
+        let r = Recorder::default();
+        let leftover = PathBuf::from(r.start(&temp.0, &configs).unwrap().directory.unwrap());
+        // A killed app never runs stop(): simulate the folder it leaves.
+        fs::write(leftover.join("result.json"), "{}").unwrap();
+        let foreign = temp.0.join("recording-foreign");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("note.txt"), "keep").unwrap();
+        r.stop();
+        fs::create_dir(&leftover).unwrap_or(());
+        for name in ["INCOMPLETE", "session.json", "files.jsonl"] {
+            fs::write(leftover.join(name), "").unwrap();
+        }
+        let kept = PathBuf::from(r.start(&temp.0, &configs).unwrap().directory.unwrap());
+        assert!(!leftover.exists(), "empty leftover session was not removed");
+        assert!(foreign.join("note.txt").exists());
+        r.push(&pcm(&configs[0], 0, 0, 7));
+        let status = r.stop();
+        assert!(!status.discarded);
+        assert_eq!(status.files, 1);
+        assert!(kept.join("result.json").exists());
     }
     #[test]
     fn operation_summary_is_exported_with_nulls_and_original_bytes() {
@@ -863,7 +958,7 @@ mod tests {
         let mut unwritable = BufWriter::new(File::open(dir.join("session.json")).unwrap());
         unwritable.write_all(b"pending row\n").unwrap();
         writer.raw = Some(unwritable);
-        let (_, _, error) = writer.finish(None);
+        let (_, _, error, _) = writer.finish(None);
         assert!(error.is_some());
         assert!(dir.join("INCOMPLETE").exists());
     }

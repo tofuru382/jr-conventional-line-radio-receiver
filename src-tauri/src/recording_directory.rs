@@ -95,6 +95,13 @@ mod tests {
         }];
         let recorder = Recorder::default();
         let first = recorder.start(&directory, &channels).unwrap();
+        // A call was recorded, so the session folder is kept.
+        recorder.push(&receiver_core::pipeline::Audio {
+            channel: "test".into(),
+            epoch: 0,
+            index: 0,
+            pcm: vec![1; 320],
+        });
         assert_eq!(recorder.stop().state, "completed");
         let metadata = PathBuf::from(first.directory.unwrap()).join("session.json");
         let saved = std::fs::read(&metadata).unwrap();

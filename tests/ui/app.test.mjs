@@ -461,6 +461,25 @@ test("Android shows reconnection and restarts a driver that does not answer", as
   assert.equal($("state").textContent, "受信中");
   assert.match($("capture-info").textContent, /自動再接続 1 回/);
 });
+test("a saving session without any call reports that nothing was saved", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  await app.click("start");
+  await app.poll();
+  await app.click("record-start");
+  await app.poll();
+  assert.equal($("recording-state").textContent, "保存中");
+  assert.match($("recording-summary").textContent, /通話を受信したら保存を始めます/);
+  app.setRecording({
+    state: "completed", options: { audio: true, raw_frames: false, data_messages: false },
+    files: 0, pcm_samples: 0, raw_frames: 0, data_messages: 0, error: null,
+    directory: "/storage/emulated/0/Download/JR-CLRR/Recordings/recording-test", discarded: true,
+  });
+  await app.poll();
+  assert.equal($("recording-state").textContent, "通話なし");
+  assert.match($("recording-summary").textContent, /何も保存しませんでした/);
+  assert.equal($("recording-output").hidden, true);
+});
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;

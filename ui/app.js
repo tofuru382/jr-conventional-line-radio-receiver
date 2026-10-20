@@ -610,14 +610,18 @@ function renderRecording() {
   $("record-start").disabled = !native || busy || !receiving || active;
   $("record-stop").disabled = !native || busy || (!active && !recordingEnabled);
   $("record-stop").textContent = active ? "保存を停止" : "保存を無効にする";
+  // Sessions without any call (or selected JSONL row) leave no folder.
+  const saved = s.files > 0 || (s.raw_frames ?? 0) > 0 || (s.data_messages ?? 0) > 0;
   const label =
-    {
-      idle: recordingEnabled ? "保存待機" : "未保存",
-      recording: "保存中",
-      stopping: "保存を終了中",
-      completed: "保存完了",
-      failed: "保存エラー",
-    }[s.state] ?? s.state;
+    s.state === "completed" && s.discarded
+        ? "通話なし"
+        : ({
+            idle: recordingEnabled ? "保存待機" : "未保存",
+            recording: "保存中",
+            stopping: "保存を終了中",
+            completed: "保存完了",
+            failed: "保存エラー",
+          }[s.state] ?? s.state);
   if ($("recording-state").textContent !== label)
     $("recording-state").textContent = label;
   $("recording-state").classList.toggle("active", active);
@@ -628,14 +632,19 @@ function renderRecording() {
       : "受信を開始してから保存できます。";
   const summary =
     s.state === "idle"
-      ? `${idleMessage}音声は 8 kHz・16 bit・モノラル。`
-      : `WAV ${s.files} ファイル · 復号音声 ${(s.pcm_samples / 8000).toFixed(1)} 秒 · 生フレーム ${s.raw_frames ?? 0} 件 · データ電文 ${s.data_messages ?? 0} 件（全波合計）。受信停止時にも保存を終了します。`;
+      ? `${idleMessage}音声は 8 kHz・16 bit・モノラル。通話がなければ何も保存しません。`
+      : s.discarded
+        ? "通話がなかったため、何も保存しませんでした。"
+        : s.state === "recording" && !saved
+          ? "通話を受信したら保存を始めます。通話がなければ何も保存しません。"
+          : `WAV ${s.files} ファイル · 復号音声 ${(s.pcm_samples / 8000).toFixed(1)} 秒 · 生フレーム ${s.raw_frames ?? 0} 件 · データ電文 ${s.data_messages ?? 0} 件（全波合計）。受信停止時にも保存を終了します。`;
   $("recording-summary").textContent =
     summary +
     (recordingEnabled && s.state !== "idle"
       ? "次回受信時も自動で保存します。"
       : "");
-  if (s.directory) {
+  if (s.discarded) $("recording-output").hidden = true;
+  else if (s.directory) {
     $("recording-output").textContent =
       `${active ? "保存フォルダー" : "保存したフォルダー"}：${s.directory}`;
     $("recording-output").hidden = false;

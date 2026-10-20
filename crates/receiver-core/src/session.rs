@@ -728,13 +728,10 @@ mod tests {
             (session, release)
         }
 
+        /// The silent input yields no call: a cleanly finalized session
+        /// leaves no empty folder behind.
         fn assert_finalized(directory: &str) {
-            let folder = Path::new(directory);
-            let result: serde_json::Value =
-                serde_json::from_slice(&fs::read(folder.join("result.json")).unwrap()).unwrap();
-            assert_eq!(result["error"], serde_json::Value::Null);
-            assert_eq!(result["files"], 0);
-            assert!(!folder.join("INCOMPLETE").exists());
+            assert!(!Path::new(directory).exists(), "{directory} was kept empty");
         }
 
         #[test]
@@ -756,7 +753,6 @@ mod tests {
 
             let second = session.start_recording(&temp.0).unwrap();
             assert_eq!(second.state, "recording");
-            assert_ne!(first.directory, second.directory);
             session.stop();
             let status = session.snapshot(None).0;
             assert_eq!(status.state, "stopped");

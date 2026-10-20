@@ -74,6 +74,10 @@ pub fn list(roots: &[PathBuf]) -> Vec<RecordingSession> {
                     })
                 })
                 .collect();
+            if files.is_empty() {
+                // No call yet (or data-only JSONL): nothing to listen to.
+                continue;
+            }
             files.sort_by(|a, b| a.name.cmp(&b.name));
             sessions.push(RecordingSession {
                 name: entry.file_name().to_string_lossy().into_owned(),
@@ -147,6 +151,10 @@ mod tests {
         std::fs::write(new.join("session.json"), b"{}").unwrap();
         std::fs::write(new.join("INCOMPLETE"), b"").unwrap();
         std::fs::create_dir_all(root.join("unrelated")).unwrap();
+        // A session without any call is not listed.
+        let silent = root.join("recording-20261019T000000.000Z-001");
+        std::fs::create_dir_all(&silent).unwrap();
+        std::fs::write(silent.join("session.json"), b"{}").unwrap();
         let roots = roots([root.clone(), root.clone(), temp.0.join("missing")]);
         assert_eq!(roots.len(), 1);
         let sessions = list(&roots);
