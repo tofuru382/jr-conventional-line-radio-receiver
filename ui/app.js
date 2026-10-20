@@ -52,6 +52,9 @@ function addOutputChoice() {
   box.type = "checkbox";
   box.checked = nativeAudio;
   label.append(box, "端末で直接再生（裏に回しても再生）");
+  const health = el("p", "", "field-hint");
+  health.id = "playback-health";
+  health.hidden = true;
   box.addEventListener("change", () => {
     try {
       localStorage.setItem(outputKey, box.checked ? "on" : "off");
@@ -71,8 +74,24 @@ function addOutputChoice() {
     else prepareAudio().catch(fail);
     setControls();
   });
-  document.querySelector(".audio-controls").append(label);
+  document.querySelector(".audio-controls").append(label, health);
   addTestSound();
+}
+// Live playback health (Android player): underruns mean playback ran dry in
+// the middle of a call; the buffer then grows, adding delay but no gaps.
+let healthAt = 0;
+async function refreshPlaybackHealth() {
+  const node = $("playback-health");
+  if (!node || !nativeAudio || Date.now() - healthAt < 1000) return;
+  healthAt = Date.now();
+  try {
+    const s = await invoke("native_audio_status");
+    if (!s) return;
+    node.textContent = `再生の途切れ ${s.underruns} 回 · 再生の遅れ ${(s.buffer_ms / 1000).toFixed(1)} 秒${s.rate ? ` · 出力 ${s.rate.toLocaleString()} Hz` : ""}（途切れると、ためる量を自動で増やします）`;
+    node.hidden = false;
+  } catch {
+    // Older backend without the command: leave the line hidden.
+  }
 }
 // Three rising tones through the chosen output, so the playback path can be
 // checked without any radio signal (same as native_audio::test_tone).
@@ -1708,6 +1727,7 @@ async function poll() {
               failed: "受信エラー",
             }[s.state] ?? s.state);
         relaunchDriverIfNeeded(s);
+        void refreshPlaybackHealth();
         if ($("state").textContent !== stateLabel)
           $("state").textContent = stateLabel;
         $("state").classList.toggle("active", s.running);

@@ -26,9 +26,23 @@ pub struct Settings {
     pub inactive: bool,
 }
 
+/// Playback health shown in the app (to tell choppy reception from choppy
+/// playback).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Stats {
+    /// Times playback ran dry while a call was still arriving.
+    pub underruns: u32,
+    /// Current jitter buffer target in milliseconds (grows after underruns).
+    pub buffer_ms: u32,
+    /// Output sample rate of the open stream (0 when closed).
+    pub rate: u32,
+}
+
 #[derive(Default, Clone)]
 pub struct NativeMonitor {
     settings: Arc<Mutex<Settings>>,
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    stats: Arc<Mutex<Stats>>,
     /// A test sound to play once, independent of reception and "Listen".
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     test: Arc<Mutex<Vec<i16>>>,
@@ -42,6 +56,10 @@ impl NativeMonitor {
         self.start(receiver)
     }
 
+    pub fn stats(&self) -> Stats {
+        self.stats.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
     /// Plays [`test_tone`] through the same output path as received audio.
     pub fn play_test(&self, receiver: &crate::Receiver) -> Result<(), String> {
         *self.test.lock().map_err(|e| e.to_string())? = test_tone();
@@ -51,18 +69,26 @@ impl NativeMonitor {
     fn start(&self, receiver: &crate::Receiver) -> Result<(), String> {
         #[cfg(target_os = "android")]
         {
-            let (settings, test, receiver) =
-                (self.settings.clone(), self.test.clone(), receiver.clone());
+            let (settings, test, stats, receiver) = (
+                self.settings.clone(),
+                self.test.clone(),
+                self.stats.clone(),
+                receiver.clone(),
+            );
             self.started.get_or_init(move || {
                 std::thread::Builder::new()
                     .name("monitor-audio".into())
                     .spawn(move || loop {
                         // An audio-driver panic must not silence the app for
                         // the rest of the process; restart the player instead.
-                        let (settings, test, receiver) =
-                            (settings.clone(), test.clone(), receiver.clone());
+                        let (settings, test, stats, receiver) = (
+                            settings.clone(),
+                            test.clone(),
+                            stats.clone(),
+                            receiver.clone(),
+                        );
                         let run = std::panic::AssertUnwindSafe(move || {
-                            android::run(settings, test, receiver)
+                            android::run(settings, test, stats, receiver)
                         });
                         let _ = std::panic::catch_unwind(run);
                         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -190,31 +216,162 @@ impl Resampler {
     }
 }
 
+/// Jitter buffer for live playback, independent of the audio device so it can
+/// be tested. Decoded PCM (8 kHz) arrives in bursts: RTL-TCP delivers ~0.5 s at
+/// once, synthesis looks ahead, and busy DSP threads fall behind for a moment.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub mod playout {
+    use std::{
+        collections::VecDeque,
+        time::{Duration, Instant},
+    };
+    const MS: usize = (super::INPUT_RATE as usize) / 1000;
+    /// Initial amount collected before (re)starting playback.
+    pub const START: usize = 400 * MS;
+    /// Added after each underrun in the middle of a call, up to `MAX`.
+    pub const STEP: usize = 300 * MS;
+    pub const MAX: usize = 1600 * MS;
+    /// Start anyway once input has paused this long: the end of a short
+    /// call. Longer than the gap between RTL-TCP bursts (~0.5 s), so a burst
+    /// gap does not start playback before the buffer target is reached.
+    pub const WAIT: Duration = Duration::from_millis(700);
+    /// Audio resuming this soon after playback ran dry belongs to the same
+    /// call: the buffer was too small.
+    pub const RESUME: Duration = Duration::from_millis(1500);
+    /// Written per turn (100 ms), so mute and channel changes apply soon.
+    pub const CHUNK: usize = 100 * MS;
+    /// A burst this short, with at least `QUIET` of silence before it and
+    /// nothing after it, is a noise frame accepted as voice ("ブツ").
+    pub const NOISE_BURST: usize = 160 * MS;
+    pub const QUIET: Duration = Duration::from_secs(1);
+
+    #[derive(Debug, PartialEq)]
+    pub enum Step {
+        /// Nothing to do yet.
+        Wait,
+        /// Write this PCM (8 kHz) to the device.
+        Play(Vec<i16>),
+        /// Input ended a while ago and everything was handed to the device.
+        Idle,
+    }
+    pub struct Playout {
+        pending: VecDeque<i16>,
+        playing: bool,
+        target: usize,
+        last_audio: Option<Instant>,
+        /// Last time audio arrived or the device was still playing.
+        last_active: Option<Instant>,
+        /// When playback last ran dry.
+        dry_at: Option<Instant>,
+        /// The PCM waiting to start follows a quiet second (may be noise).
+        isolated: bool,
+        pub underruns: u32,
+    }
+    impl Default for Playout {
+        fn default() -> Self {
+            Self {
+                pending: VecDeque::new(),
+                playing: false,
+                target: START,
+                last_audio: None,
+                last_active: None,
+                dry_at: None,
+                isolated: false,
+                underruns: 0,
+            }
+        }
+    }
+    impl Playout {
+        pub fn target_ms(&self) -> u32 {
+            (self.target / MS) as u32
+        }
+        pub fn push(&mut self, pcm: impl IntoIterator<Item = i16>, now: Instant) {
+            let before = self.pending.len();
+            self.pending.extend(pcm);
+            if self.pending.len() == before {
+                return;
+            }
+            if let Some(dry) = self.dry_at.take() {
+                if now.duration_since(dry) < RESUME {
+                    // Starved in the middle of a call: buffer more next time.
+                    self.underruns += 1;
+                    self.target = (self.target + STEP).min(MAX);
+                }
+            }
+            if before == 0 && !self.playing {
+                self.isolated = self
+                    .last_active
+                    .is_none_or(|t| now.duration_since(t) >= QUIET);
+            }
+            self.last_audio = Some(now);
+            self.last_active = Some(now);
+        }
+        /// Muted or switched away: drop everything at once.
+        pub fn clear(&mut self) {
+            self.pending.clear();
+            self.playing = false;
+            self.dry_at = None;
+        }
+        /// `queued` and `low_water` are in device frames; `low_water` is the
+        /// level below which the device has effectively run dry.
+        pub fn step(&mut self, now: Instant, queued: i64, low_water: i64) -> Step {
+            if self.playing || queued > 0 {
+                self.last_active = Some(now);
+            }
+            let paused = self
+                .last_audio
+                .is_none_or(|t| now.duration_since(t) >= WAIT);
+            if self.playing && self.pending.is_empty() && queued < low_water {
+                self.playing = false;
+                self.dry_at = Some(now);
+            }
+            if !self.playing
+                && self.isolated
+                && paused
+                && !self.pending.is_empty()
+                && self.pending.len() < NOISE_BURST
+            {
+                self.pending.clear();
+            }
+            if !self.playing
+                && !self.pending.is_empty()
+                && (self.pending.len() >= self.target || paused)
+            {
+                self.playing = true;
+                self.isolated = false;
+            }
+            if self.playing && !self.pending.is_empty() {
+                let n = self.pending.len().min(CHUNK);
+                return Step::Play(self.pending.drain(..n).collect());
+            }
+            if self.pending.is_empty() && paused {
+                Step::Idle
+            } else {
+                Step::Wait
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "android")]
 mod android {
-    use super::{Resampler, Settings, INPUT_RATE};
+    use super::{
+        playout::{Playout, Step},
+        Resampler, Settings, Stats, INPUT_RATE,
+    };
     use ndk::audio::{
         AudioDirection, AudioFormat, AudioPerformanceMode, AudioSharingMode, AudioStream,
         AudioStreamBuilder,
     };
     use std::{
-        collections::VecDeque,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
     const IDLE_CLOSE: Duration = Duration::from_secs(10);
-    /// Jitter buffer: decoded PCM arrives in bursts (synthesis lookahead,
-    /// RTL-TCP delivering ~0.5 s at once). Collect this much before (re)starting
-    /// playback so the device never runs dry in the middle of a word.
-    const PREBUFFER: usize = (INPUT_RATE as usize) * 400 / 1000;
-    /// Start anyway once input has paused this long (the end of a short call).
-    const PREBUFFER_WAIT: Duration = Duration::from_millis(250);
-    /// Written per loop turn (100 ms), so mute and channel changes apply soon.
-    const CHUNK: usize = (INPUT_RATE as usize) / 10;
-    /// A burst this short with nothing around it is a falsely accepted noise
-    /// frame (heard as a "ブツ"), not speech: it is not played (160 ms).
-    const NOISE_BURST: usize = (INPUT_RATE as usize) * 160 / 1000;
+    /// Device-side buffer. The DSP threads keep the CPU busy; a deep device
+    /// buffer rides out moments when this thread is not scheduled in time.
+    const DEVICE_BUFFER_MS: i32 = 300;
 
     struct Output {
         stream: AudioStream,
@@ -232,6 +389,8 @@ mod android {
                     .performance_mode(AudioPerformanceMode::None)
                     .channel_count(1)
                     .format(AudioFormat::PCM_I16)
+                    // About one second at 48 kHz; the device may grant less.
+                    .buffer_capacity_in_frames(48_000)
                     // Usage/content type need API 28; the default is media.
                     .open_stream()
             })
@@ -244,6 +403,8 @@ mod android {
                 stream.format()
             ));
         }
+        let wanted = (rate * DEVICE_BUFFER_MS / 1000).min(stream.buffer_capacity_in_frames());
+        let _ = stream.set_buffer_size_in_frames(wanted);
         stream.request_start().map_err(|e| format!("{e:?}"))?;
         Ok(Output {
             stream,
@@ -278,13 +439,19 @@ mod android {
     pub fn run(
         settings: Arc<Mutex<Settings>>,
         test: Arc<Mutex<Vec<i16>>>,
+        stats: Arc<Mutex<Stats>>,
         receiver: crate::Receiver,
     ) {
+        // Audio priority (Android's THREAD_PRIORITY_AUDIO), so the busy DSP
+        // threads do not starve playback. Best effort.
+        // SAFETY: plain syscall on this thread's id.
+        unsafe {
+            libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, -16);
+        }
         let mut output: Option<Output> = None;
-        let mut last_audio = Instant::now();
-        let mut pending: VecDeque<i16> = VecDeque::new();
-        let mut playing = false;
+        let mut playout = Playout::default();
         let mut listening = false;
+        let mut idle_since: Option<Instant> = None;
         loop {
             let current = settings.lock().map(|s| s.clone()).unwrap_or_default();
             // Drain the queue unless Web Audio owns it, so unheard PCM never
@@ -305,89 +472,80 @@ mod android {
             let now_listening = current.enabled && !current.inactive;
             if listening && !now_listening {
                 // Muted or switched to Web Audio: stop at once.
-                pending.clear();
-                playing = false;
+                playout.clear();
                 if let Some(o) = output.as_mut() {
                     o.resampler.reset();
                 }
             }
             listening = now_listening;
+            let now = Instant::now();
             if listening && !audio.is_empty() {
-                last_audio = Instant::now();
                 let gain = current.volume.clamp(0.0, 1.0);
-                for frame in &audio {
-                    pending.extend(frame.pcm.iter().map(|&s| (s as f32 * gain) as i16));
-                }
+                playout.push(
+                    audio
+                        .iter()
+                        .flat_map(|f| f.pcm.iter().map(move |&s| (s as f32 * gain) as i16)),
+                    now,
+                );
             }
             let tone = test
                 .lock()
                 .map(|mut t| std::mem::take(&mut *t))
                 .unwrap_or_default();
-            if !tone.is_empty() {
-                last_audio = Instant::now();
-                pending.extend(tone);
+            playout.push(tone, now);
+            let (queued, low_water) = output
+                .as_ref()
+                .map_or((0, 1), |o| (queued(&o.stream), o.low_water));
+            let step = playout.step(now, queued, low_water);
+            if let Ok(mut s) = stats.lock() {
+                s.underruns = playout.underruns;
+                s.buffer_ms = playout.target_ms();
+                s.rate = output.as_ref().map_or(0, |o| o.stream.sample_rate() as u32);
             }
-            // Ran dry (nothing pending and the device nearly empty): the next
-            // audio is buffered again instead of being played frame by frame.
-            if playing
-                && pending.is_empty()
-                && output
-                    .as_ref()
-                    .is_none_or(|o| queued(&o.stream) < o.low_water)
-            {
-                playing = false;
-            }
-            if !playing
-                && !pending.is_empty()
-                && pending.len() < NOISE_BURST
-                && last_audio.elapsed() >= PREBUFFER_WAIT
-            {
-                pending.clear();
-            }
-            if !playing
-                && !pending.is_empty()
-                && (pending.len() >= PREBUFFER || last_audio.elapsed() >= PREBUFFER_WAIT)
-            {
-                playing = true;
-            }
-            if !playing || pending.is_empty() {
-                if let Some(o) = output.as_mut() {
-                    if pending.is_empty() && last_audio.elapsed() >= PREBUFFER_WAIT {
+            let pcm = match step {
+                Step::Play(pcm) => {
+                    idle_since = None;
+                    pcm
+                }
+                Step::Idle => {
+                    if let Some(o) = output.as_mut() {
                         // The talk spurt ended: play the resampler's last 1 ms.
                         if o.resampler.has_tail() {
                             let tail = o.resampler.flush();
                             if write(&o.stream, &tail).is_err() {
                                 output = None;
                             }
-                        } else if last_audio.elapsed() > IDLE_CLOSE {
+                        } else if idle_since.get_or_insert(now).elapsed() > IDLE_CLOSE {
                             output = None;
+                            idle_since = None;
                         }
                     }
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
                 }
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            }
+                Step::Wait => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+            };
             if output.is_none() {
                 match open() {
                     Ok(o) => output = Some(o),
                     Err(e) => {
                         eprintln!("audio monitor: cannot open output: {e}");
-                        pending.clear();
-                        playing = false;
+                        playout.clear();
                         std::thread::sleep(Duration::from_millis(500));
                         continue;
                     }
                 }
             }
-            let n = pending.len().min(CHUNK);
-            let chunk: Vec<i16> = pending.drain(..n).collect();
             let o = output.as_mut().unwrap();
-            let pcm = o.resampler.process(&chunk);
+            let pcm = o.resampler.process(&pcm);
             if let Err(e) = write(&o.stream, &pcm) {
                 // e.g. headphones unplugged: reopen on the next audio.
                 eprintln!("audio monitor: {e}");
                 output = None;
-                playing = false;
+                playout.clear();
             }
         }
     }
@@ -447,6 +605,75 @@ mod tests {
         let mut r = Resampler::new(8000, 8000);
         assert_eq!(r.process(&input), input);
         assert!(r.flush().is_empty());
+    }
+
+    /// Simulates a real-time device consuming 8 kHz PCM in 10 ms ticks.
+    /// `arrivals` are (time in ms, samples); returns (underruns, samples
+    /// played, ticks during a call when the device was empty).
+    fn simulate(
+        playout: &mut playout::Playout,
+        arrivals: &[(u64, usize)],
+        end_ms: u64,
+    ) -> (u32, usize, u32) {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let mut queued: i64 = 0;
+        let (mut played, mut gaps) = (0usize, 0u32);
+        let mut started = false;
+        for ms in (0..end_ms).step_by(10) {
+            let now = start + Duration::from_millis(ms);
+            for &(_, n) in arrivals.iter().filter(|(t, _)| *t == ms) {
+                playout.push(std::iter::repeat_n(1000i16, n), now);
+            }
+            if let playout::Step::Play(pcm) = playout.step(now, queued, 320) {
+                queued += pcm.len() as i64;
+                played += pcm.len();
+                started = true;
+            }
+            let last = arrivals.last().unwrap().0;
+            if started && queued == 0 && ms < last {
+                gaps += 1;
+            }
+            queued = (queued - 80).max(0);
+        }
+        (playout.underruns, played, gaps)
+    }
+
+    #[test]
+    fn late_bursts_grow_the_buffer_until_playback_is_continuous() {
+        // A 20 s call delivered in 0.6 s bursts; every third burst is 0.5 s late
+        // (busy DSP threads), so a fixed 0.4 s buffer keeps running dry.
+        let mut arrivals = Vec::new();
+        for k in 0..33u64 {
+            let late = if k % 3 == 2 { 500 } else { 0 };
+            arrivals.push((k * 600 + late, 4800));
+        }
+        let mut p = playout::Playout::default();
+        let (underruns, played, _) = simulate(&mut p, &arrivals, 25_000);
+        assert!((1..=3).contains(&underruns), "{underruns}");
+        assert!(p.target_ms() > 400 && p.target_ms() <= 1600);
+        assert_eq!(played, 33 * 4800, "nothing may be lost");
+        // Once adapted, the same pattern plays without running dry.
+        let mut again = Vec::new();
+        for k in 0..33u64 {
+            let late = if k % 3 == 2 { 500 } else { 0 };
+            again.push((30_000 + k * 600 + late, 4800));
+        }
+        let before = p.underruns;
+        let (after, _, _) = simulate(&mut p, &again, 55_000);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn isolated_noise_is_dropped_but_a_tail_after_speech_is_played() {
+        // 80 ms alone after silence: a falsely accepted noise frame.
+        let mut p = playout::Playout::default();
+        let (_, played, _) = simulate(&mut p, &[(1000, 640)], 3000);
+        assert_eq!(played, 0);
+        // The same 80 ms 0.3 s after a sentence: the end of speech.
+        let mut p = playout::Playout::default();
+        let (_, played, _) = simulate(&mut p, &[(0, 8000), (1300, 640)], 4000);
+        assert_eq!(played, 8640);
     }
 
     #[test]

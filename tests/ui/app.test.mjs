@@ -234,6 +234,8 @@ async function setup(
             if (command === "platform") return structuredClone(platformInfo);
             if (command === "list_recordings") return structuredClone(recordings);
             if (command === "read_recording") return new ArrayBuffer(8);
+            if (command === "native_audio_status")
+              return { underruns: 2, buffer_ms: 1000, rate: 48000 };
             if (command === "start_rtl_driver") {
               if (driverError) throw new Error(driverError);
               return null;
@@ -495,6 +497,16 @@ test("Android chooses the voice decoder, remembers it and sends it with the sess
   assert.equal(start.args.config.voice_decoder, "v14");
   await app.poll();
   assert.equal(select.disabled, true);
+});
+test("Android shows live playback health", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.equal($("playback-health").hidden, true);
+  await app.click("start");
+  await app.poll();
+  await app.poll();
+  assert.equal($("playback-health").hidden, false);
+  assert.match($("playback-health").textContent, /再生の途切れ 2 回 · 再生の遅れ 1\.0 秒 · 出力 48,000 Hz/);
 });
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });

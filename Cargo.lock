@@ -1894,6 +1894,7 @@ dependencies = [
 name = "jr-receiver-desktop"
 version = "1.5.0"
 dependencies = [
+ "libc",
  "ndk",
  "objc2",
  "objc2-app-kit",

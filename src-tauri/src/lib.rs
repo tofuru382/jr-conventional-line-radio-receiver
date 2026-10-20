@@ -204,6 +204,12 @@ fn set_native_monitor(
     monitor.update(settings, &receiver)
 }
 #[tauri::command]
+fn native_audio_status(
+    monitor: tauri::State<'_, native_audio::NativeMonitor>,
+) -> native_audio::Stats {
+    monitor.stats()
+}
+#[tauri::command]
 fn play_test_sound(
     receiver: tauri::State<'_, Receiver>,
     monitor: tauri::State<'_, native_audio::NativeMonitor>,
@@ -304,6 +310,7 @@ pub fn run() {
             start_rtl_driver,
             set_native_monitor,
             play_test_sound,
+            native_audio_status,
             list_recordings,
             read_recording,
             devices,
