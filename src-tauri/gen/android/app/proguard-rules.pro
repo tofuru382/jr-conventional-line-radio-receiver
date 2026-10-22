@@ -24,3 +24,8 @@
 -keepclassmembers class io.jrradio.receiver.MainActivity$Bridge {
     @android.webkit.JavascriptInterface <methods>;
 }
+
+# JNI entry points implemented in Rust (src-tauri/src/lib.rs, usb_jni).
+-keep class io.jrradio.receiver.UsbDongle {
+    native <methods>;
+}

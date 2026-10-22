@@ -1,0 +1,26 @@
+# Vendored from rtlsdr-nusb 0.3.0 (https://github.com/bastibl/rtlsdr-nusb,
+# Apache-2.0, see LICENSE). JR-CLRR changes, marked "JR-CLRR" in the source:
+# - accept librtlsdr's low sample-rate range 225001..=300000 (the receiver
+#   captures at 240 kS/s), and
+# - DeviceBuilder::open_fd: open from an OS-provided USB file descriptor, which
+#   is how Android apps get USB access (built-in dongle driver, no driver app).
+[package]
+name = "rtlsdr-nusb"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+nusb = "0.2.7"
+num-complex = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-lite = "2"
+
+[dev-dependencies]
+futures-lite = "2"

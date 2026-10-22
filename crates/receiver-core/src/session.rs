@@ -23,9 +23,33 @@ use std::{
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Input {
-    Sdr { radio: RadioConfig },
-    RtlTcp { radio: crate::rtl_tcp::Config },
-    Wave { path: String, center_hz: f64 },
+    Sdr {
+        radio: RadioConfig,
+    },
+    RtlTcp {
+        radio: crate::rtl_tcp::Config,
+    },
+    Wave {
+        path: String,
+        center_hz: f64,
+    },
+    /// Built-in USB driver (Android). Present in every build so settings
+    /// round-trip; opening it needs the `usb` feature.
+    Usb {
+        radio: UsbRadio,
+    },
+}
+#[cfg(feature = "usb")]
+pub use crate::usb::Config as UsbRadio;
+/// Placeholder when the built-in USB driver is not compiled in.
+#[cfg(not(feature = "usb"))]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct UsbRadio {
+    pub sample_rate: u32,
+    pub center_hz: u32,
+    pub gain_db: Option<f64>,
+    #[serde(default)]
+    pub ppm: i32,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -118,6 +142,8 @@ struct Block {
 enum Source {
     Wave(IqWave),
     RtlTcp(crate::rtl_tcp::Reconnecting),
+    #[cfg(feature = "usb")]
+    Usb(Box<crate::usb::Usb>),
     #[cfg(feature = "soapy")]
     Sdr(crate::source::Sdr),
     #[cfg(test)]
@@ -145,6 +171,22 @@ impl Source {
                     radio.center_hz as f64,
                 ))
             }
+            Input::Usb { radio } => {
+                #[cfg(feature = "usb")]
+                {
+                    let s = crate::usb::Usb::open(radio, stop)?;
+                    Ok((
+                        Self::Usb(Box::new(s)),
+                        radio.sample_rate as f64,
+                        radio.center_hz as f64,
+                    ))
+                }
+                #[cfg(not(feature = "usb"))]
+                {
+                    let _ = (radio, stop);
+                    Err("USB 直結はこのビルドでは使えません".into())
+                }
+            }
             Input::Wave { path, center_hz } => {
                 let w = IqWave::open(path).map_err(|e| e.to_string())?;
                 let rate = w.sample_rate;
@@ -169,6 +211,8 @@ impl Source {
     fn reconnection(&self) -> (bool, u32, u64) {
         match self {
             Self::RtlTcp(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
+            #[cfg(feature = "usb")]
+            Self::Usb(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
             #[cfg(test)]
             Self::Gated { source, .. } => source.reconnection(),
             _ => (false, 0, 0),
@@ -177,6 +221,8 @@ impl Source {
     fn read(&mut self, buf: &mut [Complex32], stop: &AtomicBool) -> Result<Option<Read>, String> {
         match self {
             Self::RtlTcp(s) => s.read(buf, stop).map(Some),
+            #[cfg(feature = "usb")]
+            Self::Usb(s) => s.read(buf, stop).map(Some),
             Self::Wave(w) => {
                 let n = w.read(buf).map_err(|e| e.to_string())?;
                 Ok(if n == 0 { None } else { Some(Read::Samples(n)) })
@@ -428,6 +474,15 @@ fn run(
     open_source: impl FnOnce(&Input, &AtomicBool) -> Result<(Source, f64, f64), String>,
 ) -> Result<(), String> {
     if let Input::RtlTcp { radio } = &config.input {
+        radio.validate()?;
+        validate_channels(
+            &config.channels,
+            radio.sample_rate as f64,
+            radio.center_hz as f64,
+        )?;
+    }
+    if let Input::Usb { radio } = &config.input {
+        #[cfg(feature = "usb")]
         radio.validate()?;
         validate_channels(
             &config.channels,

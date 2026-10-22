@@ -8,6 +8,8 @@ publish.workspace = true
 [features]
 default = ["soapy"]
 soapy = []
+# Built-in RTL-SDR driver over USB (Android: device fd from the app).
+usb = ["dep:rtlsdr-nusb"]
 
 [dependencies]
 jr_conventional_dsp = { path = "../jr-conventional-dsp" }
@@ -15,6 +17,7 @@ jr_conventional_voice = { path = "../jr-voice" }
 # Older, lighter decoders selectable per session (session::Config::voice_decoder).
 jr_conventional_voice_lite = { path = "../jr-voice-lite" }
 jr_conventional_voice_v14 = { path = "../jr-voice-v14" }
+rtlsdr-nusb = { path = "../rtlsdr-nusb", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 encoding_rs = "0.8"

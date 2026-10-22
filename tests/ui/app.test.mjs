@@ -325,7 +325,7 @@ async function setup(
     },
   };
 }
-test("Android hides SoapySDR and pickers, defaults to the on-device driver, and starts it", async (t) => {
+test("Android hides SoapySDR and pickers, defaults to the built-in USB driver, and still starts the driver app for RTL-TCP", async (t) => {
   const preferences = {
     value: {
       version: 1,
@@ -361,18 +361,21 @@ test("Android hides SoapySDR and pickers, defaults to the on-device driver, and 
   const { $ } = app;
   assert.deepEqual(
     [...$("input-kind").options].map((o) => o.value),
-    ["rtl_tcp", "wave"],
+    ["usb", "rtl_tcp", "wave"],
   );
-  assert.equal($("input-kind").value, "rtl_tcp");
-  assert.equal($("host").value, "127.0.0.1");
-  assert.equal($("port").value, "1234");
-  assert.equal($("driver-group").hidden, false);
+  assert.equal($("input-kind").value, "usb");
+  assert.equal($("driver-group").hidden, true);
+  assert.equal($("tcp-group").hidden, true);
+  assert.equal($("ppm-group").hidden, false);
+  assert.equal($("source-summary").textContent, "USB 直結（内蔵ドライバー）");
   for (const id of ["browse", "record-browse", "preset-browse"])
     assert.equal($(id).hidden, true, id);
   await tick();
-  assert.equal(preferences.value.input.kind, "rtl_tcp");
-  assert.equal(preferences.value.input.host, "127.0.0.1");
+  assert.equal(preferences.value.input.kind, "usb");
+  await app.change("input-kind", "rtl_tcp");
+  assert.equal($("driver-group").hidden, false);
   await app.click("driver-start");
+  assert.equal($("host").value, "127.0.0.1");
   assert.deepEqual(
     app.calls
       .filter((c) => c.command === "start_rtl_driver")
@@ -446,8 +449,10 @@ test("Android layout has the route picker but no search, only the detailed list,
 test("Android shows reconnection and restarts a driver that does not answer", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
+  await app.change("input-kind", "rtl_tcp");
+  await app.click("driver-start");
   await app.click("start");
-  const launches = () => app.calls.filter((c) => c.command === "start_rtl_driver");
+  const launches = () => app.calls.filter((c) => c.command === "start_rtl_driver").slice(1);
   app.setSnapshot({ status: { ...status(), reconnecting: true, reconnect_failures: 0, reconnects: 0 }, audio: [] });
   await app.poll();
   assert.equal($("state").textContent, "再接続中");
@@ -507,6 +512,23 @@ test("Android shows live playback health", async (t) => {
   await app.poll();
   assert.equal($("playback-health").hidden, false);
   assert.match($("playback-health").textContent, /再生の途切れ 2 回 · 再生の遅れ 1\.0 秒 · 出力 48,000 Hz/);
+});
+test("Android built-in driver asks for the dongle before starting", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  const asked = [];
+  let answer = "none";
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => (asked.push(1), answer) };
+  await app.click("start");
+  assert.equal(asked.length, 1);
+  assert.equal(app.calls.some((c) => c.command === "start"), false);
+  assert.match($("error").textContent, /ドングルが見つかりません/);
+  answer = "asking";
+  await app.click("start");
+  const start = app.calls.find((c) => c.command === "start");
+  assert.equal(start.args.config.input.kind, "usb");
+  assert.equal(start.args.config.input.radio.sample_rate, 240000);
+  assert.ok(!("host" in start.args.config.input.radio));
 });
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });

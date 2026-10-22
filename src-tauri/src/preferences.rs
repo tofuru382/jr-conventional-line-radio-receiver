@@ -100,7 +100,8 @@ impl Preferences {
             } else {
                 receiver_core::presets::resolve(&self.input.profile).is_ok()
             };
-        if !["rtl_tcp", "sdr", "wave"].contains(&self.input.kind.as_str()) || !valid_profile {
+        if !["rtl_tcp", "sdr", "wave", "usb"].contains(&self.input.kind.as_str()) || !valid_profile
+        {
             return Err("設定ファイルの入力方式または受信プリセットが不正です。".into());
         }
         let i = &self.input;

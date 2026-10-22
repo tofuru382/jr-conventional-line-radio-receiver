@@ -102,3 +102,21 @@ test("all bundled profiles fit RTL-TCP at their recommended centers and rates", 
     assert.equal(input.radio.center_hz, preset.center_hz);
   }
 });
+test("the built-in USB driver gets rate, center, gain and correction only", () => {
+  assert.deepEqual(makeInput({ ...values, kind: "usb", gain: "20", ppm: "-3" }, channels), {
+    kind: "usb",
+    radio: { sample_rate: 240000, center_hz: 352603125, gain_db: 20, ppm: -3 },
+  });
+  for (const [field, patch] of [
+    ["rate", { rate: "320000" }],
+    ["gain", { gain: "60" }],
+    ["gain", { gain: "-1" }],
+    ["ppm", { ppm: "500" }],
+  ]) {
+    assert.throws(
+      () => makeInput({ ...values, kind: "usb", ...patch }, channels),
+      (e) => e instanceof InputError && e.field === field,
+      field,
+    );
+  }
+});

@@ -9,6 +9,8 @@
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
+    <!-- Built-in RTL-SDR driver (USB OTG host) -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <application
         android:icon="@mipmap/ic_launcher"
@@ -27,6 +29,13 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!-- RTL-SDR dongle plugged in: offer this app (built-in driver) -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/rtl_sdr_devices" />
         </activity>
 
         <service

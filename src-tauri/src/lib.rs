@@ -203,6 +203,28 @@ fn set_native_monitor(
 ) -> Result<(), String> {
     monitor.update(settings, &receiver)
 }
+/// JNI entry points for io.jrradio.receiver.UsbDongle (Kotlin): the app opens
+/// the dongle with Android's USB API and hands its descriptor to the built-in
+/// driver, and asks whether a session is waiting for one.
+#[cfg(target_os = "android")]
+mod usb_jni {
+    use std::ffi::c_void;
+    #[no_mangle]
+    pub extern "system" fn Java_io_jrradio_receiver_UsbDongle_offerFd(
+        _env: *mut c_void,
+        _class: *mut c_void,
+        fd: i32,
+    ) {
+        receiver_core::usb::offer_fd(fd);
+    }
+    #[no_mangle]
+    pub extern "system" fn Java_io_jrradio_receiver_UsbDongle_wantsDevice(
+        _env: *mut c_void,
+        _class: *mut c_void,
+    ) -> u8 {
+        u8::from(receiver_core::usb::wants_device())
+    }
+}
 #[tauri::command]
 fn native_audio_status(
     monitor: tauri::State<'_, native_audio::NativeMonitor>,

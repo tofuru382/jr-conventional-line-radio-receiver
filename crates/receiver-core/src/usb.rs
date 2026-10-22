@@ -1,0 +1,329 @@
+//! Built-in RTL-SDR driver (Android): the dongle is driven directly over USB
+//! with the vendored pure-Rust `rtlsdr-nusb`, so no separate driver app or
+//! RTL-TCP connection is needed.
+//!
+//! Android apps cannot open USB devices themselves: the app's Java side asks
+//! for permission, opens the device and hands its file descriptor over with
+//! [`offer_fd`]. A session waiting for a dongle (at start or after the dongle
+//! dropped off the bus) reports it through [`wants_device`], so the Java side
+//! knows when to look for one.
+use crate::{source::Read, Complex32};
+use rtlsdr_nusb::{Device, GainConfig, MaybeFuture, RxStream};
+use serde::{Deserialize, Serialize};
+use std::{
+    os::fd::{BorrowedFd, OwnedFd},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+    time::{Duration, Instant},
+};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub sample_rate: u32,
+    pub center_hz: u32,
+    /// Manual LNA + mixer gain in dB; `None` lets the tuner choose.
+    pub gain_db: Option<f64>,
+    #[serde(default)]
+    pub ppm: i32,
+    /// Keep trying to reopen the dongle this long after it stops or drops
+    /// off the bus (0: fail at once).
+    #[serde(default = "default_reconnect_seconds")]
+    pub reconnect_seconds: u32,
+}
+fn default_reconnect_seconds() -> u32 {
+    60
+}
+impl Config {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(225_001..=300_000).contains(&self.sample_rate)
+            && !(900_001..=3_200_000).contains(&self.sample_rate)
+        {
+            return Err(
+                "USB: サンプルレートは 225001–300000 または 900001–3200000 S/s を指定してください"
+                    .into(),
+            );
+        }
+        if self.center_hz == 0 {
+            return Err("USB: 中心周波数は 0 より大きい値を指定してください".into());
+        }
+        if self
+            .gain_db
+            .is_some_and(|g| !g.is_finite() || !(0.0..=52.5).contains(&g))
+            || !(-488..=488).contains(&self.ppm)
+        {
+            return Err(
+                "USB: ゲインは 0–52.5 dB（空欄で自動）、周波数補正は −488–488 ppm を指定してください"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The descriptor most recently handed over by the Java side.
+static OFFERED: Mutex<Option<OwnedFd>> = Mutex::new(None);
+/// A session is waiting for a dongle.
+static WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Hands over an opened USB device. The descriptor is duplicated, so the
+/// caller keeps (and may later close) its own.
+pub fn offer_fd(fd: i32) {
+    if fd < 0 {
+        return;
+    }
+    // SAFETY: the caller passes a descriptor that is open for this call.
+    let owned = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned();
+    if let Ok(owned) = owned {
+        *OFFERED.lock().unwrap() = Some(owned);
+    }
+}
+/// Whether a session is waiting for [`offer_fd`].
+pub fn wants_device() -> bool {
+    WANTED.load(Ordering::Relaxed)
+}
+fn take_offered() -> Option<OwnedFd> {
+    OFFERED.lock().unwrap().take()
+}
+
+/// How long `open` waits for the Java side (permission dialog included).
+const OPEN_WAIT: Duration = Duration::from_secs(30);
+const RETRY_EVERY: Duration = Duration::from_millis(200);
+/// No samples for this long: the dongle stalled.
+const STALL: Duration = Duration::from_secs(5);
+
+fn open_device(config: &Config, fd: OwnedFd) -> Result<(Device, RxStream), String> {
+    let gain = config
+        .gain_db
+        .map_or(GainConfig::Auto, |g| GainConfig::Manual(g as f32));
+    let device = Device::builder()
+        .frequency_hz(config.center_hz.into())
+        .sample_rate_hz(config.sample_rate)
+        .gain(gain)
+        .correction_ppm(config.ppm)
+        .open_fd(fd)
+        .wait()
+        .map_err(|e| format!("USB: ドングルを初期化できません ({e})"))?;
+    let mut rx = device
+        .rx_stream()
+        .map_err(|e| format!("USB: 受信を開始できません ({e})"))?;
+    rx.start()
+        .wait()
+        .map_err(|e| format!("USB: 受信を開始できません ({e})"))?;
+    Ok((device, rx))
+}
+
+pub struct Usb {
+    config: Config,
+    /// Kept for the stream's lifetime (shut down on drop).
+    device: Option<Device>,
+    rx: Option<RxStream>,
+    scratch: Vec<rtlsdr_nusb::Complex32>,
+    dropped: u64,
+    last_data: Instant,
+    lost_at: Option<Instant>,
+    cause: String,
+    pub failed_attempts: u32,
+    pub reconnects: u64,
+}
+impl Usb {
+    pub fn open(config: &Config, stop: &AtomicBool) -> Result<Self, String> {
+        config.validate()?;
+        // A descriptor offered before this session is stale (or is the one
+        // the Java side just opened for us); prefer a fresh one when it comes.
+        WANTED.store(true, Ordering::Relaxed);
+        let started = Instant::now();
+        let fd = loop {
+            if stop.load(Ordering::Relaxed) {
+                WANTED.store(false, Ordering::Relaxed);
+                return Err("USB: 接続を中止しました".into());
+            }
+            if let Some(fd) = take_offered() {
+                break fd;
+            }
+            if started.elapsed() >= OPEN_WAIT {
+                WANTED.store(false, Ordering::Relaxed);
+                return Err(
+                    "USB: ドングルが見つかりません。スマホに挿して、USB の使用を許可してください"
+                        .into(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        WANTED.store(false, Ordering::Relaxed);
+        let (device, rx) = open_device(config, fd)?;
+        Ok(Self {
+            config: config.clone(),
+            device: Some(device),
+            rx: Some(rx),
+            scratch: Vec::new(),
+            dropped: 0,
+            last_data: Instant::now(),
+            lost_at: None,
+            cause: String::new(),
+            failed_attempts: 0,
+            reconnects: 0,
+        })
+    }
+    pub fn reconnecting(&self) -> bool {
+        self.rx.is_none()
+    }
+    fn lose(&mut self, cause: String) -> Result<Read, String> {
+        self.rx = None;
+        self.device = None;
+        if self.config.reconnect_seconds == 0 {
+            return Err(cause);
+        }
+        self.lost_at = Some(Instant::now());
+        self.cause = cause;
+        self.failed_attempts = 0;
+        // A descriptor of the old connection must not be reused.
+        take_offered();
+        WANTED.store(true, Ordering::Relaxed);
+        Ok(Read::Discontinuity)
+    }
+    pub fn read(&mut self, output: &mut [Complex32], stop: &AtomicBool) -> Result<Read, String> {
+        if let Some(rx) = self.rx.as_mut() {
+            self.scratch
+                .resize(output.len(), rtlsdr_nusb::Complex32::default());
+            return match rx
+                .read(&mut self.scratch, Some(Duration::from_millis(100)))
+                .wait()
+            {
+                Ok(0) if self.last_data.elapsed() >= STALL => {
+                    self.lose("USB: IQ データが 5 秒間届きません".into())
+                }
+                Ok(0) => Ok(Read::Timeout),
+                Ok(n) => {
+                    self.last_data = Instant::now();
+                    // The stream drops whole USB buffers when it falls behind;
+                    // let the pipelines resynchronise instead of splicing.
+                    let dropped = rx.stats().buffers_dropped;
+                    if dropped != self.dropped {
+                        self.dropped = dropped;
+                        return Ok(Read::Discontinuity);
+                    }
+                    for (out, s) in output.iter_mut().zip(&self.scratch[..n]) {
+                        *out = Complex32 {
+                            real: s.re,
+                            imaginary: s.im,
+                        };
+                    }
+                    Ok(Read::Samples(n))
+                }
+                Err(e) => self.lose(format!("USB: ドングルとの接続が切れました ({e})")),
+            };
+        }
+        let limit = Duration::from_secs(self.config.reconnect_seconds.into());
+        if self.lost_at.is_some_and(|t| t.elapsed() >= limit) {
+            WANTED.store(false, Ordering::Relaxed);
+            return Err(format!(
+                "{}（{} 秒間待ちましたが、ドングルが戻りませんでした。挿し直してから受信を開始してください）",
+                self.cause,
+                limit.as_secs()
+            ));
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Ok(Read::Timeout);
+        }
+        match take_offered() {
+            Some(fd) => match open_device(&self.config, fd) {
+                Ok((device, rx)) => {
+                    WANTED.store(false, Ordering::Relaxed);
+                    self.device = Some(device);
+                    self.rx = Some(rx);
+                    self.dropped = 0;
+                    self.last_data = Instant::now();
+                    self.lost_at = None;
+                    self.failed_attempts = 0;
+                    self.reconnects += 1;
+                }
+                Err(_) => self.failed_attempts += 1,
+            },
+            None => std::thread::sleep(RETRY_EVERY),
+        }
+        Ok(Read::Timeout)
+    }
+}
+impl Drop for Usb {
+    fn drop(&mut self) {
+        WANTED.store(false, Ordering::Relaxed);
+        if let Some(rx) = self.rx.take() {
+            let _ = rx.close().wait();
+        }
+        if let Some(mut device) = self.device.take() {
+            let _ = device.shutdown().wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            sample_rate: 240_000,
+            center_hz: 352_603_125,
+            gain_db: Some(20.0),
+            ppm: 0,
+            reconnect_seconds: 60,
+        }
+    }
+
+    #[test]
+    fn settings_follow_the_rtl2832u_limits() {
+        assert!(config().validate().is_ok());
+        for rate in [225_000, 300_001, 900_000, 3_200_001] {
+            assert!(Config {
+                sample_rate: rate,
+                ..config()
+            }
+            .validate()
+            .is_err());
+        }
+        for gain in [-0.1, 52.6, f64::NAN] {
+            assert!(Config {
+                gain_db: Some(gain),
+                ..config()
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(Config {
+            gain_db: None,
+            ..config()
+        }
+        .validate()
+        .is_ok());
+        assert!(Config {
+            ppm: 489,
+            ..config()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn open_waits_for_a_device_and_can_be_cancelled() {
+        let stop = AtomicBool::new(true);
+        let error = Usb::open(&config(), &stop).err().unwrap();
+        assert!(error.contains("中止"), "{error}");
+        assert!(!wants_device());
+    }
+
+    #[test]
+    fn offered_descriptors_are_duplicated_and_taken_once() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        use std::os::fd::AsRawFd;
+        offer_fd(file.as_raw_fd());
+        drop(file);
+        // The duplicate stays valid after the caller closed its own.
+        let fd = take_offered().unwrap();
+        assert!(fd.try_clone().is_ok());
+        assert!(take_offered().is_none());
+        offer_fd(-1);
+        assert!(take_offered().is_none());
+    }
+}

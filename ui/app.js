@@ -1310,26 +1310,31 @@ $("all").addEventListener("change", () => {
 function updateSource() {
   const wave = $("input-kind").value === "wave";
   const tcp = $("input-kind").value === "rtl_tcp";
+  const usb = $("input-kind").value === "usb";
   $("driver-group").hidden = !(tcp && platform.android);
-  $("device-group").hidden = wave || tcp;
+  $("device-group").hidden = wave || tcp || usb;
   $("tcp-group").hidden = !tcp;
-  $("ppm-group").hidden = !tcp;
-  $("soapy-options").hidden = wave || tcp;
+  $("ppm-group").hidden = !(tcp || usb);
+  $("soapy-options").hidden = wave || tcp || usb;
   $("file-group").hidden = !wave;
   $("rate").disabled = wave;
   $("gain").disabled = wave;
   $("rate").title = wave ? "WAV ヘッダーから取得します" : "";
-  $("gain").placeholder = tcp ? "自動" : "機器の既定値";
+  $("gain").placeholder = tcp || usb ? "自動" : "機器の既定値";
   const host = $("host").value.trim();
   const port = $("port").value.trim();
-  $("source-summary").textContent = tcp
+  $("source-summary").textContent = usb
+    ? "USB 直結（内蔵ドライバー）"
+    : tcp
     ? host && port
       ? `RTL-TCP · ${host.includes(":") ? `[${host}]` : host}:${port}`
       : "RTL-TCP · 接続先未設定"
     : wave
       ? "IQ WAV ファイル"
       : "SoapySDR デバイス";
-  $("source-hint").textContent = wave
+  $("source-hint").textContent = usb
+    ? "ドングルをスマホに挿して「受信を開始」を押してください。Rtl-sdr driver は不要です。初回は USB の使用許可を求められます。ドングルが抜けても、挿し直せば自動で受信を再開します。"
+    : wave
     ? "I は左、Q は右のステレオ WAV。サンプルレートはファイルから取得します。"
     : tcp && platform.android
       ? "ドングルを挿して「RTL-SDR ドライバーを起動」を押し、ドライバーが起動したら「受信を開始」を押してください。選択した波を同時受信します。"
@@ -1390,6 +1395,10 @@ $("driver-start").addEventListener("click", async () => {
 function applyAndroidLayout() {
   document.documentElement.classList.add("android");
   $("input-kind").querySelector('option[value="sdr"]')?.remove();
+  // Built-in driver: the app drives the dongle itself (no driver app).
+  const usb = el("option", "USB 直結（内蔵ドライバー）");
+  usb.value = "usb";
+  $("input-kind").prepend(usb);
   for (const id of ["browse", "record-browse", "preset-browse"])
     $(id).hidden = true;
 }
@@ -1496,10 +1505,23 @@ function adoptMacDefaults() {
     void persistPreferences();
   }
 }
+const usbDefaultKey = "jr-clrr.usb-default";
 function adoptAndroidDefaults() {
   let changed = false;
-  if ($("input-kind").value !== "rtl_tcp" && $("input-kind").value !== "wave") {
-    $("input-kind").value = "rtl_tcp";
+  // Switch to the built-in driver once; afterwards respect the user's choice.
+  let switched = true;
+  try {
+    switched = localStorage.getItem(usbDefaultKey) === "done";
+    localStorage.setItem(usbDefaultKey, "done");
+  } catch {
+    switched = false;
+  }
+  if (!switched && $("input-kind").value !== "wave") {
+    $("input-kind").value = "usb";
+    changed = true;
+  }
+  if (!["usb", "rtl_tcp", "wave"].includes($("input-kind").value)) {
+    $("input-kind").value = "usb";
     changed = true;
   }
   if ($("input-kind").value === "rtl_tcp" && fillDriverEndpoint())
@@ -1556,6 +1578,14 @@ $("start").addEventListener("click", async () => {
       );
     });
     await flushPreferences();
+    if (input.kind === "usb" && platform.android) {
+      // Built-in driver: Android hands the dongle over (asking first if needed).
+      const usb = window.JrAndroid?.requestUsb?.();
+      if (usb === "none")
+        throw new Error(
+          "ドングルが見つかりません。スマホに挿して（OTG がオンになっているか確認して）から「受信を開始」を押してください。",
+        );
+    }
     await invoke("start", {
       config: {
         input,

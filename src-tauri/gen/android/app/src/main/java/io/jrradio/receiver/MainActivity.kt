@@ -2,7 +2,9 @@ package io.jrradio.receiver
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.usb.UsbManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -50,6 +52,20 @@ class MainActivity : TauriActivity() {
       WindowInsetsCompat.CONSUMED
     }
     onBackPressedDispatcher.addCallback(this, keepReceivingOnBack)
+    handleUsbAttach(intent)
+  }
+
+  // A dongle plugged in (again). With "use by default" chosen, Android grants
+  // USB access here, which lets the built-in driver recover from a USB drop.
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    handleUsbAttach(intent)
+  }
+
+  private fun handleUsbAttach(intent: Intent?) {
+    if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED && UsbDongle.sessionWantsDevice()) {
+      UsbDongle.request(this)
+    }
   }
 
   @SuppressLint("JavascriptInterface")
@@ -69,9 +85,17 @@ class MainActivity : TauriActivity() {
           ReceiverService.start(this@MainActivity)
         } else {
           ReceiverService.stop(this@MainActivity)
+          UsbDongle.close()
         }
       }
     }
+
+    /**
+     * Built-in driver: find the dongle, ask for USB access if needed and hand
+     * it to the receiver. Returns "ok", "asking" or "none" (no dongle).
+     */
+    @JavascriptInterface
+    fun requestUsb(): String = UsbDongle.request(this@MainActivity)
   }
 
   private fun requestNotificationPermission() {

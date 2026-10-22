@@ -41,6 +41,22 @@ export function makeInput(values, channels) {
       `選択した ${channels.length} 波が帯域に収まるよう、中心周波数とサンプルレートを設定してください。周波数の中点は ${((Math.min(...channels.map((c) => c.frequency_hz)) + Math.max(...channels.map((c) => c.frequency_hz))) / 2e6).toFixed(6)} MHz です。`,
     );
   const gain_db = values.gain === "" ? null : number("gain", -100, 100);
+  if (values.kind === "usb") {
+    if (
+      !(sample_rate > 225000 && sample_rate <= 300000) &&
+      !(sample_rate > 900000 && sample_rate <= 3200000)
+    )
+      bad(
+        "rate",
+        "USB 直結は 225001–300000 または 900001–3200000 S/s に対応します。",
+      );
+    if (gain_db !== null && (gain_db < 0 || gain_db > 52.5))
+      bad("gain", "USB 直結のゲインは 0–52.5 dB を指定するか、空欄で自動にしてください。");
+    return {
+      kind: "usb",
+      radio: { sample_rate, center_hz, gain_db, ppm: number("ppm", -488, 488, true) },
+    };
+  }
   if (values.kind === "rtl_tcp") {
     const host = values.host.trim();
     let validIp =

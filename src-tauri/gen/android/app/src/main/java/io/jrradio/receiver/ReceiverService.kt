@@ -8,7 +8,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -22,6 +24,17 @@ import androidx.core.content.ContextCompat
  */
 class ReceiverService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
+  private val handler = Handler(Looper.getMainLooper())
+
+  // Built-in driver: while a session waits for the dongle (it dropped off USB
+  // and came back), hand it over again, also with the app in the background.
+  private val usbWatch =
+    object : Runnable {
+      override fun run() {
+        if (UsbDongle.sessionWantsDevice()) UsbDongle.request(this@ReceiverService)
+        handler.postDelayed(this, 2000)
+      }
+    }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -41,11 +54,14 @@ class ReceiverService : Service() {
           acquire()
         }
     }
+    handler.removeCallbacks(usbWatch)
+    handler.postDelayed(usbWatch, 2000)
     // Reception cannot resume on its own after the process is killed.
     return START_NOT_STICKY
   }
 
   override fun onDestroy() {
+    handler.removeCallbacks(usbWatch)
     wakeLock?.let { if (it.isHeld) it.release() }
     wakeLock = null
     super.onDestroy()

@@ -16,7 +16,8 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
-receiver-core = { path = "../crates/receiver-core", default-features = false }
+# "usb": built-in RTL-SDR driver; the app hands over the USB device descriptor.
+receiver-core = { path = "../crates/receiver-core", default-features = false, features = ["usb"] }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
