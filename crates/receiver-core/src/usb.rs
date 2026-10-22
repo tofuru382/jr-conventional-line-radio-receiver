@@ -8,7 +8,7 @@
 //! dropped off the bus) reports it through [`wants_device`], so the Java side
 //! knows when to look for one.
 use crate::{source::Read, Complex32};
-use rtlsdr_nusb::{Device, GainConfig, MaybeFuture, RxStream};
+use rtlsdr_nusb::{Device, MaybeFuture, RxStream};
 use serde::{Deserialize, Serialize};
 use std::{
     os::fd::{BorrowedFd, OwnedFd},
@@ -93,10 +93,16 @@ const RETRY_EVERY: Duration = Duration::from_millis(200);
 /// No samples for this long: the dongle stalled.
 const STALL: Duration = Duration::from_secs(5);
 
+/// Opening from a descriptor needs Linux usbfs (Android is Linux).
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn open_device(_config: &Config, _fd: OwnedFd) -> Result<(Device, RxStream), String> {
+    Err("USB: 内蔵ドライバーは Android 版でのみ使えます".into())
+}
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn open_device(config: &Config, fd: OwnedFd) -> Result<(Device, RxStream), String> {
-    let gain = config
-        .gain_db
-        .map_or(GainConfig::Auto, |g| GainConfig::Manual(g as f32));
+    let gain = config.gain_db.map_or(rtlsdr_nusb::GainConfig::Auto, |g| {
+        rtlsdr_nusb::GainConfig::Manual(g as f32)
+    });
     let device = Device::builder()
         .frequency_hz(config.center_hz.into())
         .sample_rate_hz(config.sample_rate)
