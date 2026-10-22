@@ -86,6 +86,19 @@ impl Selector {
                 .is_none_or(|s| info.serial_number() == Some(s))
     }
 }
+// JR-CLRR change: Android apps cannot enumerate or open USB devices
+// themselves (nusb has no list_devices there); use DeviceBuilder::open_fd.
+#[cfg(target_os = "android")]
+pub(crate) fn list() -> impl MaybeFuture<Output = Result<Vec<DeviceDescriptor>>> {
+    ready(Ok(Vec::new()))
+}
+#[cfg(target_os = "android")]
+pub(crate) fn select(
+    _selector: Selector,
+) -> impl MaybeFuture<Output = Result<(DeviceDescriptor, nusb::DeviceInfo)>> {
+    ready(Err(Error::DeviceNotFound))
+}
+#[cfg(not(target_os = "android"))]
 pub(crate) fn list() -> impl MaybeFuture<Output = Result<Vec<DeviceDescriptor>>> {
     nusb::list_devices().map(|devices| {
         Ok(devices?
@@ -95,6 +108,7 @@ pub(crate) fn list() -> impl MaybeFuture<Output = Result<Vec<DeviceDescriptor>>>
             .collect())
     })
 }
+#[cfg(not(target_os = "android"))]
 pub(crate) fn select(
     selector: Selector,
 ) -> impl MaybeFuture<Output = Result<(DeviceDescriptor, nusb::DeviceInfo)>> {
