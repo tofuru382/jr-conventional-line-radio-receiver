@@ -24,6 +24,9 @@ pub struct Settings {
     /// The WebView's Web Audio player owns the monitor queue: do not drain it.
     #[serde(default)]
     pub inactive: bool,
+    /// Even out loud and quiet speakers (live playback only).
+    #[serde(default)]
+    pub level: bool,
 }
 
 /// Playback health shown in the app (to tell choppy reception from choppy
@@ -213,6 +216,77 @@ impl Resampler {
         let out = self.process(&[0; HALF]);
         self.reset();
         out
+    }
+}
+
+/// Automatic level control for live playback: quiet speakers (a driver far
+/// from the microphone) are raised toward a common loudness, loud ones are
+/// left alone, and silence or background hiss is never amplified. Mirrors
+/// `Leveler` in ui/audio.mjs (the Web Audio path).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub mod leveler {
+    /// Analysis block: 20 ms at 8 kHz.
+    const BLOCK: usize = 160;
+    /// Target speech loudness (RMS, full scale = 1.0), about −18 dBFS.
+    const TARGET: f32 = 0.125;
+    /// Below this the block is silence or hiss (about −50 dBFS): no boost.
+    const GATE: f32 = 0.003;
+    /// At most +18 dB; loud speech may be lowered to half.
+    const MAX_GAIN: f32 = 8.0;
+    const MIN_GAIN: f32 = 0.5;
+
+    pub struct Leveler {
+        envelope: f32,
+        gain: f32,
+    }
+    impl Default for Leveler {
+        fn default() -> Self {
+            Self {
+                envelope: TARGET,
+                gain: 1.0,
+            }
+        }
+    }
+    impl Leveler {
+        pub fn gain(&self) -> f32 {
+            self.gain
+        }
+        pub fn process(&mut self, pcm: &mut [i16]) {
+            for block in pcm.chunks_mut(BLOCK) {
+                let rms = (block
+                    .iter()
+                    .map(|&s| (s as f32 / 32768.0).powi(2))
+                    .sum::<f32>()
+                    / block.len() as f32)
+                    .sqrt();
+                if rms > GATE {
+                    // Follow rises quickly, falls slowly (syllable gaps).
+                    let rate = if rms > self.envelope { 0.5 } else { 0.05 };
+                    self.envelope += (rms - self.envelope) * rate;
+                }
+                let wanted = (TARGET / self.envelope.max(GATE)).clamp(MIN_GAIN, MAX_GAIN);
+                // Turn down fast, turn up gently; never raise during silence.
+                let next = if wanted < self.gain {
+                    self.gain + (wanted - self.gain) * 0.5
+                } else if rms > GATE {
+                    self.gain + (wanted - self.gain) * 0.1
+                } else {
+                    self.gain
+                };
+                let step = (next - self.gain) / block.len() as f32;
+                for (i, s) in block.iter_mut().enumerate() {
+                    let g = self.gain + step * (i + 1) as f32;
+                    *s = soft_limit(*s as f32 * g);
+                }
+                self.gain = next;
+            }
+        }
+    }
+    /// Transparent at normal levels, approaches full scale smoothly.
+    fn soft_limit(x: f32) -> i16 {
+        let y = x / 32767.0;
+        let limited = y / (1.0 + y.powi(4)).powf(0.25);
+        (limited * 32767.0).round().clamp(-32768.0, 32767.0) as i16
     }
 }
 
@@ -452,6 +526,7 @@ mod android {
         }
         let mut output: Option<Output> = None;
         let mut playout = Playout::default();
+        let mut leveler = super::leveler::Leveler::default();
         let mut listening = false;
         let mut idle_since: Option<Instant> = None;
         // Device progress, to notice a stream that has not started playing.
@@ -485,12 +560,11 @@ mod android {
             let now = Instant::now();
             if listening && !audio.is_empty() {
                 let gain = current.volume.clamp(0.0, 1.0);
-                playout.push(
-                    audio
-                        .iter()
-                        .flat_map(|f| f.pcm.iter().map(move |&s| (s as f32 * gain) as i16)),
-                    now,
-                );
+                let mut pcm: Vec<i16> = audio.iter().flat_map(|f| f.pcm.iter().copied()).collect();
+                if current.level {
+                    leveler.process(&mut pcm);
+                }
+                playout.push(pcm.into_iter().map(|s| (s as f32 * gain) as i16), now);
             }
             let tone = test
                 .lock()
@@ -695,6 +769,49 @@ mod tests {
         let mut p = playout::Playout::default();
         let (_, played, _) = simulate(&mut p, &[(0, 8000), (1300, 640)], 4000);
         assert_eq!(played, 8640);
+    }
+
+    fn tone_at(amplitude: f32, n: usize) -> Vec<i16> {
+        (0..n)
+            .map(|i| ((i as f32 * 0.3).sin() * amplitude * 32767.0) as i16)
+            .collect()
+    }
+    fn rms(pcm: &[i16]) -> f32 {
+        (pcm.iter()
+            .map(|&s| (s as f32 / 32768.0).powi(2))
+            .sum::<f32>()
+            / pcm.len() as f32)
+            .sqrt()
+    }
+
+    #[test]
+    fn leveler_raises_quiet_speech_and_leaves_loud_speech_unclipped() {
+        let mut quiet = tone_at(0.03, 16_000);
+        let mut l = leveler::Leveler::default();
+        l.process(&mut quiet);
+        let tail = &quiet[12_000..];
+        assert!(rms(tail) > 0.03 * 0.707 * 3.0, "{}", rms(tail));
+        let mut loud = tone_at(0.95, 16_000);
+        let mut l = leveler::Leveler::default();
+        l.process(&mut loud);
+        assert!(l.gain() <= 1.0);
+        assert!(loud.iter().all(|&s| s > -32768 && s < 32767));
+    }
+
+    #[test]
+    fn leveler_never_amplifies_silence_or_hiss() {
+        let mut hiss = tone_at(0.002, 16_000);
+        let before = hiss.clone();
+        let mut l = leveler::Leveler::default();
+        l.process(&mut hiss);
+        assert_eq!(l.gain(), 1.0);
+        assert_eq!(hiss, before);
+        // After quiet speech raised the gain, a pause keeps it (no pumping).
+        let mut l = leveler::Leveler::default();
+        l.process(&mut tone_at(0.03, 8_000));
+        let raised = l.gain();
+        l.process(&mut vec![0; 8_000]);
+        assert_eq!(l.gain(), raised);
     }
 
     #[test]

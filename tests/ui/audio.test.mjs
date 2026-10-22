@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AudioPlayer } from "../../ui/audio.mjs";
+import { AudioPlayer, Leveler } from "../../ui/audio.mjs";
 
 const pcm = Array(320).fill(8000);
 const frame = (index, epoch = 0, channel = "a") => ({ channel, epoch, index, pcm });
@@ -192,3 +192,20 @@ for (const clockRate of [0.999, 1, 1.001]) {
     assert.equal(player.active, false);
   });
 }
+
+const toneAt = (amplitude, n) =>
+  Array.from({ length: n }, (_, i) => Math.trunc(Math.sin(i * 0.3) * amplitude * 32767));
+const rms = (pcm) => Math.sqrt(pcm.reduce((s, x) => s + (x / 32768) ** 2, 0) / pcm.length);
+
+test("leveler raises quiet speech, keeps loud speech unclipped and never boosts hiss", () => {
+  const quiet = new Leveler().process(toneAt(0.03, 16000));
+  assert.ok(rms(quiet.slice(12000)) > 0.03 * 0.707 * 3);
+  const l = new Leveler();
+  const loud = l.process(toneAt(0.95, 16000));
+  assert.ok(l.gain <= 1);
+  assert.ok(loud.every((s) => s > -32768 && s < 32767));
+  const hiss = toneAt(0.002, 16000);
+  const quietLeveler = new Leveler();
+  assert.deepEqual(quietLeveler.process(hiss), hiss);
+  assert.equal(quietLeveler.gain, 1);
+});

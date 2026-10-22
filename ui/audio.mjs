@@ -9,6 +9,53 @@ const MAX_GAP_SECONDS = 1;
 // and gradual clock correction without prematurely dropping valid PCM.
 const MAX_BUFFER_SECONDS = 1.5;
 
+// Automatic level control for live playback (mirrors native_audio::leveler in
+// src-tauri): raises quiet speakers toward a common loudness, leaves loud ones
+// alone and never amplifies silence or hiss. Recordings are not affected.
+const BLOCK = 160;
+const TARGET = 0.125;
+const GATE = 0.003;
+const MAX_GAIN = 8;
+const MIN_GAIN = 0.5;
+function softLimit(x) {
+  const y = x / 32767;
+  const limited = y / Math.pow(1 + y ** 4, 0.25);
+  return Math.max(-32768, Math.min(32767, Math.round(limited * 32767)));
+}
+export class Leveler {
+  envelope = TARGET;
+  gain = 1;
+  /** Returns a new Int16-range array; the input is not modified. */
+  process(pcm) {
+    const out = Array.from(pcm);
+    for (let start = 0; start < out.length; start += BLOCK) {
+      const end = Math.min(out.length, start + BLOCK);
+      let sum = 0;
+      for (let i = start; i < end; i++) sum += (out[i] / 32768) ** 2;
+      const rms = Math.sqrt(sum / (end - start));
+      if (rms > GATE) {
+        const rate = rms > this.envelope ? 0.5 : 0.05;
+        this.envelope += (rms - this.envelope) * rate;
+      }
+      const wanted = Math.min(
+        MAX_GAIN,
+        Math.max(MIN_GAIN, TARGET / Math.max(this.envelope, GATE)),
+      );
+      const next =
+        wanted < this.gain
+          ? this.gain + (wanted - this.gain) * 0.5
+          : rms > GATE
+            ? this.gain + (wanted - this.gain) * 0.1
+            : this.gain;
+      const step = (next - this.gain) / (end - start);
+      for (let i = start; i < end; i++)
+        out[i] = softLimit(out[i] * (this.gain + step * (i - start + 1)));
+      this.gain = next;
+    }
+    return out;
+  }
+}
+
 // Schedule on the audio clock. IPC arrival times may jitter; they must never
 // cancel a frame that is still playing. Reset only on an explicit stop/switch
 // or a new decoder epoch.
@@ -17,6 +64,8 @@ export class AudioPlayer {
     this.context = context;
     this.destination = destination;
     this.sources = new Set();
+    /** Set to a Leveler to even out the loudness of live audio. */
+    this.leveler = null;
     this.reset();
   }
 
@@ -82,7 +131,8 @@ export class AudioPlayer {
       }
       const buffer = this.context.createBuffer(1, frame.pcm.length, SAMPLE_RATE);
       const data = buffer.getChannelData(0);
-      for (let i = 0; i < data.length; i++) data[i] = frame.pcm[i] / 32768;
+      const pcm = this.leveler ? this.leveler.process(frame.pcm) : frame.pcm;
+      for (let i = 0; i < data.length; i++) data[i] = pcm[i] / 32768;
       const node = this.context.createBufferSource();
       node.buffer = buffer;
       node.playbackRate.value = this.rate;

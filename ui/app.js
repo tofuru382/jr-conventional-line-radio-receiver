@@ -1,6 +1,6 @@
 import { makeInput } from "./config.mjs";
 import { buildCatalog } from "./presets.mjs";
-import { AudioPlayer } from "./audio.mjs";
+import { AudioPlayer, Leveler } from "./audio.mjs";
 import { OperationMonitorView } from "./operation-monitor.mjs";
 import { RoutePicker } from "./route-picker.mjs";
 const operationMonitor = new OperationMonitorView(document);
@@ -24,6 +24,7 @@ function syncNativeMonitor() {
     selected: selected || null,
     automatic: $("auto-select").checked,
     volume: Number($("volume").value) / 100,
+    level: $("level").checked,
   };
   const next = JSON.stringify(settings);
   if (next === nativeMonitorState) return;
@@ -152,26 +153,47 @@ function addTestSound() {
 // In-app recordings browser (Android): the app-specific folder cannot be
 // opened from the phone's file manager, so list and play recordings here.
 let recordingUrl = null;
+const jstTime = new Intl.DateTimeFormat("ja-JP", {
+  timeZone: "Asia/Tokyo",
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
 function recordingTime(name) {
   const m = /^recording-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/.exec(name);
   if (!m) return name;
-  const date = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
-  return new Intl.DateTimeFormat("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  }).format(date);
+  return jstTime.format(new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])));
+}
+// "352537500Hz-000001.wav" or, with channel names, "352537500Hz-D5_音声第1波-000001.wav".
+function parseRecordingName(name) {
+  const m = /^(\d+)Hz-(?:(.+)-)?0*(\d+)\.wav$/i.exec(name);
+  if (!m) return null;
+  const hz = Number(m[1]);
+  const channel = channels.find((c) => c.frequency_hz === hz);
+  return {
+    hz,
+    number: Number(m[3]),
+    label: m[2]?.replaceAll("_", " ") ?? channel?.label ?? "",
+    lines: channel ? shortLines(channelLineList(channel.id)) : "",
+  };
+}
+// [A, B, C, D] → "A・B ほか" (one frequency serves many lines nationwide).
+function shortLines(list, count = 2) {
+  return list.length > count
+    ? `${list.slice(0, count).join("・")} ほか`
+    : list.join("・");
 }
 function recordingLabel(file) {
-  const m = /^(\d+)Hz-0*(\d+)\.wav$/i.exec(file.name);
   const seconds = Math.max(0, (file.bytes - 44) / 16000);
   const length = seconds >= 1 ? `${Math.round(seconds)} 秒` : "1 秒未満";
-  return m
-    ? `${(Number(m[1]) / 1e6).toFixed(5)} MHz · #${m[2]} · ${length}`
+  const p = parseRecordingName(file.name);
+  return p
+    ? [`${(p.hz / 1e6).toFixed(5)} MHz`, p.label, p.lines, `#${p.number}`, length]
+        .filter(Boolean)
+        .join(" · ")
     : `${file.name} · ${length}`;
 }
 async function playRecording(session, file) {
@@ -189,51 +211,107 @@ async function playRecording(session, file) {
     const player = $("recordings-player");
     player.src = recordingUrl;
     player.hidden = false;
-    $("recordings-now").textContent = `再生中：${recordingTime(session.name)} · ${recordingLabel(file)}`;
+    $("recordings-now").textContent = `再生中：${fileTime(session, file)} · ${recordingLabel(file)}`;
     $("recordings-now").hidden = false;
     $("recordings-status").textContent = session.incomplete
-      ? "保存中のファイルは、保存を停止すると最後まで再生できます。"
+      ? "保存中の回です。最後まで再生できない場合は、保存を停止してから再生してください。"
       : "";
     await Promise.resolve(player.play?.()).catch(() => {});
   } catch (e) {
     $("recordings-status").textContent = String(e.message ?? e);
   }
 }
-async function refreshRecordings() {
+// When the call ended (file time), or the session start when unknown.
+function fileTime(session, file) {
+  return file.modified
+    ? jstTime.format(new Date(file.modified * 1000))
+    : recordingTime(session.name);
+}
+const sortKey = "jr-clrr.recordings-sort";
+try {
+  const saved = localStorage.getItem(sortKey);
+  if ([...$("recordings-sort").options].some((o) => o.value === saved))
+    $("recordings-sort").value = saved;
+} catch {
+  // Default order.
+}
+let recordingSessions = [];
+function recordingButton(session, file, withTime) {
+  const text = `▶ ${withTime ? `${fileTime(session, file)} · ` : ""}${recordingLabel(file)}${session.incomplete ? " · 保存中" : ""}`;
+  const button = el("button", text, "recording-play");
+  button.type = "button";
+  button.addEventListener("click", () => playRecording(session, file));
+  return button;
+}
+function renderRecordings() {
   const list = $("recordings-list");
+  list.replaceChildren();
+  const order = $("recordings-sort").value;
+  if (order === "session") {
+    recordingSessions.forEach((session, i) => {
+      const group = el("details", undefined, "recording-session");
+      group.open = i === 0;
+      group.append(
+        el(
+          "summary",
+          `${recordingTime(session.name)} · ${session.files.length} 件${session.incomplete ? " · 保存中" : ""}`,
+        ),
+      );
+      for (const file of session.files) group.append(recordingButton(session, file, false));
+      list.append(group);
+    });
+    return;
+  }
+  const all = recordingSessions.flatMap((session) =>
+    session.files.map((file) => ({ session, file, info: parseRecordingName(file.name) })),
+  );
+  const newest = (a, b) => b.file.modified - a.file.modified || b.file.name.localeCompare(a.file.name);
+  all.sort(
+    order === "oldest"
+      ? (a, b) => -newest(a, b)
+      : order === "channel"
+        ? (a, b) => (a.info?.hz ?? 0) - (b.info?.hz ?? 0) || newest(a, b)
+        : newest,
+  );
+  let heading = null;
+  for (const { session, file, info } of all.slice(0, 300)) {
+    if (order === "channel") {
+      const title = info
+        ? [`${(info.hz / 1e6).toFixed(5)} MHz`, info.label, info.lines].filter(Boolean).join(" · ")
+        : "その他";
+      if (title !== heading) {
+        heading = title;
+        list.append(el("h3", title, "recording-heading"));
+      }
+    }
+    list.append(recordingButton(session, file, true));
+  }
+}
+async function refreshRecordings() {
   $("recordings-status").textContent = "読み込み中…";
   try {
-    const sessions =
+    recordingSessions =
       (await invoke("list_recordings", {
         directory: $("record-directory").value.trim() || null,
       })) ?? [];
-    list.replaceChildren();
-    const total = sessions.reduce((n, s) => n + s.files.length, 0);
-    $("recordings-count").textContent = `${sessions.length} 回の保存 · ${total} 件`;
-    $("recordings-status").textContent = sessions.length
-      ? `保存先：${[...new Set(sessions.map((s) => s.root))].join("、")}`
+    const total = recordingSessions.reduce((n, s) => n + s.files.length, 0);
+    $("recordings-count").textContent = `${recordingSessions.length} 回の保存 · ${total} 件`;
+    $("recordings-status").textContent = recordingSessions.length
+      ? `保存先：${[...new Set(recordingSessions.map((s) => s.root))].join("、")}`
       : "録音はまだありません。保存をオンにして受信すると、通話ごとにここに追加されます。";
-    sessions.forEach((session, i) => {
-      const group = el("details", undefined, "recording-session");
-      group.open = i === 0;
-      const summary = el(
-        "summary",
-        `${recordingTime(session.name)} · ${session.files.length} 件${session.incomplete ? " · 保存中" : ""}`,
-      );
-      group.append(summary);
-      if (!session.files.length) group.append(el("p", "音声のファイルはありません。", "muted"));
-      for (const file of session.files) {
-        const button = el("button", `▶ ${recordingLabel(file)}`, "recording-play");
-        button.type = "button";
-        button.addEventListener("click", () => playRecording(session, file));
-        group.append(button);
-      }
-      list.append(group);
-    });
+    renderRecordings();
   } catch (e) {
     $("recordings-status").textContent = String(e.message ?? e);
   }
 }
+$("recordings-sort").addEventListener("change", () => {
+  try {
+    localStorage.setItem(sortKey, $("recordings-sort").value);
+  } catch {
+    // The order still applies now.
+  }
+  renderRecordings();
+});
 function addRecordingsBrowser() {
   $("recordings-browser").hidden = false;
   $("recordings-browser").addEventListener("toggle", () => {
@@ -303,6 +381,7 @@ const routePicker = new RoutePicker(document, async (preset, selection) => {
     await loadPresets(true);
   }
   enabled = new Set(selection.channels.map((c) => c.id));
+  saveSelection();
   // Reception targets do not change the listener's manual audio selection.
   const names = selection.routes.slice(0, 2).map((r) => `${r.line}（${r.section}）`).join("、");
   const more = selection.routes.length > 2 ? ` ほか${selection.routes.length - 2}区間` : "";
@@ -557,6 +636,7 @@ $("preferences-retry").addEventListener("click", async () => {
   } else await flushPreferences();
 });
 function setControls() {
+  renderRadio();
   $("route-open").disabled = busy || !presetCatalog.length;
   routePicker.setBlocked(running || busy);
   $("settings").disabled = running || busy;
@@ -594,6 +674,40 @@ function setControls() {
   renderRecording();
   operationMonitor.update(lastSnapshot, { channels, enabled, running, replay: sessionReplay });
 }
+// Receive targets, the monitored channel and automatic selection are kept per
+// preset on this device, so a restart (or reinstall of settings) keeps them.
+const selectionKey = () => `jr-clrr.selection.${activePresetId}`;
+function saveSelection() {
+  if (!channels.length) return;
+  try {
+    localStorage.setItem(
+      selectionKey(),
+      JSON.stringify({
+        enabled: channels.filter((c) => enabled.has(c.id)).map((c) => c.id),
+        selected,
+        automatic: $("auto-select").checked,
+      }),
+    );
+  } catch {
+    // Not persisted; the selection still applies now.
+  }
+}
+function restoreSelection() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(selectionKey()) ?? "null");
+  } catch {
+    return;
+  }
+  if (!saved || !Array.isArray(saved.enabled)) return;
+  const ids = new Set(channels.map((c) => c.id));
+  enabled = new Set(saved.enabled.filter((id) => ids.has(id)));
+  if (ids.has(saved.selected)) selected = saved.selected;
+  if (typeof saved.automatic === "boolean") {
+    $("auto-select").checked = saved.automatic;
+    renderSelectionMode();
+  }
+}
 function renderSelectionMode() {
   const automatic = $("auto-select").checked;
   const hint = automatic
@@ -605,9 +719,10 @@ function renderSelectionMode() {
 $("auto-select").addEventListener("change", () => {
   selectionRevision++;
   renderSelectionMode();
+  saveSelection();
   syncNativeMonitor();
 });
-const clipRules = { min_clip_ms: 1000, join_resync_ms: 2000 };
+const clipRules = { min_clip_ms: 1000, join_resync_ms: 2000, channel_names: true };
 function outputOptions() {
   return {
     audio: $("output-audio").checked,
@@ -780,6 +895,7 @@ async function prepareAudio() {
     gain.connect(context.destination);
     audioPlayer = new AudioPlayer(context, gain);
   }
+  applyLeveling();
   gain.gain.value = Number($("volume").value) / 100;
   await context.resume();
 }
@@ -799,6 +915,7 @@ function receiveCheck(c) {
   check.addEventListener("change", () => {
     check.checked ? enabled.add(c.id) : enabled.delete(c.id);
     $("route-feedback").textContent = "";
+    saveSelection();
     setControls();
   });
   const label = el("label", undefined, "row-check");
@@ -808,17 +925,20 @@ function receiveCheck(c) {
 // Lines whose listed sections use this frequency, from the preset's route
 // table (docs/ROUTES.ja.md). The common wave serves every line.
 function channelLines(id) {
+  return channelLineList(id).join("・");
+}
+function channelLineList(id) {
   const preset = presetCatalog.find((p) => p.id === activePresetId);
   const channel = channels.find((c) => c.id === id);
-  if (!preset || !channel) return "";
-  if (channel.format === "common") return "全線区共通";
+  if (!preset || !channel) return [];
+  if (channel.format === "common") return ["全線区共通"];
   const hz = channel.frequency_hz;
   const lines = new Set(
     (preset.routes ?? [])
       .filter((r) => r.data_hz === hz || r.voice_hz.includes(hz))
       .map((r) => r.line),
   );
-  return [...lines].join("・");
+  return [...lines];
 }
 function channelButton(c, simple = false) {
   const button = el("button", undefined, "channel-select");
@@ -944,6 +1064,7 @@ function select(id, manual = false) {
   }
   if (selected !== id) resetAudio();
   selected = id;
+  if (manual) saveSelection();
   syncNativeMonitor();
   messageNodes.clear();
   $("messages").replaceChildren();
@@ -1189,6 +1310,7 @@ async function loadPresets(applyTuning = false) {
     ])
       $(metric).textContent = "—";
     enabled = new Set(channels.map((c) => c.id));
+    restoreSelection();
     if (applyTuning && $("input-kind").value !== "wave") {
       $("center").value = (preset.center_hz / 1e6).toFixed(6);
       $("rate").value = preset.sample_rate;
@@ -1305,6 +1427,7 @@ $("all").addEventListener("change", () => {
   $("route-feedback").textContent = "";
   enabled = new Set($("all").checked ? channels.map((c) => c.id) : []);
   for (const [id, r] of rows) r.check.checked = enabled.has(id);
+  saveSelection();
   setControls();
 });
 function updateSource() {
@@ -1705,6 +1828,208 @@ $("pause-messages").addEventListener("click", () => {
         .messages ?? [],
     );
 });
+// Radio-style overview tab: the monitored channel on an LCD, the calls in
+// progress with their recording state, and a short call history.
+const viewKey = "jr-clrr.view";
+function setView(view) {
+  const radio = view === "radio";
+  document.body.classList.toggle("view-radio", radio);
+  $("radio-view").hidden = !radio;
+  $("tab-radio").setAttribute("aria-selected", String(radio));
+  $("tab-detail").setAttribute("aria-selected", String(!radio));
+  try {
+    localStorage.setItem(viewKey, radio ? "radio" : "detail");
+  } catch {
+    // The view still applies now.
+  }
+  renderRadio();
+}
+$("tab-radio").addEventListener("click", () => setView("radio"));
+$("tab-detail").addEventListener("click", () => setView("detail"));
+let receivingSince = 0;
+const callLog = [];
+let previousCalls = new Set();
+// Call starts and ends, from the active calls of each snapshot (while the
+// app is on screen; the background keeps receiving and recording).
+function trackCalls(s) {
+  const now = Date.now();
+  if (s.running && !receivingSince) receivingSince = now;
+  if (!s.running) receivingSince = 0;
+  const current = new Set(s.running ? (s.active_calls ?? []) : []);
+  for (const id of current)
+    if (!previousCalls.has(id)) callLog.unshift({ id, start: now, end: 0 });
+  for (const id of previousCalls)
+    if (!current.has(id)) {
+      const entry = callLog.find((e) => e.id === id && !e.end);
+      if (entry) entry.end = now;
+    }
+  previousCalls = current;
+  callLog.length = Math.min(callLog.length, 30);
+}
+const clockTime = new Intl.DateTimeFormat("ja-JP", {
+  timeZone: "Asia/Tokyo",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+function duration(ms) {
+  const t = Math.max(0, Math.floor(ms / 1000));
+  const hms = [Math.floor(t / 3600), Math.floor(t / 60) % 60, t % 60];
+  return hms.map((n) => String(n).padStart(2, "0")).join(":");
+}
+function channelName(id) {
+  const c = channels.find((c) => c.id === id);
+  return c ? `${(c.frequency_hz / 1e6).toFixed(5)} ${c.label}` : id;
+}
+let radioListsKey = "";
+function renderRadio() {
+  if (!$("radio-view") || $("radio-view").hidden) return;
+  const s = running ? lastSnapshot : null;
+  const c = channels.find((c) => c.id === selected);
+  const status = s?.channels.find((x) => x.config.id === selected)?.status;
+  const calls = s?.active_calls ?? [];
+  const muted = !$("listen").checked;
+  const recording = recordingStatus.state === "recording";
+  $("lcd-frequency").textContent = c ? (c.frequency_hz / 1e6).toFixed(5) : "---.-----";
+  $("lcd-channel").textContent = c?.label ?? "—";
+  $("lcd-lines").textContent = c ? shortLines(channelLineList(c.id), 3) || "\u00a0" : "\u00a0";
+  $("lcd-rx").classList.toggle("on", !!c && calls.includes(c.id));
+  $("lcd-sync").classList.toggle("on", !!status?.frame_locked);
+  $("lcd-rec").classList.toggle("on", recording);
+  $("lcd-mode").textContent = $("auto-select").checked ? "AUTO" : "MAN";
+  $("lcd-mute").classList.toggle("on", muted);
+  const evm = status?.constellation?.length ? status.evm_percent : null;
+  const bars = !status?.frame_locked || evm === null
+    ? 0
+    : evm <= 8 ? 5 : evm <= 12 ? 4 : evm <= 18 ? 3 : evm <= 25 ? 2 : 1;
+  [...$("lcd-signal").children].forEach((bar, i) => bar.classList.toggle("on", i < bars));
+  $("lcd-signal").setAttribute("aria-label", `信号品質 ${bars} / 5`);
+  const kind = { usb: "USB 直結", rtl_tcp: "RTL-TCP", sdr: "SoapySDR", wave: "IQ WAV" }[
+    $("input-kind").value
+  ];
+  $("lcd-state").textContent = `${$("state").textContent}${kind ? ` · ${kind}` : ""}`;
+  $("lcd-clock").textContent = receivingSince ? duration(Date.now() - receivingSince) : "--:--:--";
+  $("radio-mode").setAttribute("aria-pressed", String($("auto-select").checked));
+  $("radio-mode").textContent = $("auto-select").checked ? "自動選択" : "手動（固定）";
+  // Recording.
+  const r = recordingStatus;
+  const saved = r.files > 0;
+  $("radio-rec-state").classList.toggle("on", recording && saved);
+  $("radio-rec-state").textContent = recording
+    ? saved
+      ? `録音中 · ${r.files} 件`
+      : "録音待機（通話を待っています）"
+    : r.state === "completed" && r.discarded
+      ? "通話なし（保存なし）"
+      : r.state === "completed"
+        ? `保存完了 · ${r.files} 件`
+        : r.state === "failed"
+          ? "保存エラー"
+          : recordingEnabled
+            ? "受信を始めると自動で録音します"
+            : "録音していません";
+  $("radio-rec-detail").textContent =
+    r.state === "idle" ? "" : `復号音声 ${(r.pcm_samples / 8000).toFixed(1)} 秒（全波合計）`;
+  // Calls in progress and recent calls (rebuilt only when they change).
+  const now = Date.now();
+  const key = JSON.stringify([calls, selected, muted, recording, callLog.slice(0, 8), Math.floor(now / 1000)]);
+  if (key !== radioListsKey) {
+    radioListsKey = key;
+    $("radio-calls").replaceChildren(
+      ...calls.map((id) => {
+        const ch = channels.find((x) => x.id === id);
+        const li = el("li");
+        const button = el("button", undefined, "radio-call");
+        button.type = "button";
+        button.setAttribute("aria-pressed", String(id === selected));
+        const name = el("span", undefined, "call-name");
+        name.append(
+          el("bdi", ch ? (ch.frequency_hz / 1e6).toFixed(5) : id),
+          ch?.label ?? "",
+        );
+        const lines = ch ? shortLines(channelLineList(id), 2) : "";
+        if (lines) name.title = lines;
+        const tags = el("span", undefined, "call-tags");
+        if (recording) tags.append(el("span", "REC", "tag-rec"));
+        if (id === selected && !muted) tags.append(el("span", "再生中", "tag-play"));
+        button.append(el("span", undefined, "lamp"), name, tags);
+        button.addEventListener("click", () => select(id, true));
+        li.append(button);
+        return li;
+      }),
+    );
+    $("radio-calls-empty").hidden = calls.length > 0;
+    const recent = callLog.slice(0, 8);
+    $("radio-history").replaceChildren(
+      ...recent.map((e) => {
+        const li = el("li");
+        li.append(
+          el("span", clockTime.format(new Date(e.start)), "when"),
+          el("span", channelName(e.id), "what"),
+          e.end
+            ? el("span", duration(e.end - e.start).replace(/^00:/, ""))
+            : el("span", "通話中", "live"),
+        );
+        return li;
+      }),
+    );
+    $("radio-history-empty").hidden = recent.length > 0;
+  }
+  const totals = s?.channels ?? [];
+  $("radio-stats").textContent = s
+    ? [
+        `受信対象 ${enabled.size} 波`,
+        `同期 ${totals.filter((x) => x.status.frame_locked).length} 波`,
+        `有効データ ${totals.reduce((n, x) => n + x.status.data.valid_frames, 0).toLocaleString()}`,
+        `処理欠落 ${totals.reduce((n, x) => n + x.dropped_blocks, 0).toLocaleString()}`,
+        s.reconnects ? `自動再接続 ${s.reconnects} 回` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : `受信対象 ${enabled.size} 波 · 停止中`;
+}
+function stepChannel(delta) {
+  const pool = channels.filter((c) => enabled.has(c.id));
+  const list = pool.length ? pool : channels;
+  if (!list.length) return;
+  const at = list.findIndex((c) => c.id === selected);
+  const next = list[(at + delta + list.length) % list.length];
+  select(next.id, true);
+  renderRadio();
+}
+$("radio-prev").addEventListener("click", () => stepChannel(-1));
+$("radio-next").addEventListener("click", () => stepChannel(1));
+$("radio-mode").addEventListener("click", () => {
+  $("auto-select").checked = !$("auto-select").checked;
+  $("auto-select").dispatchEvent(new Event("change"));
+  renderRadio();
+});
+try {
+  if (localStorage.getItem(viewKey) === "radio") setView("radio");
+} catch {
+  // Detail view by default.
+}
+// Volume leveling (live playback only; recordings keep the original level).
+const levelKey = "jr-clrr.level";
+try {
+  $("level").checked = localStorage.getItem(levelKey) === "on";
+} catch {
+  // Not persisted; off by default.
+}
+function applyLeveling() {
+  if (audioPlayer)
+    audioPlayer.leveler = $("level").checked ? (audioPlayer.leveler ?? new Leveler()) : null;
+}
+$("level").addEventListener("change", () => {
+  try {
+    localStorage.setItem(levelKey, $("level").checked ? "on" : "off");
+  } catch {
+    // The choice still applies now.
+  }
+  applyLeveling();
+  syncNativeMonitor();
+});
 $("volume").addEventListener("input", () => {
   $("volume-value").value = `${$("volume").value}%`;
   if (gain) gain.gain.value = Number($("volume").value) / 100;
@@ -1786,6 +2111,7 @@ async function poll() {
         const c = s.channels.find((c) => c.config.id === selected);
         if (selectionCurrent) detail(c?.status ?? null);
         if (c?.error) fail(c.error);
+        trackCalls(s);
         setControls();
         if (recordingResumePending) {
           if (!s.running) recordingResumePending = false;

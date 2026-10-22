@@ -12,6 +12,8 @@ pub struct RecordingFile {
     pub name: String,
     pub path: String,
     pub bytes: u64,
+    /// Last write (end of the call), Unix seconds; 0 when unknown.
+    pub modified: u64,
 }
 #[derive(Debug, Serialize, PartialEq)]
 pub struct RecordingSession {
@@ -67,10 +69,16 @@ pub fn list(roots: &[PathBuf]) -> Vec<RecordingSession> {
                         .extension()
                         .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
                     let meta = f.metadata().ok()?;
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs());
                     (wav && meta.is_file()).then(|| RecordingFile {
                         name,
                         path: path.to_string_lossy().into_owned(),
                         bytes: meta.len(),
+                        modified,
                     })
                 })
                 .collect();

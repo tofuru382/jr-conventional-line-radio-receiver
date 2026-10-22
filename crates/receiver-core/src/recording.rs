@@ -43,6 +43,9 @@ pub struct OutputOptions {
     /// audio on that channel arrived within this many milliseconds. 0 splits.
     #[serde(default)]
     pub join_resync_ms: u32,
+    /// Put the channel label in WAV names: `352537500Hz-D5_音声第1波-000001.wav`.
+    #[serde(default)]
+    pub channel_names: bool,
 }
 impl Default for OutputOptions {
     fn default() -> Self {
@@ -52,6 +55,7 @@ impl Default for OutputOptions {
             data_messages: false,
             min_clip_ms: 0,
             join_resync_ms: 0,
+            channel_names: false,
         }
     }
 }
@@ -291,6 +295,20 @@ fn create_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     file.write_all(b"\n")
         .and_then(|_| file.sync_all())
         .map_err(|e| e.to_string())
+}
+/// A channel label usable in a file name on every OS: letters and digits
+/// (any script) are kept, everything else becomes `_`, at most 24 characters.
+fn file_label(label: &str) -> String {
+    let mut out = String::new();
+    for c in label.chars() {
+        let keep = c.is_alphanumeric();
+        if keep {
+            out.push(c);
+        } else if !out.ends_with('_') && !out.is_empty() {
+            out.push('_');
+        }
+    }
+    out.trim_end_matches('_').chars().take(24).collect()
 }
 /// Files a session folder holds before anything is recorded.
 const SESSION_FILES: [&str; 6] = [
@@ -582,11 +600,24 @@ impl Writer {
         let track = self.tracks.get_mut(&audio.channel).unwrap();
         if track.clip.is_none() {
             track.number += 1;
-            // Only validated integer frequency and our own counter enter paths.
-            let name = format!(
-                "{}Hz-{:06}.wav",
-                track.config.frequency_hz as u64, track.number
-            );
+            // Only validated integer frequency, a sanitized label and our own
+            // counter enter paths.
+            let label = if self.options.channel_names {
+                file_label(&track.config.label)
+            } else {
+                String::new()
+            };
+            let name = if label.is_empty() {
+                format!(
+                    "{}Hz-{:06}.wav",
+                    track.config.frequency_hz as u64, track.number
+                )
+            } else {
+                format!(
+                    "{}Hz-{}-{:06}.wav",
+                    track.config.frequency_hz as u64, label, track.number
+                )
+            };
             let wave = PcmWave::create(self.directory.join(&name))
                 .map_err(|e| format!("{name} を作成できません：{e}"))?;
             track.clip = Some(Clip {
@@ -749,6 +780,34 @@ mod tests {
             read_pcm(&dir.join("352543750Hz-000001.wav")),
             vec![-240; 320]
         );
+    }
+    #[test]
+    fn channel_labels_go_into_wav_names_safely() {
+        assert_eq!(file_label("D5 音声第1波"), "D5_音声第1波");
+        assert_eq!(file_label("../a/b\\c:*?"), "a_b_c");
+        assert_eq!(file_label("  "), "");
+        assert_eq!(file_label(&"長".repeat(40)).chars().count(), 24);
+        let temp = Temp::new();
+        let channels = presets("east")[..1].to_vec();
+        let r = Recorder::default();
+        let options = OutputOptions {
+            channel_names: true,
+            ..Default::default()
+        };
+        let dir = PathBuf::from(
+            r.start_with_options(&temp.0, &channels, options)
+                .unwrap()
+                .directory
+                .unwrap(),
+        );
+        r.push(&pcm(&channels[0], 0, 0, 5));
+        assert_eq!(r.stop().files, 1);
+        let name = format!(
+            "{}Hz-{}-000001.wav",
+            channels[0].frequency_hz as u64,
+            file_label(&channels[0].label)
+        );
+        assert_eq!(read_pcm(&dir.join(&name)), vec![5; 320]);
     }
     #[test]
     fn resyncs_in_a_call_join_one_file_and_short_noise_bursts_are_dropped() {

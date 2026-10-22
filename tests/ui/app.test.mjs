@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
 import { makeInput } from "../../ui/config.mjs";
 import { buildCatalog } from "../../ui/presets.mjs";
-import { AudioPlayer } from "../../ui/audio.mjs";
+import { AudioPlayer, Leveler } from "../../ui/audio.mjs";
 import { OperationMonitorView } from "../../ui/operation-monitor.mjs";
 import { RoutePicker } from "../../ui/route-picker.mjs";
 const html = await readFile(
@@ -131,7 +131,7 @@ async function setup(
   let snapshot = { status: status(), audio: [] };
   let recording = { state: "idle", files: 0, pcm_samples: 0, error: null };
   let closeHandler;
-  w.testDependencies = { makeInput, buildCatalog, AudioPlayer, OperationMonitorView, RoutePicker };
+  w.testDependencies = { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker };
   w.structuredClone = structuredClone;
   // jsdom has no native modal behavior. Exercise our handlers, not a focus trap
   // or Escape key implementation; those belong to the browser's dialog element.
@@ -265,7 +265,7 @@ async function setup(
     };
   };
   await w.eval(
-    `(async () => {const { makeInput, buildCatalog, AudioPlayer, OperationMonitorView, RoutePicker } = window.testDependencies;\n${source}\n})()`,
+    `(async () => {const { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker } = window.testDependencies;\n${source}\n})()`,
   );
   const $ = (id) => w.document.getElementById(id);
   if (!catalogError)
@@ -530,6 +530,95 @@ test("Android built-in driver asks for the dongle before starting", async (t) =>
   assert.equal(start.args.config.input.radio.sample_rate, 240000);
   assert.ok(!("host" in start.args.config.input.radio));
 });
+test("volume leveling is remembered and reaches both players", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  $("listen").checked = true;
+  assert.equal($("level").checked, false);
+  await app.click("start");
+  await app.poll();
+  $("level").checked = true;
+  $("level").dispatchEvent(new app.w.Event("change"));
+  assert.equal(app.w.localStorage.getItem("jr-clrr.level"), "on");
+  const monitor = app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args.settings;
+  assert.equal(monitor.level, true);
+  // Switching to Web Audio uses the same leveling.
+  const box = $("native-output");
+  box.checked = false;
+  box.dispatchEvent(new app.w.Event("change"));
+  await app.poll();
+  await app.tick?.();
+});
+test("receive targets, the monitored channel and auto-select survive reloading the preset", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  await app.click("route-open");
+  app.input("route-search", "甲府 小淵沢");
+  [...$("route-results").children].find((n) => !n.hidden).querySelector("input").click();
+  await app.click("route-apply");
+  assert.equal($("total-enabled").textContent, "4");
+  const target = [...$("channels").querySelectorAll(".channel-select")][3];
+  target.click();
+  const chosen = $("selected-frequency").textContent;
+  assert.equal($("auto-select").checked, false);
+  const saved = JSON.parse(app.w.localStorage.getItem("jr-clrr.selection.east"));
+  assert.equal(saved.enabled.length, 4);
+  assert.equal(saved.automatic, false);
+  // Leave the preset and come back: as after restarting the app.
+  await app.change("region", "west");
+  await app.change("region", "east");
+  assert.equal($("total-enabled").textContent, "4");
+  assert.equal($("selected-frequency").textContent, chosen);
+  assert.equal($("auto-select").checked, false);
+});
+test("radio tab shows the monitored channel, calls with their recording state and a call history", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.equal($("radio-view").hidden, true);
+  await app.click("tab-radio");
+  assert.equal($("radio-view").hidden, false);
+  assert.ok(app.w.document.body.classList.contains("view-radio"));
+  assert.equal($("tab-radio").getAttribute("aria-selected"), "true");
+  assert.equal(app.w.localStorage.getItem("jr-clrr.view"), "radio");
+  $("listen").checked = true;
+  await app.click("start");
+  const snapshot = status();
+  const [first, second] = snapshot.channels;
+  first.status.constellation = [[0, 1]];
+  first.status.evm_percent = 7;
+  app.setSnapshot({ status: { ...snapshot, active_calls: [first.config.id, second.config.id], selected_channel: first.config.id }, audio: [] });
+  await app.poll();
+  assert.equal($("lcd-frequency").textContent, (first.config.frequency_hz / 1e6).toFixed(5));
+  assert.equal($("lcd-channel").textContent, first.config.label);
+  assert.ok($("lcd-rx").classList.contains("on"));
+  assert.ok($("lcd-sync").classList.contains("on"));
+  assert.equal($("lcd-signal").querySelectorAll("i.on").length, 5);
+  assert.equal($("radio-calls").children.length, 2);
+  assert.equal($("radio-calls-empty").hidden, true);
+  assert.match($("radio-calls").textContent, /再生中/);
+  assert.doesNotMatch($("radio-calls").textContent, /REC/);
+  // Recording in the background marks every call in progress.
+  app.setRecording({ state: "recording", options: { audio: true, raw_frames: false, data_messages: false }, files: 2, pcm_samples: 16000, raw_frames: 0, data_messages: 0, error: null, directory: "/x/recording-test" });
+  await app.poll();
+  assert.equal($("radio-calls").querySelectorAll(".tag-rec").length, 2);
+  assert.match($("radio-rec-state").textContent, /録音中 · 2 件/);
+  assert.ok($("lcd-rec").classList.contains("on"));
+  // The second call ends: history keeps both, one still live.
+  app.setSnapshot({ status: { ...snapshot, active_calls: [first.config.id], selected_channel: first.config.id }, audio: [] });
+  await app.poll();
+  assert.equal($("radio-history").children.length, 2);
+  assert.equal($("radio-history").querySelectorAll(".live").length, 1);
+  // Tapping a call or a channel key selects manually.
+  await app.click("radio-next");
+  assert.equal($("auto-select").checked, false);
+  assert.equal($("lcd-mode").textContent, "MAN");
+  assert.equal($("lcd-channel").textContent, second.config.label);
+  await app.click("radio-mode");
+  assert.equal($("auto-select").checked, true);
+  await app.click("tab-detail");
+  assert.equal($("radio-view").hidden, true);
+  assert.equal(app.w.document.body.classList.contains("view-radio"), false);
+});
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
@@ -600,15 +689,26 @@ test("Android plays a test sound through its own player without receiving", asyn
   assert.equal(app.calls.filter((c) => c.command === "play_test_sound").length, 1);
   assert.equal(app.calls.some((c) => c.command === "start"), false);
 });
-test("Android lists saved recordings and plays one in the app", async (t) => {
+test("Android lists saved recordings newest first, by channel or by session, and plays one", async (t) => {
+  const root = "/sdcard/Download/JR-CLRR/Recordings";
+  const at = (s) => Date.UTC(2026, 9, 18, 13, 31, s) / 1000;
+  const file = (session, name, s, seconds) => ({
+    name,
+    path: `${root}/${session}/${name}`,
+    bytes: 44 + 16000 * seconds,
+    modified: at(s),
+  });
+  const first = "recording-20261018T133100.000Z-001";
   const recordings = [
     {
-      name: "recording-20261018T133100.000Z-001",
-      directory: "/sdcard/Download/JR-CLRR/Recordings/recording-20261018T133100.000Z-001",
-      root: "/sdcard/Download/JR-CLRR/Recordings",
+      name: first,
+      directory: `${root}/${first}`,
+      root,
       incomplete: false,
       files: [
-        { name: "352606250Hz-000001.wav", path: "/sdcard/Download/JR-CLRR/Recordings/recording-20261018T133100.000Z-001/352606250Hz-000001.wav", bytes: 44 + 16000 * 12 },
+        file(first, "352606250Hz-000001.wav", 10, 12),
+        file(first, "352537500Hz-D5_音声第1波-000001.wav", 40, 3),
+        file(first, "352606250Hz-000002.wav", 30, 5),
       ],
     },
   ];
@@ -621,11 +721,24 @@ test("Android lists saved recordings and plays one in the app", async (t) => {
   $("recordings-browser").dispatchEvent(new app.w.Event("toggle"));
   await tick();
   await tick();
-  assert.equal($("recordings-count").textContent, "1 回の保存 · 1 件");
-  const button = $("recordings-list").querySelector(".recording-play");
-  assert.equal(button.textContent, "▶ 352.60625 MHz · #1 · 12 秒");
-  assert.match($("recordings-list").querySelector("summary").textContent, /^10\/18 22:31:00 · 1 件$/);
-  button.click();
+  assert.equal($("recordings-count").textContent, "1 回の保存 · 3 件");
+  const texts = () => [...$("recordings-list").querySelectorAll(".recording-play")].map((b) => b.textContent);
+  // Newest first, with the end time (JST) and the channel name from the file.
+  assert.deepEqual(texts(), [
+    "▶ 10/18 22:31:40 · 352.53750 MHz · D5 音声第1波 · 中央・総武緩行線・横浜線 ほか · #1 · 3 秒",
+    "▶ 10/18 22:31:30 · 352.60625 MHz · D7 音声第2波 · 山手線・仙石線 ほか · #2 · 5 秒",
+    "▶ 10/18 22:31:10 · 352.60625 MHz · D7 音声第2波 · 山手線・仙石線 ほか · #1 · 12 秒",
+  ]);
+  await app.change("recordings-sort", "oldest");
+  assert.match(texts()[0], /22:31:10/);
+  assert.equal(app.w.localStorage.getItem("jr-clrr.recordings-sort"), "oldest");
+  await app.change("recordings-sort", "channel");
+  const headings = [...$("recordings-list").querySelectorAll(".recording-heading")].map((h) => h.textContent);
+  assert.equal(headings.length, 2);
+  assert.match(headings[0], /^352\.53750 MHz/);
+  await app.change("recordings-sort", "session");
+  assert.match($("recordings-list").querySelector("summary").textContent, /^10\/18 22:31:00 · 3 件$/);
+  $("recordings-list").querySelector(".recording-play").click();
   await tick();
   await tick();
   assert.equal(app.calls.filter((c) => c.command === "read_recording").at(-1).args.path, recordings[0].files[0].path);
@@ -1093,7 +1206,8 @@ test("cancelled or invalid external files preserve the active catalog, while rel
     "更新済み <script>",
   );
   assert.equal(ui.$("region").querySelector("script"), null);
-  assert.equal(ui.$("total-enabled").textContent, "3");
+  // The receive targets chosen for this preset (none) are kept on reload.
+  assert.equal(ui.$("total-enabled").textContent, "0");
   assert.equal(ui.$("center").value, "352.625000");
   assert.equal(ui.$("preset-error").hidden, true);
 });
@@ -1369,6 +1483,7 @@ test("JSONL outputs can be selected without audio and empty output choices are r
     data_messages: true,
     min_clip_ms: 1000,
     join_resync_ms: 2000,
+    channel_names: true,
   });
   assert.equal(ui.$("output-data").matches(":disabled"), true);
   ui.$("recording-settings").open = false;
@@ -1576,7 +1691,7 @@ test("recording starts with the OS default folder without a picker and preserves
     ),
     {
       directory: defaultRecordingDirectory,
-      options: { audio: true, raw_frames: false, data_messages: false, min_clip_ms: 1000, join_resync_ms: 2000 },
+      options: { audio: true, raw_frames: false, data_messages: false, min_clip_ms: 1000, join_resync_ms: 2000, channel_names: true },
     },
   );
   assert.equal(ui.$("recording-state").textContent, "保存中");
@@ -1648,7 +1763,7 @@ test("recording validates its folder, is independent of monitoring, and stops wi
     ),
     {
       directory: "/tmp/recordings",
-      options: { audio: true, raw_frames: false, data_messages: false, min_clip_ms: 1000, join_resync_ms: 2000 },
+      options: { audio: true, raw_frames: false, data_messages: false, min_clip_ms: 1000, join_resync_ms: 2000, channel_names: true },
     },
   );
   assert.equal(ui.$("recording-state").textContent, "保存中");
