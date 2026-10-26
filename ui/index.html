@@ -39,57 +39,8 @@
         </button>
       </div>
     </header>
-    <nav class="view-tabs" role="tablist" aria-label="表示の切り替え">
-      <button id="tab-radio" type="button" role="tab" aria-selected="false" aria-controls="radio-view">無線機</button
-      ><button id="tab-detail" type="button" role="tab" aria-selected="true">詳細</button>
-    </nav>
     <main>
       <div id="error" class="error" role="alert" hidden></div>
-      <section id="radio-view" class="radio" role="tabpanel" aria-labelledby="tab-radio" hidden>
-        <div class="radio-device">
-          <div class="radio-lcd">
-            <div class="lcd-indicators" aria-label="状態表示">
-              <span id="lcd-rx" class="lcd-tag" title="選択中の波で通話を受信中">RX</span>
-              <span id="lcd-sync" class="lcd-tag" title="選択中の波が同期中">SYNC</span>
-              <span id="lcd-rec" class="lcd-tag" title="録音中">REC</span>
-              <span id="lcd-mode" class="lcd-tag on" title="通話の自動選択">AUTO</span>
-              <span id="lcd-mute" class="lcd-tag" title="消音中">MUTE</span>
-              <span id="lcd-signal" class="lcd-signal" role="img" aria-label="信号品質 —"
-                ><i></i><i></i><i></i><i></i><i></i
-              ></span>
-            </div>
-            <p class="lcd-frequency"><bdi id="lcd-frequency">---.-----</bdi><small>MHz</small></p>
-            <p id="lcd-channel" class="lcd-channel">—</p>
-            <p id="lcd-lines" class="lcd-lines">&nbsp;</p>
-            <div class="lcd-foot">
-              <span id="lcd-state">停止中</span><span id="lcd-clock">--:--:--</span>
-            </div>
-          </div>
-          <div class="radio-keys">
-            <button id="radio-prev" type="button" aria-label="前のチャンネル">◀ CH</button
-            ><button id="radio-mode" type="button" aria-pressed="true">自動選択</button
-            ><button id="radio-next" type="button" aria-label="次のチャンネル">CH ▶</button>
-          </div>
-        </div>
-        <div class="radio-panels">
-          <section class="radio-panel" aria-labelledby="radio-calls-title">
-            <h2 id="radio-calls-title">通話中</h2>
-            <ul id="radio-calls" class="radio-calls"></ul>
-            <p id="radio-calls-empty" class="muted">通話はありません。</p>
-          </section>
-          <section class="radio-panel" aria-labelledby="radio-rec-title">
-            <h2 id="radio-rec-title">録音</h2>
-            <p id="radio-rec-state" class="radio-rec-state">未保存</p>
-            <p id="radio-rec-detail" class="muted"></p>
-          </section>
-          <section class="radio-panel" aria-labelledby="radio-history-title">
-            <h2 id="radio-history-title">最近の通話</h2>
-            <ol id="radio-history" class="radio-history"></ol>
-            <p id="radio-history-empty" class="muted">受信を始めると、ここに通話の履歴が並びます。</p>
-          </section>
-        </div>
-        <p id="radio-stats" class="radio-stats muted"></p>
-      </section>
       <div id="preferences-error" class="error" hidden>
         <p id="preferences-message" role="alert"></p>
         <button id="preferences-retry" type="button">保存を再試行</button>
@@ -125,6 +76,23 @@
             <dd id="total-drops">—</dd>
           </div>
         </dl>
+      </section>
+      <section id="live-panel" class="card live-panel" aria-label="受信中の通話と最近の録音">
+        <div class="live-block">
+          <h2>受信中の通話</h2>
+          <ul id="live-calls" class="live-calls"></ul>
+          <p id="live-calls-empty" class="muted">受信していません。</p>
+        </div>
+        <div id="recent-block" class="live-block" hidden>
+          <div class="live-heading">
+            <h2>最近の録音</h2>
+            <button id="recent-refresh" type="button">更新</button>
+          </div>
+          <audio id="recent-player" controls preload="none" hidden></audio>
+          <p id="recent-now" class="muted" hidden></p>
+          <p id="recent-status" class="muted" role="status"></p>
+          <ul id="recent-list" class="recent-list"></ul>
+        </div>
       </section>
       <details id="source-panel" class="card source" open>
         <summary class="source-summary">

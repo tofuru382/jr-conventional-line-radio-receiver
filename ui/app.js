@@ -196,9 +196,13 @@ function recordingLabel(file) {
         .join(" · ")
     : `${file.name} · ${length}`;
 }
-async function playRecording(session, file) {
+// Where a recording plays: the recordings browser or the main page's
+// "最近の録音" (each has its own player).
+const browserPlayer = { player: "recordings-player", now: "recordings-now", status: "recordings-status" };
+const recentPlayer = { player: "recent-player", now: "recent-now", status: "recent-status" };
+async function playRecording(session, file, target = browserPlayer) {
   try {
-    $("recordings-status").textContent = "読み込み中…";
+    $(target.status).textContent = "読み込み中…";
     const data = await invoke("read_recording", {
       path: file.path,
       directory: $("record-directory").value.trim() || null,
@@ -208,17 +212,19 @@ async function playRecording(session, file) {
     const blob = new Blob([bytes], { type: "audio/wav" });
     if (recordingUrl) URL.revokeObjectURL(recordingUrl);
     recordingUrl = URL.createObjectURL(blob);
-    const player = $("recordings-player");
+    for (const other of [browserPlayer, recentPlayer])
+      if (other !== target) $(other.player).pause?.();
+    const player = $(target.player);
     player.src = recordingUrl;
     player.hidden = false;
-    $("recordings-now").textContent = `再生中：${fileTime(session, file)} · ${recordingLabel(file)}`;
-    $("recordings-now").hidden = false;
-    $("recordings-status").textContent = session.incomplete
+    $(target.now).textContent = `再生中：${fileTime(session, file)} · ${recordingLabel(file)}`;
+    $(target.now).hidden = false;
+    $(target.status).textContent = session.incomplete
       ? "保存中の回です。最後まで再生できない場合は、保存を停止してから再生してください。"
       : "";
     await Promise.resolve(player.play?.()).catch(() => {});
   } catch (e) {
-    $("recordings-status").textContent = String(e.message ?? e);
+    $(target.status).textContent = String(e.message ?? e);
   }
 }
 // When the call ended (file time), or the session start when unknown.
@@ -236,11 +242,11 @@ try {
   // Default order.
 }
 let recordingSessions = [];
-function recordingButton(session, file, withTime) {
+function recordingButton(session, file, withTime, target = browserPlayer) {
   const text = `▶ ${withTime ? `${fileTime(session, file)} · ` : ""}${recordingLabel(file)}${session.incomplete ? " · 保存中" : ""}`;
   const button = el("button", text, "recording-play");
   button.type = "button";
-  button.addEventListener("click", () => playRecording(session, file));
+  button.addEventListener("click", () => playRecording(session, file, target));
   return button;
 }
 function renderRecordings() {
@@ -636,7 +642,7 @@ $("preferences-retry").addEventListener("click", async () => {
   } else await flushPreferences();
 });
 function setControls() {
-  renderRadio();
+  renderLive();
   $("route-open").disabled = busy || !presetCatalog.length;
   routePicker.setBlocked(running || busy);
   $("settings").disabled = running || busy;
@@ -1333,6 +1339,7 @@ async function loadPresets(applyTuning = false) {
     $("state").classList.remove("active");
     buildRows();
     updateSource();
+    if (!$("recent-block").hidden) void refreshRecent();
   } catch (error) {
     $("region").value = activePresetId;
     throw error;
@@ -1835,189 +1842,109 @@ function measuredRate(s) {
   const off = Math.abs(s.input_rate / s.sample_rate - 1) > 0.05;
   return ` · 実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : ""}`;
 }
-// Radio-style overview tab: the monitored channel on an LCD, the calls in
-// progress with their recording state, and a short call history.
-const viewKey = "jr-clrr.view";
-function setView(view) {
-  const radio = view === "radio";
-  document.body.classList.toggle("view-radio", radio);
-  $("radio-view").hidden = !radio;
-  $("tab-radio").setAttribute("aria-selected", String(radio));
-  $("tab-detail").setAttribute("aria-selected", String(!radio));
-  try {
-    localStorage.setItem(viewKey, radio ? "radio" : "detail");
-  } catch {
-    // The view still applies now.
-  }
-  renderRadio();
-}
-$("tab-radio").addEventListener("click", () => setView("radio"));
-$("tab-detail").addEventListener("click", () => setView("detail"));
-let receivingSince = 0;
-const callLog = [];
-let previousCalls = new Set();
-// Call starts and ends, from the active calls of each snapshot (while the
-// app is on screen; the background keeps receiving and recording).
-function trackCalls(s) {
-  const now = Date.now();
-  if (s.running && !receivingSince) receivingSince = now;
-  if (!s.running) receivingSince = 0;
-  const current = new Set(s.running ? (s.active_calls ?? []) : []);
-  for (const id of current)
-    if (!previousCalls.has(id)) callLog.unshift({ id, start: now, end: 0 });
-  for (const id of previousCalls)
-    if (!current.has(id)) {
-      const entry = callLog.find((e) => e.id === id && !e.end);
-      if (entry) entry.end = now;
-    }
-  previousCalls = current;
-  callLog.length = Math.min(callLog.length, 30);
-}
-const clockTime = new Intl.DateTimeFormat("ja-JP", {
-  timeZone: "Asia/Tokyo",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hourCycle: "h23",
-});
-function duration(ms) {
-  const t = Math.max(0, Math.floor(ms / 1000));
-  const hms = [Math.floor(t / 3600), Math.floor(t / 60) % 60, t % 60];
-  return hms.map((n) => String(n).padStart(2, "0")).join(":");
-}
-function channelName(id) {
-  const c = channels.find((c) => c.id === id);
-  return c ? `${(c.frequency_hz / 1e6).toFixed(5)} ${c.label}` : id;
-}
-let radioListsKey = "";
-function renderRadio() {
-  if (!$("radio-view") || $("radio-view").hidden) return;
+// Main page: calls in progress (with background recording and playback state)
+// and the latest recordings, playable in place.
+let liveKey = "";
+function renderLive() {
   const s = running ? lastSnapshot : null;
-  const c = channels.find((c) => c.id === selected);
-  const status = s?.channels.find((x) => x.config.id === selected)?.status;
   const calls = s?.active_calls ?? [];
   const muted = !$("listen").checked;
   const recording = recordingStatus.state === "recording";
-  $("lcd-frequency").textContent = c ? (c.frequency_hz / 1e6).toFixed(5) : "---.-----";
-  $("lcd-channel").textContent = c?.label ?? "—";
-  $("lcd-lines").textContent = c ? shortLines(channelLineList(c.id), 3) || "\u00a0" : "\u00a0";
-  $("lcd-rx").classList.toggle("on", !!c && calls.includes(c.id));
-  $("lcd-sync").classList.toggle("on", !!status?.frame_locked);
-  $("lcd-rec").classList.toggle("on", recording);
-  $("lcd-mode").textContent = $("auto-select").checked ? "AUTO" : "MAN";
-  $("lcd-mute").classList.toggle("on", muted);
-  const evm = status?.constellation?.length ? status.evm_percent : null;
-  const bars = !status?.frame_locked || evm === null
-    ? 0
-    : evm <= 8 ? 5 : evm <= 12 ? 4 : evm <= 18 ? 3 : evm <= 25 ? 2 : 1;
-  [...$("lcd-signal").children].forEach((bar, i) => bar.classList.toggle("on", i < bars));
-  $("lcd-signal").setAttribute("aria-label", `信号品質 ${bars} / 5`);
-  const kind = { usb: "USB 直結", rtl_tcp: "RTL-TCP", sdr: "SoapySDR", wave: "IQ WAV" }[
-    $("input-kind").value
-  ];
-  $("lcd-state").textContent = `${$("state").textContent}${kind ? ` · ${kind}` : ""}`;
-  $("lcd-clock").textContent = receivingSince ? duration(Date.now() - receivingSince) : "--:--:--";
-  $("radio-mode").setAttribute("aria-pressed", String($("auto-select").checked));
-  $("radio-mode").textContent = $("auto-select").checked ? "自動選択" : "手動（固定）";
-  // Recording.
-  const r = recordingStatus;
-  const saved = r.files > 0;
-  $("radio-rec-state").classList.toggle("on", recording && saved);
-  $("radio-rec-state").textContent = recording
-    ? saved
-      ? `録音中 · ${r.files} 件`
-      : "録音待機（通話を待っています）"
-    : r.state === "completed" && r.discarded
-      ? "通話なし（保存なし）"
-      : r.state === "completed"
-        ? `保存完了 · ${r.files} 件`
-        : r.state === "failed"
-          ? "保存エラー"
-          : recordingEnabled
-            ? "受信を始めると自動で録音します"
-            : "録音していません";
-  $("radio-rec-detail").textContent =
-    r.state === "idle" ? "" : `復号音声 ${(r.pcm_samples / 8000).toFixed(1)} 秒（全波合計）`;
-  // Calls in progress and recent calls (rebuilt only when they change).
-  const now = Date.now();
-  const key = JSON.stringify([calls, selected, muted, recording, callLog.slice(0, 8), Math.floor(now / 1000)]);
-  if (key !== radioListsKey) {
-    radioListsKey = key;
-    $("radio-calls").replaceChildren(
-      ...calls.map((id) => {
-        const ch = channels.find((x) => x.id === id);
+  const key = JSON.stringify([running, calls, selected, muted, recording]);
+  if (key === liveKey) return;
+  liveKey = key;
+  $("live-calls").replaceChildren(
+    ...calls.map((id) => {
+      const ch = channels.find((x) => x.id === id);
+      const li = el("li");
+      const button = el("button", undefined, "live-call");
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(id === selected));
+      const name = el("span", undefined, "call-name");
+      name.append(el("bdi", ch ? (ch.frequency_hz / 1e6).toFixed(5) : id), ch?.label ?? "");
+      const lines = ch ? shortLines(channelLineList(id), 2) : "";
+      if (lines) name.title = lines;
+      const tags = el("span", undefined, "call-tags");
+      if (recording) tags.append(el("span", "REC", "tag-rec"));
+      if (id === selected && !muted) tags.append(el("span", "再生中", "tag-play"));
+      button.append(el("span", undefined, "lamp"), name, tags);
+      button.setAttribute(
+        "aria-label",
+        `${ch ? (ch.frequency_hz / 1e6).toFixed(5) + " MHz " + ch.label : id}${recording ? "、録音中" : ""}${id === selected && !muted ? "、再生中" : "。タップで聴く"}`,
+      );
+      button.addEventListener("click", () => {
+        select(id, true);
+        renderLive();
+      });
+      li.append(button);
+      return li;
+    }),
+  );
+  $("live-calls-empty").hidden = calls.length > 0;
+  $("live-calls-empty").textContent = running ? "通話はありません。" : "受信していません。";
+}
+// Latest recordings (Android): refreshed while saving, and when saving ends.
+const RECENT_COUNT = 8;
+let recentAt = 0,
+  recentState = "";
+async function refreshRecent() {
+  recentAt = Date.now();
+  try {
+    const sessions =
+      (await invoke("list_recordings", {
+        directory: $("record-directory").value.trim() || null,
+      })) ?? [];
+    const latest = sessions
+      .flatMap((session) => session.files.map((file) => ({ session, file })))
+      .sort((a, b) => b.file.modified - a.file.modified || b.file.name.localeCompare(a.file.name))
+      .slice(0, RECENT_COUNT);
+    $("recent-list").replaceChildren(
+      ...latest.map(({ session, file }) => {
         const li = el("li");
-        const button = el("button", undefined, "radio-call");
-        button.type = "button";
-        button.setAttribute("aria-pressed", String(id === selected));
-        const name = el("span", undefined, "call-name");
-        name.append(
-          el("bdi", ch ? (ch.frequency_hz / 1e6).toFixed(5) : id),
-          ch?.label ?? "",
-        );
-        const lines = ch ? shortLines(channelLineList(id), 2) : "";
-        if (lines) name.title = lines;
-        const tags = el("span", undefined, "call-tags");
-        if (recording) tags.append(el("span", "REC", "tag-rec"));
-        if (id === selected && !muted) tags.append(el("span", "再生中", "tag-play"));
-        button.append(el("span", undefined, "lamp"), name, tags);
-        button.addEventListener("click", () => select(id, true));
-        li.append(button);
+        li.append(recentButton(session, file));
         return li;
       }),
     );
-    $("radio-calls-empty").hidden = calls.length > 0;
-    const recent = callLog.slice(0, 8);
-    $("radio-history").replaceChildren(
-      ...recent.map((e) => {
-        const li = el("li");
-        li.append(
-          el("span", clockTime.format(new Date(e.start)), "when"),
-          el("span", channelName(e.id), "what"),
-          e.end
-            ? el("span", duration(e.end - e.start).replace(/^00:/, ""))
-            : el("span", "通話中", "live"),
-        );
-        return li;
-      }),
-    );
-    $("radio-history-empty").hidden = recent.length > 0;
+    if (!$("recent-player").src || $("recent-player").hidden)
+      $("recent-status").textContent = latest.length
+        ? ""
+        : "録音はまだありません。保存をオンにして受信すると、通話ごとにここに並びます。";
+  } catch (e) {
+    $("recent-status").textContent = String(e.message ?? e);
   }
-  const totals = s?.channels ?? [];
-  $("radio-stats").textContent = s
-    ? [
-        `受信対象 ${enabled.size} 波`,
-        `同期 ${totals.filter((x) => x.status.frame_locked).length} 波`,
-        `有効データ ${totals.reduce((n, x) => n + x.status.data.valid_frames, 0).toLocaleString()}`,
-        `処理欠落 ${totals.reduce((n, x) => n + x.dropped_blocks, 0).toLocaleString()}`,
-        s.reconnects ? `自動再接続 ${s.reconnects} 回` : "",
-        measuredRate(s).replace(/^ · /, ""),
-      ]
-        .filter(Boolean)
-        .join(" · ")
-    : `受信対象 ${enabled.size} 波 · 停止中`;
 }
-function stepChannel(delta) {
-  const pool = channels.filter((c) => enabled.has(c.id));
-  const list = pool.length ? pool : channels;
-  if (!list.length) return;
-  const at = list.findIndex((c) => c.id === selected);
-  const next = list[(at + delta + list.length) % list.length];
-  select(next.id, true);
-  renderRadio();
+// Two compact lines: when and how long; then the channel.
+function recentButton(session, file) {
+  const seconds = Math.max(0, (file.bytes - 44) / 16000);
+  const p = parseRecordingName(file.name);
+  const button = el("button", undefined, "recording-play recent-item");
+  button.type = "button";
+  const top = el("span", undefined, "recent-when");
+  top.append(
+    `▶ ${fileTime(session, file)} · ${seconds >= 1 ? `${Math.round(seconds)} 秒` : "1 秒未満"}`,
+  );
+  if (session.incomplete) top.append(el("span", "保存中", "recent-saving"));
+  const bottom = el(
+    "span",
+    p
+      ? [`${(p.hz / 1e6).toFixed(5)} MHz`, p.label, p.lines].filter(Boolean).join(" · ")
+      : file.name,
+    "recent-what",
+  );
+  button.append(top, bottom);
+  button.addEventListener("click", () => playRecording(session, file, recentPlayer));
+  return button;
 }
-$("radio-prev").addEventListener("click", () => stepChannel(-1));
-$("radio-next").addEventListener("click", () => stepChannel(1));
-$("radio-mode").addEventListener("click", () => {
-  $("auto-select").checked = !$("auto-select").checked;
-  $("auto-select").dispatchEvent(new Event("change"));
-  renderRadio();
-});
-try {
-  if (localStorage.getItem(viewKey) === "radio") setView("radio");
-} catch {
-  // Detail view by default.
+function maybeRefreshRecent() {
+  if ($("recent-block").hidden) return;
+  const state = `${recordingStatus.state}:${recordingStatus.files}`;
+  const changed = state !== recentState;
+  recentState = state;
+  // A new file appears (or saving ends): refresh; while saving, every 10 s.
+  if (changed || (recordingStatus.state === "recording" && Date.now() - recentAt > 10000))
+    void refreshRecent();
 }
+$("recent-refresh").addEventListener("click", () => void refreshRecent());
 // Volume leveling (live playback only; recordings keep the original level).
 const levelKey = "jr-clrr.level";
 try {
@@ -2119,7 +2046,7 @@ async function poll() {
         const c = s.channels.find((c) => c.config.id === selected);
         if (selectionCurrent) detail(c?.status ?? null);
         if (c?.error) fail(c.error);
-        trackCalls(s);
+        maybeRefreshRecent();
         setControls();
         if (recordingResumePending) {
           if (!s.running) recordingResumePending = false;
@@ -2173,6 +2100,8 @@ try {
     if (platform.android) {
       addOutputChoice();
       addRecordingsBrowser();
+      // Filled once the presets are loaded (channel names and lines).
+      $("recent-block").hidden = false;
     }
   }
   bundledCatalog = native

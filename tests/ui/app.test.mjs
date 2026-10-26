@@ -571,53 +571,66 @@ test("receive targets, the monitored channel and auto-select survive reloading t
   assert.equal($("selected-frequency").textContent, chosen);
   assert.equal($("auto-select").checked, false);
 });
-test("radio tab shows the monitored channel, calls with their recording state and a call history", async (t) => {
-  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+test("main page shows calls in progress and the latest recordings, playable in place", async (t) => {
+  const root = "/sdcard/Download/JR-CLRR/Recordings";
+  const session = "recording-20261026T090000.000Z-001";
+  const recordings = [
+    {
+      name: session,
+      directory: `${root}/${session}`,
+      root,
+      incomplete: true,
+      files: Array.from({ length: 10 }, (_, i) => ({
+        name: `352606250Hz-D7_音声第2波-${String(i + 1).padStart(6, "0")}.wav`,
+        path: `${root}/${session}/${i}.wav`,
+        bytes: 44 + 16000 * (i + 1),
+        modified: Date.UTC(2026, 9, 26, 9, 0, i) / 1000,
+      })),
+    },
+  ];
+  const app = await setup(t, { platformInfo: { android: true, soapy: false }, recordings });
   const { $ } = app;
-  assert.equal($("radio-view").hidden, true);
-  await app.click("tab-radio");
-  assert.equal($("radio-view").hidden, false);
-  assert.ok(app.w.document.body.classList.contains("view-radio"));
-  assert.equal($("tab-radio").getAttribute("aria-selected"), "true");
-  assert.equal(app.w.localStorage.getItem("jr-clrr.view"), "radio");
+  app.w.URL.createObjectURL = () => "blob:recent";
+  app.w.URL.revokeObjectURL = () => {};
+  assert.equal($("tab-radio"), null);
+  assert.equal($("radio-view"), null);
+  assert.equal($("live-calls-empty").textContent, "受信していません。");
+  await tick();
+  // The newest 8 recordings, newest first.
+  const items = () => [...$("recent-list").querySelectorAll(".recording-play")].map((b) => b.textContent);
+  assert.equal($("recent-block").hidden, false);
+  assert.equal(items().length, 8);
+  assert.match($("recent-list").querySelector(".recent-when").textContent, /^▶ 10\/26 18:00:09 · 10 秒保存中$/);
+  assert.match($("recent-list").querySelector(".recent-what").textContent, /^352\.60625 MHz · D7 音声第2波 · 山手線/);
   $("listen").checked = true;
   await app.click("start");
   const snapshot = status();
   const [first, second] = snapshot.channels;
-  first.status.constellation = [[0, 1]];
-  first.status.evm_percent = 7;
   app.setSnapshot({ status: { ...snapshot, active_calls: [first.config.id, second.config.id], selected_channel: first.config.id }, audio: [] });
   await app.poll();
-  assert.equal($("lcd-frequency").textContent, (first.config.frequency_hz / 1e6).toFixed(5));
-  assert.equal($("lcd-channel").textContent, first.config.label);
-  assert.ok($("lcd-rx").classList.contains("on"));
-  assert.ok($("lcd-sync").classList.contains("on"));
-  assert.equal($("lcd-signal").querySelectorAll("i.on").length, 5);
-  assert.equal($("radio-calls").children.length, 2);
-  assert.equal($("radio-calls-empty").hidden, true);
-  assert.match($("radio-calls").textContent, /再生中/);
-  assert.doesNotMatch($("radio-calls").textContent, /REC/);
-  // Recording in the background marks every call in progress.
-  app.setRecording({ state: "recording", options: { audio: true, raw_frames: false, data_messages: false }, files: 2, pcm_samples: 16000, raw_frames: 0, data_messages: 0, error: null, directory: "/x/recording-test" });
+  const calls = () => [...$("live-calls").querySelectorAll(".live-call")];
+  assert.equal(calls().length, 2);
+  assert.equal($("live-calls-empty").hidden, true);
+  assert.match(calls()[0].textContent, /再生中/);
+  assert.doesNotMatch($("live-calls").textContent, /REC/);
+  // Saving in the background marks every call, and a new file refreshes the list.
+  const listed = () => app.calls.filter((c) => c.command === "list_recordings").length;
+  const before = listed();
+  app.setRecording({ state: "recording", options: { audio: true, raw_frames: false, data_messages: false }, files: 1, pcm_samples: 8000, raw_frames: 0, data_messages: 0, error: null, directory: `${root}/${session}` });
   await app.poll();
-  assert.equal($("radio-calls").querySelectorAll(".tag-rec").length, 2);
-  assert.match($("radio-rec-state").textContent, /録音中 · 2 件/);
-  assert.ok($("lcd-rec").classList.contains("on"));
-  // The second call ends: history keeps both, one still live.
-  app.setSnapshot({ status: { ...snapshot, active_calls: [first.config.id], selected_channel: first.config.id }, audio: [] });
-  await app.poll();
-  assert.equal($("radio-history").children.length, 2);
-  assert.equal($("radio-history").querySelectorAll(".live").length, 1);
-  // Tapping a call or a channel key selects manually.
-  await app.click("radio-next");
+  assert.equal($("live-calls").querySelectorAll(".tag-rec").length, 2);
+  assert.ok(listed() > before);
+  // Tapping a call listens to it (manual selection).
+  calls()[1].click();
   assert.equal($("auto-select").checked, false);
-  assert.equal($("lcd-mode").textContent, "MAN");
-  assert.equal($("lcd-channel").textContent, second.config.label);
-  await app.click("radio-mode");
-  assert.equal($("auto-select").checked, true);
-  await app.click("tab-detail");
-  assert.equal($("radio-view").hidden, true);
-  assert.equal(app.w.document.body.classList.contains("view-radio"), false);
+  assert.match(calls()[1].textContent, /再生中/);
+  // A recording plays right here.
+  $("recent-list").querySelector(".recording-play").click();
+  await tick();
+  await tick();
+  assert.equal(app.calls.filter((c) => c.command === "read_recording").at(-1).args.path, `${root}/${session}/9.wav`);
+  assert.equal($("recent-player").hidden, false);
+  assert.match($("recent-now").textContent, /^再生中：/);
 });
 test("the measured input rate is shown and flagged when it differs from the setting", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });

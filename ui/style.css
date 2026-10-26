@@ -1627,198 +1627,44 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   margin-block-start: 6px;
 }
 
-/* View tabs: radio-style overview and the full detail view. */
-.view-tabs {
-  max-width: 1800px;
-  margin: 0 auto;
-  padding: 12px 32px 0;
-  display: flex;
-  gap: 8px;
-}
-.view-tabs [role="tab"] {
-  flex: 0 0 auto;
-  min-width: 7rem;
-  padding: 8px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  color: var(--muted);
-}
-.view-tabs [role="tab"][aria-selected="true"] {
-  background: var(--selected);
-  border-color: var(--accent);
-  color: var(--text);
-  font-weight: 600;
-}
-.view-radio main > :not(#error, #preferences-error, #radio-view, footer) {
-  display: none !important;
-}
-
-/* Radio-style overview. */
-.radio {
-  --lcd-bg: #1b1508;
-  --lcd-fg: #ffc35a;
-  --lcd-dim: rgba(255, 195, 90, 0.18);
-  --lcd-glow: rgba(255, 195, 90, 0.35);
-  --live: #ff7b6b;
+/* Calls in progress and the latest recordings, on the main page. */
+.live-panel {
+  margin-block: 16px;
+  padding: 16px;
   display: grid;
   gap: 16px;
-  padding-block: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
 }
-.radio-device {
-  padding: 16px;
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  background: linear-gradient(180deg, var(--slate-800), var(--slate-900));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.35);
-}
-.radio-lcd {
-  padding: 14px 16px 12px;
-  border-radius: 10px;
-  background: var(--lcd-bg);
-  color: var(--lcd-fg);
-  box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.7), 0 0 0 1px #000;
-  font-family: ui-monospace, "SF Mono", "Roboto Mono", "Noto Sans Mono", monospace;
-  text-shadow: 0 0 6px var(--lcd-glow);
-}
-.radio-lcd p {
-  margin: 0;
-}
-.lcd-indicators {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.lcd-tag {
-  padding: 1px 5px;
-  border: 1px solid currentColor;
-  border-radius: 3px;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--lcd-dim);
-  text-shadow: none;
-}
-.lcd-tag.on {
-  color: var(--lcd-fg);
-  text-shadow: 0 0 6px var(--lcd-glow);
-}
-#lcd-rx.on,
-#lcd-rec.on {
-  color: var(--live);
-  text-shadow: 0 0 6px rgba(255, 123, 107, 0.5);
-}
-.lcd-signal {
-  margin-inline-start: auto;
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 14px;
-}
-.lcd-signal i {
-  width: 4px;
-  background: var(--lcd-dim);
-  border-radius: 1px;
-}
-.lcd-signal i:nth-child(1) { height: 30%; }
-.lcd-signal i:nth-child(2) { height: 45%; }
-.lcd-signal i:nth-child(3) { height: 60%; }
-.lcd-signal i:nth-child(4) { height: 80%; }
-.lcd-signal i:nth-child(5) { height: 100%; }
-.lcd-signal i.on {
-  background: var(--lcd-fg);
-  box-shadow: 0 0 4px var(--lcd-glow);
-}
-.lcd-frequency {
-  margin-block-start: 8px !important;
-  font-size: clamp(2.25rem, 11vw, 3.25rem);
-  line-height: 1.1;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-}
-.lcd-frequency small {
-  margin-inline-start: 6px;
-  font-size: 0.9rem;
-}
-.lcd-channel {
-  font-size: 1.125rem;
-  font-family: "Noto Sans JP", system-ui, sans-serif;
-}
-.lcd-lines {
-  min-height: 1.4em;
-  font-size: var(--text-caption);
-  font-family: "Noto Sans JP", system-ui, sans-serif;
-  opacity: 0.8;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.lcd-foot {
-  margin-block-start: 8px;
-  padding-block-start: 6px;
-  border-block-start: 1px solid var(--lcd-dim);
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: var(--text-caption);
-  font-variant-numeric: tabular-nums;
-}
-#lcd-state {
-  font-family: "Noto Sans JP", system-ui, sans-serif;
-}
-.radio-keys {
-  margin-block-start: 12px;
-  display: grid;
-  grid-template-columns: 1fr 1.4fr 1fr;
-  gap: 8px;
-}
-.radio-keys button {
-  min-height: 44px;
-  border-radius: 8px;
-  border: 1px solid var(--control-border);
-  background: var(--control);
-  color: var(--text);
-  font-weight: 600;
-  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.45);
-}
-.radio-keys button:active {
-  transform: translateY(1px);
-  box-shadow: none;
-}
-.radio-keys button[aria-pressed="true"] {
-  background: var(--selected);
-  border-color: var(--accent);
-}
-.radio-panels {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
-}
-.radio-panel {
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-.radio-panel h2 {
+.live-block h2 {
   margin: 0 0 8px;
   font-size: var(--text-body);
   color: var(--muted);
   font-weight: 600;
 }
-.radio-panel p {
+.live-block p {
   margin: 0;
 }
-.radio-calls,
-.radio-history {
+.live-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.live-heading h2 {
+  margin: 0;
+}
+.live-calls,
+.recent-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
   gap: 6px;
 }
-.radio-call {
+.recent-list {
+  margin-block-start: 8px;
+}
+.live-call {
   width: 100%;
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -1831,93 +1677,85 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   color: var(--text);
   text-align: start;
 }
-.radio-call[aria-pressed="true"] {
+.live-call[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--selected);
 }
-.radio-call .lamp {
+.live-call .lamp {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--live, #ff7b6b);
+  background: #ff7b6b;
   box-shadow: 0 0 8px rgba(255, 123, 107, 0.7);
 }
-.radio-call .call-name {
+.live-call .call-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.radio-call .call-name bdi {
+.live-call .call-name bdi {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   margin-inline-end: 6px;
 }
-.radio-call .call-tags {
+.live-call .call-tags {
   display: flex;
   gap: 4px;
   font-size: 0.6875rem;
   font-weight: 700;
 }
-.radio-call .call-tags span {
+.live-call .call-tags span {
   padding: 1px 5px;
   border-radius: 3px;
   border: 1px solid currentColor;
 }
-.radio-call .tag-rec {
-  color: var(--live, #ff7b6b);
+.live-call .tag-rec {
+  color: #ff7b6b;
 }
-.radio-call .tag-play {
+.live-call .tag-play {
   color: var(--accent);
 }
-.radio-rec-state {
-  font-size: var(--text-heading);
+.recent-item {
+  width: 100%;
+  display: grid;
+  gap: 2px;
+  text-align: start;
+}
+.recent-when {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
-.radio-rec-state.on::before {
-  content: "●";
-  margin-inline-end: 6px;
-  color: var(--live, #ff7b6b);
+.recent-saving {
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 0.6875rem;
+  color: #ff7b6b;
 }
-.radio-history li {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 10px;
+.recent-what {
   font-size: var(--text-caption);
-  font-variant-numeric: tabular-nums;
-}
-.radio-history .when {
   color: var(--muted);
-}
-.radio-history .what {
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.radio-history .live {
-  color: var(--live, #ff7b6b);
-  font-weight: 600;
+#recent-player {
+  width: 100%;
+  margin-block-start: 8px;
 }
-.radio-stats {
-  margin: 0;
-  font-size: var(--text-caption);
-}
-@media (max-width: 36rem) {
-  .view-tabs {
-    padding-inline: 16px;
-  }
-  .view-tabs [role="tab"] {
-    flex: 1;
-  }
+#recent-now {
+  margin-block-start: 4px;
 }
 @media (prefers-reduced-motion: no-preference) {
-  #lcd-rx.on,
-  .radio-call .lamp {
-    animation: radio-blink 1.2s steps(2, jump-none) infinite;
+  .live-call .lamp {
+    animation: live-blink 1.2s steps(2, jump-none) infinite;
   }
 }
-@keyframes radio-blink {
+@keyframes live-blink {
   50% {
     opacity: 0.35;
   }
