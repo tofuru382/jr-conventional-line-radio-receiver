@@ -1828,6 +1828,13 @@ $("pause-messages").addEventListener("click", () => {
         .messages ?? [],
     );
 });
+// Samples per second actually arriving; far from the setting means the
+// dongle is not running at the requested rate (or input is being lost).
+function measuredRate(s) {
+  if (!s.input_rate || $("input-kind").value === "wave") return "";
+  const off = Math.abs(s.input_rate / s.sample_rate - 1) > 0.05;
+  return ` · 実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : ""}`;
+}
 // Radio-style overview tab: the monitored channel on an LCD, the calls in
 // progress with their recording state, and a short call history.
 const viewKey = "jr-clrr.view";
@@ -1984,6 +1991,7 @@ function renderRadio() {
         `有効データ ${totals.reduce((n, x) => n + x.status.data.valid_frames, 0).toLocaleString()}`,
         `処理欠落 ${totals.reduce((n, x) => n + x.dropped_blocks, 0).toLocaleString()}`,
         s.reconnects ? `自動再接続 ${s.reconnects} 回` : "",
+        measuredRate(s).replace(/^ · /, ""),
       ]
         .filter(Boolean)
         .join(" · ")
@@ -2088,7 +2096,7 @@ async function poll() {
         $("state").classList.toggle("active", s.running);
         if (s.error) fail(s.error);
         $("capture-info").textContent = s.sample_rate
-          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}`
+          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}${measuredRate(s)}`
           : s.running
             ? "接続を準備しています"
             : "未接続 · 受信設定と接続先を確認してください";

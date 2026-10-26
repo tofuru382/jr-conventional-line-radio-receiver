@@ -619,6 +619,17 @@ test("radio tab shows the monitored channel, calls with their recording state an
   assert.equal($("radio-view").hidden, true);
   assert.equal(app.w.document.body.classList.contains("view-radio"), false);
 });
+test("the measured input rate is shown and flagged when it differs from the setting", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  await app.click("start");
+  app.setSnapshot({ status: { ...status(), input_rate: 239990.4 }, audio: [] });
+  await app.poll();
+  assert.match($("capture-info").textContent, /実測 239,990 S\/s$/);
+  app.setSnapshot({ status: { ...status(), input_rate: 514285 }, audio: [] });
+  await app.poll();
+  assert.match($("capture-info").textContent, /実測 514,285 S\/s（設定と違います）$/);
+});
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;

@@ -4,7 +4,7 @@ use crate::{
     DeviceDescriptor, DirectSampling, Error, GainConfig, Result,
     config::Settings,
     protocol::Com,
-    tuners::{IF_HZ, Tuner, TunerKind, XTAL_HZ},
+    tuners::{Tuner, TunerKind, XTAL_HZ},
     usb::ControlBackend,
 };
 
@@ -187,12 +187,19 @@ impl Hardware {
         com.demod(1, 0x9f, (ratio >> 16) as u16, 2).await?;
         com.demod(1, 0xa1, ratio as u16, 2).await?;
         // Tuner accesses precede closing/resetting the repeater.
+        // JR-CLRR change: match the tuner IF filter to the sample rate, as
+        // librtlsdr does, and use the IF that goes with it.
         let frequency_hz = if direct {
             config.frequency_hz
         } else {
+            tuner.set_bandwidth(com, sample_rate_hz).await?;
             tuner.tune(com, config.frequency_hz).await?
         };
-        let if_frequency = if direct { config.frequency_hz } else { IF_HZ };
+        let if_frequency = if direct {
+            config.frequency_hz
+        } else {
+            tuner.if_hz
+        };
         let word = if_word(if_frequency, crystal);
         com.demod(1, 0x19, ((word >> 16) & 0x3f) as u16, 1).await?;
         com.demod(1, 0x1a, ((word >> 8) & 0xff) as u16, 1).await?;
@@ -241,7 +248,10 @@ pub(crate) fn correction_word(ppm: i32) -> u16 {
 }
 pub(crate) fn sample_rate(rate: u32) -> (u32, u32) {
     let ratio = ((XTAL_HZ << 22) / u64::from(rate)) as u32 & 0x0ffffffc;
-    (ratio, ((XTAL_HZ << 22) / u64::from(ratio)) as u32)
+    // JR-CLRR change: the 28-bit register sign-extends bit 27 (librtlsdr's
+    // real_rsamp_ratio), which is what makes the 225-300 kS/s range work.
+    let real = ratio | ((ratio & 0x0800_0000) << 1);
+    (ratio, ((XTAL_HZ << 22) / u64::from(real)) as u32)
 }
 fn if_word(hz: u64, crystal: u64) -> u32 {
     (-(((hz << 22) / crystal) as i64) & 0x3fffff) as u32
@@ -250,6 +260,12 @@ fn if_word(hz: u64, crystal: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn low_rates_report_the_rate_the_resampler_really_uses() {
+        // Bit 27 of the 28-bit ratio register sign-extends (librtlsdr).
+        assert_eq!(sample_rate(240_000).1, 240_000);
+        assert_eq!(sample_rate(2_048_000).1, 2_048_000);
+    }
     use crate::test_support::FakeTransport;
     #[test]
     fn ppm_changes_correction_registers_without_changing_resampler_divider() {

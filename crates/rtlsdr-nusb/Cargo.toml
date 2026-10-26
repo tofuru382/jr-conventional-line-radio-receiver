@@ -3,7 +3,10 @@
 # - accept librtlsdr's low sample-rate range 225001..=300000 (the receiver
 #   captures at 240 kS/s), and
 # - DeviceBuilder::open_fd: open from an OS-provided USB file descriptor, which
-#   is how Android apps get USB access (built-in dongle driver, no driver app).
+#   is how Android apps get USB access (built-in dongle driver, no driver app),
+# - librtlsdr's tuner IF bandwidth (r82xx_set_bandwidth) and IF per sample
+#   rate, so a 240 kS/s capture is not flooded by aliased signals, and
+# - the real low-range sample rate (bit 27 of the ratio sign-extends).
 [package]
 name = "rtlsdr-nusb"
 version = "0.3.0"

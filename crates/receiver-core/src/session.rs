@@ -116,6 +116,9 @@ pub struct Overview {
     pub reconnect_failures: u32,
     /// Successful automatic reconnections in this session.
     pub reconnects: u64,
+    /// IQ samples per second actually arriving (over the last few seconds;
+    /// 0 until measured). Should match `sample_rate` for live inputs.
+    pub input_rate: f64,
 }
 struct Shared {
     state: String,
@@ -125,6 +128,7 @@ struct Shared {
     overflows: u64,
     progress: f64,
     reconnection: (bool, u32, u64),
+    input_rate: f64,
 }
 pub struct Session {
     stop: Arc<AtomicBool>,
@@ -264,6 +268,7 @@ impl Session {
             overflows: 0,
             progress: 0.0,
             reconnection: (false, 0, 0),
+            input_rate: 0.0,
         }));
         let channels: Vec<_> = config
             .channels
@@ -408,6 +413,7 @@ impl Session {
                 reconnecting: s.reconnection.0,
                 reconnect_failures: s.reconnection.1,
                 reconnects: s.reconnection.2,
+                input_rate: s.input_rate,
             },
             audio,
         )
@@ -622,6 +628,7 @@ fn run(
     let mut sequence = 0;
     let mut samples = 0u64;
     let start = Instant::now();
+    let mut window = (Instant::now(), 0u64);
     let mut buf = vec![Complex32::default(); (rate * 0.04).round().clamp(384.0, 65536.0) as usize];
     let result = (|| -> Result<(), String> {
         while !stop.load(Ordering::Relaxed) {
@@ -634,12 +641,19 @@ fn run(
                 None => break,
                 Some(Read::Timeout) => continue,
                 Some(Read::Discontinuity) => {
+                    window = (Instant::now(), 0);
                     sequence += 1;
                     shared.lock().unwrap().overflows += 1;
                     continue;
                 }
                 Some(Read::Samples(n)) => {
                     samples += n as u64;
+                    window.1 += n as u64;
+                    let elapsed = window.0.elapsed();
+                    if elapsed >= Duration::from_secs(3) {
+                        shared.lock().unwrap().input_rate = window.1 as f64 / elapsed.as_secs_f64();
+                        window = (Instant::now(), 0);
+                    }
                     let iq: Arc<[Complex32]> = Arc::from(&buf[..n]);
                     for (i, tx) in senders.iter().enumerate() {
                         match tx.try_send(Block {
@@ -879,6 +893,7 @@ mod tests {
                 overflows: 0,
                 progress: 0.0,
                 reconnection: (false, 0, 0),
+                input_rate: 0.0,
             })),
             channels: configs
                 .iter()

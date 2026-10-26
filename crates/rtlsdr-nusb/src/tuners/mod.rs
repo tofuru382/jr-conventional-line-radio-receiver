@@ -5,6 +5,54 @@ use crate::{Error, GainConfig, Result, protocol::Com, usb::ControlBackend};
 use registers::*;
 
 pub(crate) const IF_HZ: u64 = 3_570_000;
+
+// JR-CLRR change: librtlsdr's r82xx_set_bandwidth. At low sample rates the
+// tuner's IF filter must be narrowed (and the IF lowered with it); left at
+// 6 MHz, strong signals around the band alias into a 240 kS/s capture.
+const FILT_HP_BW1: u32 = 350_000;
+const FILT_HP_BW2: u32 = 380_000;
+const IF_LOW_PASS_BW: [u32; 10] = [
+    1_700_000, 1_600_000, 1_550_000, 1_450_000, 1_200_000, 900_000, 700_000, 550_000, 450_000,
+    350_000,
+];
+/// Register 0x0a, register 0x0b and the IF frequency for a bandwidth.
+pub(crate) fn bandwidth_plan(bw: u32) -> (u8, u8, u64) {
+    if bw > 7_000_000 {
+        (0x10, 0x0b, 4_570_000)
+    } else if bw > 6_000_000 {
+        (0x10, 0x2a, 4_570_000)
+    } else if bw > IF_LOW_PASS_BW[0] + FILT_HP_BW1 + FILT_HP_BW2 {
+        (0x10, 0x6b, 3_570_000)
+    } else {
+        let mut bw = bw;
+        let mut reg_0b: u8 = 0x80;
+        let mut if_hz: u32 = 2_300_000;
+        let mut real_bw: u32 = 0;
+        if bw > IF_LOW_PASS_BW[0] + FILT_HP_BW1 {
+            bw -= FILT_HP_BW2;
+            if_hz += FILT_HP_BW2;
+            real_bw += FILT_HP_BW2;
+        } else {
+            reg_0b |= 0x20;
+        }
+        if bw > IF_LOW_PASS_BW[0] {
+            bw -= FILT_HP_BW1;
+            if_hz += FILT_HP_BW1;
+            real_bw += FILT_HP_BW1;
+        } else {
+            reg_0b |= 0x40;
+        }
+        let i = IF_LOW_PASS_BW
+            .iter()
+            .position(|&b| bw > b)
+            .unwrap_or(IF_LOW_PASS_BW.len())
+            .saturating_sub(1);
+        reg_0b |= 15 - i as u8;
+        real_bw += IF_LOW_PASS_BW[i];
+        if_hz -= real_bw / 2;
+        (0x00, reg_0b, u64::from(if_hz))
+    }
+}
 pub(crate) const XTAL_HZ: u64 = 28_800_000;
 
 /// Detected tuner family. R820T-compatible revisions share the same chip ID.
@@ -24,6 +72,8 @@ pub(crate) struct Tuner {
     pub crystal_hz: u64,
     shadow: [u8; 27],
     input: Option<u8>,
+    /// IF the tuner mixes down to (set with the IF filter bandwidth).
+    pub if_hz: u64,
 }
 impl Tuner {
     pub fn new(kind: TunerKind, blog_v4: bool) -> Self {
@@ -33,6 +83,7 @@ impl Tuner {
             crystal_hz: XTAL_HZ,
             shadow: INITIAL,
             input: None,
+            if_hz: IF_HZ,
         }
     }
     fn address(&self) -> u8 {
@@ -101,13 +152,25 @@ impl Tuner {
             }
         }
     }
+    /// Sets the IF filter for `bw` Hz and returns the IF the tuner now uses.
+    pub async fn set_bandwidth<C: ControlBackend>(
+        &mut self,
+        com: &Com<'_, C>,
+        bw: u32,
+    ) -> Result<u64> {
+        let (reg_0a, reg_0b, if_hz) = bandwidth_plan(bw);
+        self.write_many(com, &[(0x0a, reg_0a, 0x10), (0x0b, reg_0b, 0xef)])
+            .await?;
+        self.if_hz = if_hz;
+        Ok(if_hz)
+    }
     pub async fn tune<C: ControlBackend>(&mut self, com: &Com<'_, C>, hz: u64) -> Result<u64> {
         let upconvert = if self.blog_v4 && hz < XTAL_HZ {
             XTAL_HZ
         } else {
             0
         };
-        let lo = hz + upconvert + IF_HZ;
+        let lo = hz + upconvert + self.if_hz;
         let &(_, drain, filter, corner) = STANDARD_MUX
             .iter()
             .rev()
@@ -170,7 +233,7 @@ impl Tuner {
                 self.input = Some(input);
             }
         }
-        Ok(actual_lo.saturating_sub(IF_HZ + upconvert))
+        Ok(actual_lo.saturating_sub(self.if_hz + upconvert))
     }
     async fn calibrate<C: ControlBackend>(&mut self, com: &Com<'_, C>) -> Result<u8> {
         for attempt in 0..2 {
@@ -467,5 +530,18 @@ mod tests {
         assert_eq!(v4_input(28_800_000), 1);
         assert_eq!(v4_input(249_999_999), 1);
         assert_eq!(v4_input(250_000_000), 0);
+    }
+}
+
+#[cfg(test)]
+mod bandwidth_tests {
+    use super::bandwidth_plan;
+    #[test]
+    fn narrow_rates_get_librtlsdr_filters_and_ifs() {
+        // 240 kS/s: narrowest low-pass, both high-pass sections off.
+        assert_eq!(bandwidth_plan(240_000), (0x00, 0xe6, 2_125_000));
+        assert_eq!(bandwidth_plan(2_400_000), (0x00, 0x8f, 1_815_000));
+        assert_eq!(bandwidth_plan(3_200_000), (0x10, 0x6b, 3_570_000));
+        assert_eq!(bandwidth_plan(8_000_000), (0x10, 0x0b, 4_570_000));
     }
 }
