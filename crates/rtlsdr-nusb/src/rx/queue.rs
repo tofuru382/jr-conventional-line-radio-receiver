@@ -11,11 +11,9 @@ use std::task::{Context, Poll};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
-// JR-CLRR: 32 KiB (was 256 KiB). At 240 kS/s a 256 KiB transfer is 0.55 s of
-// IQ arriving at once, which overran the receiver's per-channel queues and
-// forced a resynchronisation on every transfer. 32 KiB is 68 ms; with 64
-// transfers in flight the stream still buffers 2.2 s against stalls.
-pub(crate) const DEFAULT_BUFFER_SIZE: usize = 32_768;
+// librtlsdr's default transfer size. At 240 kS/s this is 0.55 s of IQ arriving
+// at once; the receiver's per-channel queues hold more than two of them.
+pub(crate) const DEFAULT_BUFFER_SIZE: usize = 262_144;
 /// Maximum number of unpacked complex `F32Iq` samples produced by one USB transfer.
 ///
 /// Short USB transfers may contain fewer samples.
@@ -147,6 +145,9 @@ impl<B: BulkInBackend> Queue<B> {
             Ok(()) => None,
         };
         if let Some(error) = fault {
+            if let Error::Transfer(code) = &error {
+                self.stats.last_transfer_error = Some(*code);
+            }
             self.stats.buffers_dropped += 1;
             self.consecutive_errors += 1;
             let fatal = error.kind() == ErrorKind::DeviceDisconnected

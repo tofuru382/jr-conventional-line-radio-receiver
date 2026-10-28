@@ -173,6 +173,10 @@ fn a_failed_transfer_is_dropped_and_resubmitted_not_fatal() {
     let stats = rx.current_stats();
     assert_eq!(stats.transfer_errors, 3);
     assert_eq!(stats.buffers_dropped, 3);
+    assert_eq!(
+        stats.last_transfer_error,
+        Some(nusb::transfer::TransferError::Fault)
+    );
     // The failed buffers went back to the endpoint.
     let pending = rx
         .queue

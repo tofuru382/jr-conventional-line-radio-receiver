@@ -9,8 +9,8 @@
 # - the real low-range sample rate (bit 27 of the ratio sign-extends),
 # - librtlsdr's 16 MHz tuner crystal for an R828D that is not a Blog V4, with
 #   the R828D PLL integer limit of 127 it needs, and
-# - 64 transfers of 32 KiB instead of 8 of 256 KiB, so 240 kS/s IQ arrives
-#   every 68 ms rather than in 0.55 s bursts, and
+# - librtlsdr's 15 transfers in flight instead of 8,
+# - the last transfer error in StreamingStats, for diagnosis, and
 # - librtlsdr's tolerance of transient transfer errors: a failed transfer is
 #   counted as dropped and resubmitted; the stream ends only when the device
 #   is gone or as many transfers fail in a row as are in flight.

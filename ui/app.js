@@ -1984,6 +1984,59 @@ function maybeRefreshRecent() {
 }
 $("recent-refresh").addEventListener("click", () => void refreshRecent());
 // Diagnosis: 10 s of raw IQ, to compare the built-in driver with RTL-TCP.
+// Diagnosis: the receiver's and Android's notes about the connection, merged
+// by time, to copy into a report.
+async function refreshConnectionLog() {
+  if ($("log-group").hidden || !$("log-group").open) return;
+  const notes = [];
+  try {
+    for (const [ms, text] of await invoke("connection_log")) notes.push([ms, text]);
+  } catch {
+    // Older backends keep no log.
+  }
+  let android = "";
+  try {
+    android = window.JrAndroid?.usbLog?.() ?? "";
+  } catch {
+    // Not available.
+  }
+  for (const line of android.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab > 0) notes.push([Number(line.slice(0, tab)), line.slice(tab + 1)]);
+  }
+  notes.sort((a, b) => a[0] - b[0]);
+  const time = (ms) => {
+    const d = new Date(ms);
+    return `${d.toLocaleTimeString("ja-JP", { hour12: false })}.${String(d.getMilliseconds()).padStart(3, "0")}`;
+  };
+  const header = `${document.title}${platform.build ? ` ビルド ${platform.build.slice(0, 7)}` : ""} · 入力 ${$("input-kind").value}`;
+  const text = [
+    header,
+    ...(notes.length ? notes.map(([ms, t]) => `${time(ms)} ${t}`) : ["（記録はまだありません）"]),
+  ].join("\n");
+  if ($("connection-log").value !== text) $("connection-log").value = text;
+}
+$("log-group").addEventListener("toggle", () => void refreshConnectionLog());
+$("log-refresh").addEventListener("click", () => void refreshConnectionLog());
+setInterval(() => void refreshConnectionLog(), 2000);
+$("log-copy").addEventListener("click", async () => {
+  await refreshConnectionLog();
+  const text = $("connection-log").value;
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    copied = true;
+  } catch {
+    try {
+      $("connection-log").select();
+      copied = document.execCommand("copy");
+    } catch {
+      // Long-press the text to copy it by hand.
+    }
+  }
+  $("log-copy").textContent = copied ? "コピーしました" : "長押しで選んでコピーしてください";
+  setTimeout(() => ($("log-copy").textContent = "コピー"), 2500);
+});
 $("iq-capture").addEventListener("click", async () => {
   try {
     const path = await invoke("capture_iq", {
@@ -2153,6 +2206,7 @@ try {
       // Filled once the presets are loaded (channel names and lines).
       $("recent-block").hidden = false;
       $("iq-group").hidden = false;
+      $("log-group").hidden = false;
     }
   }
   bundledCatalog = native

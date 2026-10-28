@@ -81,6 +81,7 @@ async function setup(
     platformInfo = null,
     driverError = null,
     recordings = [],
+    connectionLog = [],
   } = {},
 ) {
   const dom = new JSDOM(html, {
@@ -237,6 +238,7 @@ async function setup(
             if (command === "capture_iq") return "/sdcard/Download/JR-CLRR/Recordings/iq-1-352603125Hz-240000.wav";
             if (command === "native_audio_status")
               return { underruns: 2, buffer_ms: 1000, rate: 48000 };
+            if (command === "connection_log") return structuredClone(connectionLog);
             if (command === "start_rtl_driver") {
               if (driverError) throw new Error(driverError);
               return null;
@@ -563,6 +565,40 @@ test("a failed session's error does not come back after switching input or start
   await app.poll();
   assert.match($("error").textContent, /ドングルが見つかりません/);
   assert.doesNotMatch($("error").textContent, /RTL-TCP/);
+});
+test("Android shows the receiver's and Android's connection notes in time order, ready to copy", async (t) => {
+  const at = (h, m, s) => new Date(2026, 9, 28, h, m, s).getTime();
+  const app = await setup(t, {
+    platformInfo: { android: true, soapy: false, simple: true, name: "JR-CLRR For Android", build: "abcdef0123" },
+    connectionLog: [
+      [at(16, 0, 1), "受信を開始します（USB 直結・22 波）"],
+      [at(16, 0, 3), "ドライバー: 接続が切れました"],
+    ],
+  });
+  const { $ } = app;
+  app.w.JrAndroid = {
+    setReceiving() {},
+    usbLog: () => `${at(16, 0, 2)}\tAndroid: USB 機器が外れました（0bda:2838）\n`,
+  };
+  assert.equal($("log-group").hidden, false);
+  const copied = [];
+  Object.defineProperty(app.w.navigator, "clipboard", {
+    value: { writeText: async (text) => copied.push(text) },
+  });
+  $("log-group").open = true;
+  await app.click("log-refresh");
+  const lines = $("connection-log").value.split("\n");
+  assert.match(lines[0], /JR-CLRR For Android ビルド abcdef0 · 入力 usb/);
+  assert.match(lines[1], /^16:00:01\.000 受信を開始します/);
+  assert.match(lines[2], /^16:00:02\.000 Android: USB 機器が外れました/);
+  assert.match(lines[3], /^16:00:03\.000 ドライバー: 接続が切れました/);
+  await app.click("log-copy");
+  assert.deepEqual(copied, [$("connection-log").value]);
+  assert.equal($("log-copy").textContent, "コピーしました");
+});
+test("desktop has no connection log", async (t) => {
+  const app = await setup(t);
+  assert.equal(app.$("log-group").hidden, true);
 });
 test("the version dialog names the build", async (t) => {
   const app = await setup(t, {

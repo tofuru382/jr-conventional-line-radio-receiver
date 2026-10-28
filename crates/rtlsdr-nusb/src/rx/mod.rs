@@ -41,6 +41,8 @@ pub struct StreamingStats {
     /// Transfers that failed with a transient USB error and were resubmitted
     /// (JR-CLRR). A subset of [`StreamingStats::buffers_dropped`].
     pub transfer_errors: u64,
+    /// The most recent transfer error, recovered from or not (JR-CLRR).
+    pub last_transfer_error: Option<nusb::transfer::TransferError>,
 }
 
 impl StreamingStats {
@@ -50,6 +52,9 @@ impl StreamingStats {
         self.buffers_dropped += other.buffers_dropped;
         self.buffers_discarded_on_restart += other.buffers_discarded_on_restart;
         self.transfer_errors += other.transfer_errors;
+        if other.last_transfer_error.is_some() {
+            self.last_transfer_error = other.last_transfer_error;
+        }
     }
 
     pub(crate) fn combined(mut self, other: Self) -> Self {

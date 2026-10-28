@@ -7,7 +7,7 @@
 //! [`offer_fd`]. A session waiting for a dongle (at start or after the dongle
 //! dropped off the bus) reports it through [`wants_device`], so the Java side
 //! knows when to look for one.
-use crate::{source::Read, Complex32};
+use crate::{diag::note, source::Read, Complex32};
 use rtlsdr_nusb::{Device, MaybeFuture, RxStream};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -95,8 +95,14 @@ pub fn offer_fd(fd: i32, identity: Identity) {
     }
     // SAFETY: the caller passes a descriptor that is open for this call.
     let owned = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned();
-    if let Ok(owned) = owned {
-        *OFFERED.lock().unwrap() = Some((owned, identity));
+    match owned {
+        Ok(owned) => {
+            note(format!(
+                "ドライバー: ドングルを受け取りました（{identity:?}）"
+            ));
+            *OFFERED.lock().unwrap() = Some((owned, identity));
+        }
+        Err(e) => note(format!("ドライバー: 受け取った接続を複製できません（{e}）")),
     }
 }
 /// Whether a session is waiting for [`offer_fd`].
@@ -149,6 +155,15 @@ fn open_device(
     rx.start()
         .wait()
         .map_err(|e| format!("USB: 受信を開始できません ({e})"))?;
+    note(format!(
+        "ドライバー: 受信を開始しました（{} · {} S/s · {} Hz · ゲイン {}）",
+        describe(&device),
+        config.sample_rate,
+        config.center_hz,
+        config
+            .gain_db
+            .map_or("自動".to_string(), |g| format!("{g} dB"))
+    ));
     Ok((device, rx))
 }
 
@@ -186,6 +201,8 @@ pub struct Usb {
     cause: String,
     pub failed_attempts: u32,
     pub reconnects: u64,
+    /// Transfer errors already noted, and when (notes at most once a second).
+    noted_errors: (u64, Instant),
 }
 impl Usb {
     pub fn open(config: &Config, stop: &AtomicBool) -> Result<Self, String> {
@@ -193,6 +210,7 @@ impl Usb {
         // A descriptor offered before this session is stale (or is the one
         // the Java side just opened for us); prefer a fresh one when it comes.
         WANTED.store(true, Ordering::Relaxed);
+        note("ドライバー: ドングルを待っています");
         let started = Instant::now();
         let fd = loop {
             if stop.load(Ordering::Relaxed) {
@@ -204,6 +222,7 @@ impl Usb {
             }
             if started.elapsed() >= OPEN_WAIT {
                 WANTED.store(false, Ordering::Relaxed);
+                note("ドライバー: 30 秒待ってもドングルを受け取れませんでした");
                 return Err(
                     "USB: 30 秒待ちましたが、ドングルを使えませんでした。挿さっているか、USB の使用を許可したかを確認してください"
                         .into(),
@@ -212,7 +231,8 @@ impl Usb {
             std::thread::sleep(Duration::from_millis(50));
         };
         WANTED.store(false, Ordering::Relaxed);
-        let (device, rx) = open_device(config, fd)?;
+        let (device, rx) =
+            open_device(config, fd).inspect_err(|e| note(format!("ドライバー: {e}")))?;
         Ok(Self {
             config: config.clone(),
             info: describe(&device),
@@ -226,6 +246,7 @@ impl Usb {
             cause: String::new(),
             failed_attempts: 0,
             reconnects: 0,
+            noted_errors: (0, Instant::now()),
         })
     }
     pub fn reconnecting(&self) -> bool {
@@ -243,7 +264,12 @@ impl Usb {
     }
     fn lose(&mut self, cause: String) -> Result<Read, String> {
         if let Some(rx) = self.rx.take() {
-            self.transfer_errors += rx.stats().transfer_errors;
+            let stats = rx.stats();
+            self.transfer_errors += stats.transfer_errors;
+            note(format!(
+                "ドライバー: 接続が切れました: {cause}（回復した転送エラー {} 回、最後のエラー {:?}）",
+                stats.transfer_errors, stats.last_transfer_error
+            ));
         }
         self.device = None;
         if self.config.reconnect_seconds == 0 {
@@ -273,7 +299,17 @@ impl Usb {
                     self.last_data = Instant::now();
                     // The stream drops whole USB buffers when it falls behind;
                     // let the pipelines resynchronise instead of splicing.
-                    let dropped = rx.stats().buffers_dropped;
+                    let stats = rx.stats();
+                    if stats.transfer_errors != self.noted_errors.0
+                        && self.noted_errors.1.elapsed() >= Duration::from_secs(1)
+                    {
+                        note(format!(
+                            "ドライバー: USB 転送エラー（この接続で {} 回、最後 {:?}）・受信は継続",
+                            stats.transfer_errors, stats.last_transfer_error
+                        ));
+                        self.noted_errors = (stats.transfer_errors, Instant::now());
+                    }
+                    let dropped = stats.buffers_dropped;
                     if dropped != self.dropped {
                         self.dropped = dropped;
                         return Ok(Read::Discontinuity);
@@ -294,6 +330,10 @@ impl Usb {
         let limit = Duration::from_secs(self.config.reconnect_seconds.into());
         if self.lost_at.is_some_and(|t| t.elapsed() >= limit) {
             WANTED.store(false, Ordering::Relaxed);
+            note(format!(
+                "ドライバー: {} 秒待ってもドングルが戻りませんでした",
+                limit.as_secs()
+            ));
             return Err(format!(
                 "{}（{} 秒間待ちましたが、ドングルが戻りませんでした。挿し直してから受信を開始してください）",
                 self.cause,
@@ -315,8 +355,13 @@ impl Usb {
                     self.lost_at = None;
                     self.failed_attempts = 0;
                     self.reconnects += 1;
+                    self.noted_errors = (0, Instant::now());
+                    note("ドライバー: 再接続しました");
                 }
-                Err(_) => self.failed_attempts += 1,
+                Err(e) => {
+                    note(format!("ドライバー: 再接続に失敗しました: {e}"));
+                    self.failed_attempts += 1
+                }
             },
             None => std::thread::sleep(RETRY_EVERY),
         }
@@ -326,6 +371,7 @@ impl Usb {
 impl Drop for Usb {
     fn drop(&mut self) {
         WANTED.store(false, Ordering::Relaxed);
+        note("ドライバー: ドングルを閉じます");
         if let Some(rx) = self.rx.take() {
             let _ = rx.close().wait();
         }

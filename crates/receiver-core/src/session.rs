@@ -364,6 +364,13 @@ impl Session {
                         s.error = Some("Receiver worker panicked; restart reception".into());
                     }
                 }
+                crate::diag::note(format!(
+                    "受信を終了しました（{}{}）",
+                    s.state,
+                    s.error
+                        .as_deref()
+                        .map_or(String::new(), |e| format!("：{e}"))
+                ));
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -612,7 +619,18 @@ fn run(
             radio.center_hz as f64,
         )?;
     }
-    let (mut source, rate, center) = open_source(&config.input, stop)?;
+    crate::diag::note(format!(
+        "受信を開始します（{}・{} 波）",
+        match &config.input {
+            Input::Sdr { .. } => "SoapySDR",
+            Input::RtlTcp { .. } => "RTL-TCP",
+            Input::Wave { .. } => "IQ WAV",
+            Input::Usb { .. } => "USB 直結",
+        },
+        config.channels.len()
+    ));
+    let (mut source, rate, center) =
+        open_source(&config.input, stop).inspect_err(|e| crate::diag::note(e.clone()))?;
     shared.lock().unwrap().source_info = source.info();
     validate_channels(&config.channels, rate, center)?;
     let total = source.samples();
@@ -723,6 +741,7 @@ fn run(
                 Err(_) => Some("Channel worker panicked; restart reception".into()),
             };
             if let Some(e) = error {
+                crate::diag::note(format!("チャンネルの処理が止まりました：{e}"));
                 ch.lock().unwrap().status.error = Some(e);
                 cancel.store(true, Ordering::Relaxed);
             }

@@ -28,6 +28,60 @@ object UsbDongle {
   private var connection: UsbDeviceConnection? = null
   private var asking = false
   private var receiverRegistered = false
+  private var watching = false
+
+  /** Android-side notes for the app's connection log (ui/app.js merges them). */
+  private val notes = ArrayDeque<String>()
+
+  fun note(text: String) {
+    Log.i(TAG, text)
+    synchronized(notes) {
+      if (notes.size == 200) notes.removeFirst()
+      notes.addLast("${System.currentTimeMillis()}\t$text")
+    }
+  }
+
+  /** One note per line: "<unix ms>\t<text>". */
+  fun notes(): String = synchronized(notes) { notes.joinToString("\n") }
+
+  private fun describe(device: UsbDevice): String {
+    val names =
+      try {
+        listOfNotNull(device.manufacturerName, device.productName).joinToString(" ")
+      } catch (e: SecurityException) {
+        ""
+      }
+    return "%04x:%04x%s".format(device.vendorId, device.productId, if (names.isEmpty()) "" else " $names")
+  }
+
+  /** Notes every dongle attach and detach, to tell a dropped USB link from a driver error. */
+  fun watch(context: Context) {
+    synchronized(this) {
+      if (watching) return
+      watching = true
+    }
+    val filter =
+      IntentFilter().apply {
+        addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+        addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+      }
+    ContextCompat.registerReceiver(
+      context.applicationContext,
+      object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+          @Suppress("DEPRECATION")
+          val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+          val what = if (intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED) "外れました" else "つながりました"
+          note("Android: USB 機器が$what（${device?.let { describe(it) } ?: "不明"}）")
+        }
+      },
+      filter,
+      // Both are protected system broadcasts.
+      ContextCompat.RECEIVER_EXPORTED,
+    )
+    val attached = manager(context).deviceList.values
+    note("Android: アプリ起動時の USB 機器 ${attached.size} 台 ${attached.joinToString { describe(it) }}")
+  }
 
   /**
    * Implemented in Rust (src-tauri/src/lib.rs, `usb_jni`). [identity]: 1 =
@@ -63,12 +117,18 @@ object UsbDongle {
   fun request(context: Context): String {
     val usb = manager(context)
     val attached = usb.deviceList.values
-    val device =
-      attached.firstOrNull { it.vendorId == VENDOR && it.productId in PRODUCTS }
-        ?: return if (attached.isEmpty()) "none" else "other:${attached.size}"
-    if (usb.hasPermission(device)) {
-      return if (open(context, device)) "ok" else "busy"
+    val device = attached.firstOrNull { it.vendorId == VENDOR && it.productId in PRODUCTS }
+    if (device == null) {
+      val result = if (attached.isEmpty()) "none" else "other:${attached.size}"
+      note("Android: ドングルを探しました: USB 機器 ${attached.size} 台 ${attached.joinToString { describe(it) }} → $result")
+      return result
     }
+    if (usb.hasPermission(device)) {
+      val result = if (open(context, device)) "ok" else "busy"
+      note("Android: ドングルを開きました（${describe(device)}）→ $result")
+      return result
+    }
+    note("Android: USB の使用許可を求めます（${describe(device)}）")
     if (!asking) {
       asking = true
       registerPermissionReceiver(context.applicationContext)
@@ -85,7 +145,7 @@ object UsbDongle {
     val opened =
       manager(context).openDevice(device)
         ?: run {
-          Log.w(TAG, "openDevice failed for ${device.deviceName}")
+          note("Android: openDevice に失敗しました（${device.deviceName}）")
           return false
         }
     connection?.close()
@@ -115,6 +175,7 @@ object UsbDongle {
   /** Reception stopped: release the device for other apps. */
   @Synchronized
   fun close() {
+    if (connection != null) note("Android: 受信を止めたのでドングルを放します")
     connection?.close()
     connection = null
   }
@@ -128,6 +189,7 @@ object UsbDongle {
         override fun onReceive(context: Context, intent: Intent) {
           synchronized(this@UsbDongle) { asking = false }
           val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+          note("Android: USB の使用許可: ${if (granted) "許可" else "拒否"}")
           val device = find(context)
           if (granted && device != null) open(context, device)
         }

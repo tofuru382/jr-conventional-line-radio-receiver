@@ -1,5 +1,6 @@
 mod coding;
 pub mod data;
+pub mod diag;
 pub mod frame;
 mod monitor;
 pub mod pipeline;

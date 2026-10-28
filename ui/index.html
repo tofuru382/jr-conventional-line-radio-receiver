@@ -234,6 +234,23 @@
             受信がうまくいかないときの調査用です。受信中に押すと、ドングルから届いた電波データをそのまま保存します（約10 MB）。
           </p>
         </div>
+        <details id="log-group" class="log-group" hidden>
+          <summary>接続の記録（不具合の調査用）</summary>
+          <p class="field-hint">
+            ドングルの接続・切断、内蔵ドライバーのエラー、受信の開始と終了の記録です。うまくいかないときは「コピー」を押して、そのまま送ってください。
+          </p>
+          <div class="log-actions">
+            <button id="log-copy" type="button">コピー</button>
+            <button id="log-refresh" type="button">更新</button>
+          </div>
+          <textarea
+            id="connection-log"
+            readonly
+            rows="12"
+            spellcheck="false"
+            aria-label="接続の記録"
+          ></textarea>
+        </details>
       </details>
       <section class="card recording" aria-labelledby="recording-title">
         <div class="recording-bar">

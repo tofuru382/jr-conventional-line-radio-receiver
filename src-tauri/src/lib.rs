@@ -228,6 +228,12 @@ mod usb_jni {
         u8::from(receiver_core::usb::wants_device())
     }
 }
+/// Diagnosis: what the receiver noted about its input (start, USB dongle,
+/// errors), as (unix milliseconds, text), oldest first.
+#[tauri::command]
+fn connection_log() -> Vec<(u64, String)> {
+    receiver_core::diag::notes()
+}
 /// Diagnosis: save the next 10 s of raw IQ as a WAV next to the recordings
 /// (the IQ WAV input replays it). Returns the file path.
 #[tauri::command]
@@ -366,6 +372,7 @@ pub fn run() {
             play_test_sound,
             native_audio_status,
             capture_iq,
+            connection_log,
             list_recordings,
             read_recording,
             devices,

@@ -1577,6 +1577,38 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   margin: 0;
   overflow-wrap: anywhere;
 }
+.log-group {
+  padding: 0 24px 20px;
+}
+.log-group summary {
+  cursor: pointer;
+}
+.log-group[open] {
+  display: grid;
+  gap: 8px;
+}
+.log-group p {
+  margin: 0;
+}
+.log-actions {
+  display: flex;
+  gap: 8px;
+}
+#connection-log {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 12em;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--inset);
+  color: var(--text);
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  white-space: pre;
+  overflow: auto;
+}
 .decoder-choice {
   display: grid;
   gap: 6px;

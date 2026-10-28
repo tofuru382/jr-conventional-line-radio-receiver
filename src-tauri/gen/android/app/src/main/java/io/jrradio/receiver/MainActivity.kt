@@ -37,6 +37,7 @@ class MainActivity : TauriActivity() {
       navigationBarStyle = SystemBarStyle.dark(background),
     )
     super.onCreate(savedInstanceState)
+    UsbDongle.watch(this)
     window.decorView.setBackgroundColor(background)
     // Android 15+ always draws apps edge to edge. Keep the WebView clear of the
     // status bar, navigation bar, display cutout and on-screen keyboard.
@@ -97,6 +98,9 @@ class MainActivity : TauriActivity() {
      */
     @JavascriptInterface
     fun requestUsb(): String = UsbDongle.request(this@MainActivity)
+
+    /** Android-side connection notes, one "<unix ms>\t<text>" per line. */
+    @JavascriptInterface fun usbLog(): String = UsbDongle.notes()
   }
 
   private fun requestNotificationPermission() {

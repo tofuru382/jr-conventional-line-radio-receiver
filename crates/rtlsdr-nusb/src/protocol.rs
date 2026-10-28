@@ -5,9 +5,9 @@ use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 use std::time::Duration;
 
 pub(crate) const RX_ENDPOINT: u8 = 0x81;
-// JR-CLRR: 64 smaller transfers in flight (was 8 × 256 KiB, the same 2 MiB);
-// see rx/queue.rs.
-pub(crate) const TRANSFER_COUNT: usize = 64;
+// JR-CLRR: librtlsdr's default of 15 transfers in flight (was 8), as in the
+// Rtl-sdr driver app that works with the same phones and dongles.
+pub(crate) const TRANSFER_COUNT: usize = 15;
 pub(crate) fn timeout() -> Duration {
     Duration::from_millis(500)
 }
