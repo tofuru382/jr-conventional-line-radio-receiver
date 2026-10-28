@@ -200,6 +200,16 @@ impl Drop for FakeBulkIn {
     }
 }
 impl FakeBulkIn {
+    /// Counts down `fault_bulk_completions`; true while it was not zero.
+    fn take_fault(&self) -> bool {
+        let faults = &self.state.fault_bulk_completions;
+        let left = faults.load(Ordering::SeqCst);
+        if left == 0 {
+            return false;
+        }
+        faults.store(left - 1, Ordering::SeqCst);
+        true
+    }
     fn complete(&mut self) -> BulkInCompletion<Vec<u8>> {
         let buffer = self
             .submitted
@@ -216,11 +226,7 @@ impl FakeBulkIn {
                 .state
                 .fail_bulk_completion
                 .swap(false, Ordering::SeqCst)
-            || self
-                .state
-                .fault_bulk_completions
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok()
+            || self.take_fault()
         {
             Err(nusb::transfer::TransferError::Fault.into())
         } else {

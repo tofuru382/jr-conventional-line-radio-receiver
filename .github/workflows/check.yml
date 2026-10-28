@@ -38,4 +38,13 @@ jobs:
       - uses: ./.github/actions/setup-native
       - run: npm ci
       - name: Check Rust, UI, and release metadata
-        run: bash scripts/check.sh
+        run: |
+          set -o pipefail
+          bash scripts/check.sh 2>&1 | tee "$RUNNER_TEMP/check.log"
+      # The error lines as an annotation, readable without downloading logs.
+      - name: Report check errors
+        if: failure()
+        run: |
+          lines=$(grep -E -A4 '^(error|warning)(\[[A-Za-z0-9_]+\])?:|panicked at|^---- |^failures:|^not ok|FAILED' "$RUNNER_TEMP/check.log" | head -100 || true)
+          message=$(printf '%s' "$lines" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=scripts/check.sh::${message:-no error lines found}"
