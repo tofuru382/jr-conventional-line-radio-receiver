@@ -523,7 +523,15 @@ test("Android built-in driver asks for the dongle before starting", async (t) =>
   await app.click("start");
   assert.equal(asked.length, 1);
   assert.equal(app.calls.some((c) => c.command === "start"), false);
-  assert.match($("error").textContent, /ドングルが見つかりません/);
+  assert.match($("error").textContent, /ドングルが見つかりません。スマホに USB 機器が 1 台も/);
+  // Only a hub is visible, or the dongle is there but cannot be opened.
+  answer = "other:1";
+  await app.click("start");
+  assert.match($("error").textContent, /USB 機器は 1 台見えていますが、RTL-SDR ドングルではありません/);
+  answer = "busy";
+  await app.click("start");
+  assert.match($("error").textContent, /ドングルは見えていますが、開けませんでした/);
+  assert.equal(app.calls.some((c) => c.command === "start"), false);
   answer = "asking";
   await app.click("start");
   const start = app.calls.find((c) => c.command === "start");

@@ -1659,6 +1659,16 @@ function adoptMacDefaults() {
     void persistPreferences();
   }
 }
+// What the phone saw when the built-in driver asked for the dongle.
+function usbProblem(answer) {
+  if (answer === "none")
+    return "ドングルが見つかりません。スマホに USB 機器が 1 台もつながっていません。挿し直して、スマホの設定で OTG がオンになっているか確認してから「受信を開始」を押してください。";
+  if (typeof answer === "string" && answer.startsWith("other:"))
+    return `ドングルが見つかりません。USB 機器は ${answer.slice(6)} 台見えていますが、RTL-SDR ドングルではありません。ハブを使っている場合は、ハブとドングルの差し込みとハブの電源を確認してください。`;
+  if (answer === "busy")
+    return "ドングルは見えていますが、開けませんでした。Rtl-sdr driver など、ドングルを使っている別のアプリを閉じるか、ドングルを挿し直してから「受信を開始」を押してください。";
+  return null;
+}
 const usbDefaultKey = "jr-clrr.usb-default";
 function adoptAndroidDefaults() {
   let changed = false;
@@ -1735,11 +1745,8 @@ $("start").addEventListener("click", async () => {
     await flushPreferences();
     if (input.kind === "usb" && platform.android) {
       // Built-in driver: Android hands the dongle over (asking first if needed).
-      const usb = window.JrAndroid?.requestUsb?.();
-      if (usb === "none")
-        throw new Error(
-          "ドングルが見つかりません。スマホに挿して（OTG がオンになっているか確認して）から「受信を開始」を押してください。",
-        );
+      const problem = usbProblem(window.JrAndroid?.requestUsb?.());
+      if (problem) throw new Error(problem);
     }
     await invoke("start", {
       config: {

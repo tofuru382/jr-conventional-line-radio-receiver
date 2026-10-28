@@ -92,7 +92,8 @@ class MainActivity : TauriActivity() {
 
     /**
      * Built-in driver: find the dongle, ask for USB access if needed and hand
-     * it to the receiver. Returns "ok", "asking" or "none" (no dongle).
+     * it to the receiver. Returns "ok", "asking", "none", "other:N" or "busy"
+     * (see [UsbDongle.request]).
      */
     @JavascriptInterface
     fun requestUsb(): String = UsbDongle.request(this@MainActivity)

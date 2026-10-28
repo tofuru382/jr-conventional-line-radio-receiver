@@ -55,14 +55,19 @@ object UsbDongle {
 
   /**
    * Makes the dongle available to the driver: "ok" (handed over), "asking"
-   * (permission dialog shown; handed over once granted) or "none" (no dongle).
+   * (permission dialog shown; handed over once granted), "none" (no USB device
+   * at all), "other:N" (N USB devices, none an RTL-SDR, e.g. only a hub) or
+   * "busy" (the dongle is there but could not be opened).
    */
   @Synchronized
   fun request(context: Context): String {
-    val device = find(context) ?: return "none"
     val usb = manager(context)
+    val attached = usb.deviceList.values
+    val device =
+      attached.firstOrNull { it.vendorId == VENDOR && it.productId in PRODUCTS }
+        ?: return if (attached.isEmpty()) "none" else "other:${attached.size}"
     if (usb.hasPermission(device)) {
-      return if (open(context, device)) "ok" else "none"
+      return if (open(context, device)) "ok" else "busy"
     }
     if (!asking) {
       asking = true
@@ -77,7 +82,12 @@ object UsbDongle {
 
   @Synchronized
   private fun open(context: Context, device: UsbDevice): Boolean {
-    val opened = manager(context).openDevice(device) ?: return false
+    val opened =
+      manager(context).openDevice(device)
+        ?: run {
+          Log.w(TAG, "openDevice failed for ${device.deviceName}")
+          return false
+        }
     connection?.close()
     connection = opened
     val identity =

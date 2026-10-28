@@ -223,7 +223,7 @@ impl Source {
     fn info(&self) -> Option<String> {
         match self {
             #[cfg(feature = "usb")]
-            Self::Usb(s) => Some(s.info.clone()),
+            Self::Usb(s) => Some(s.info()),
             #[cfg(test)]
             Self::Gated { source, .. } => source.info(),
             _ => None,
@@ -788,7 +788,10 @@ fn run(
                     window.1 += n as u64;
                     let elapsed = window.0.elapsed();
                     if elapsed >= Duration::from_secs(3) {
-                        shared.lock().unwrap().input_rate = window.1 as f64 / elapsed.as_secs_f64();
+                        let mut s = shared.lock().unwrap();
+                        s.input_rate = window.1 as f64 / elapsed.as_secs_f64();
+                        s.source_info = source.info();
+                        drop(s);
                         window = (Instant::now(), 0);
                     }
                     let iq: Arc<[Complex32]> = Arc::from(&buf[..n]);

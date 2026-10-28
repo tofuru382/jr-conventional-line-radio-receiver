@@ -173,7 +173,9 @@ fn describe(device: &Device) -> String {
 pub struct Usb {
     config: Config,
     /// Tuner and V4 handling, e.g. "R828D · RTL-SDR Blog V4".
-    pub info: String,
+    info: String,
+    /// USB transfer errors the driver recovered from, over all connections.
+    transfer_errors: u64,
     /// Kept for the stream's lifetime (shut down on drop).
     device: Option<Device>,
     rx: Option<RxStream>,
@@ -203,7 +205,7 @@ impl Usb {
             if started.elapsed() >= OPEN_WAIT {
                 WANTED.store(false, Ordering::Relaxed);
                 return Err(
-                    "USB: ドングルが見つかりません。スマホに挿して、USB の使用を許可してください"
+                    "USB: 30 秒待ちましたが、ドングルを使えませんでした。挿さっているか、USB の使用を許可したかを確認してください"
                         .into(),
                 );
             }
@@ -214,6 +216,7 @@ impl Usb {
         Ok(Self {
             config: config.clone(),
             info: describe(&device),
+            transfer_errors: 0,
             device: Some(device),
             rx: Some(rx),
             scratch: Vec::new(),
@@ -228,8 +231,20 @@ impl Usb {
     pub fn reconnecting(&self) -> bool {
         self.rx.is_none()
     }
+    /// For the status line: tuner, V4 handling and recovered USB errors.
+    pub fn info(&self) -> String {
+        let errors =
+            self.transfer_errors + self.rx.as_ref().map_or(0, |rx| rx.stats().transfer_errors);
+        if errors == 0 {
+            self.info.clone()
+        } else {
+            format!("{} · USB 転送エラー {errors} 回（自動回復）", self.info)
+        }
+    }
     fn lose(&mut self, cause: String) -> Result<Read, String> {
-        self.rx = None;
+        if let Some(rx) = self.rx.take() {
+            self.transfer_errors += rx.stats().transfer_errors;
+        }
         self.device = None;
         if self.config.reconnect_seconds == 0 {
             return Err(cause);
@@ -251,7 +266,7 @@ impl Usb {
                 .wait()
             {
                 Ok(0) if self.last_data.elapsed() >= STALL => {
-                    self.lose("USB: IQ データが 5 秒間届きません".into())
+                    self.lose("USB: ドングルから 5 秒間データが届きません".into())
                 }
                 Ok(0) => Ok(Read::Timeout),
                 Ok(n) => {
@@ -271,7 +286,9 @@ impl Usb {
                     }
                     Ok(Read::Samples(n))
                 }
-                Err(e) => self.lose(format!("USB: ドングルとの接続が切れました ({e})")),
+                Err(e) => self.lose(format!(
+                    "USB: ドングルとの通信が続けて失敗しました（{e}）。ケーブル・ハブ・電源を確認してください"
+                )),
             };
         }
         let limit = Duration::from_secs(self.config.reconnect_seconds.into());

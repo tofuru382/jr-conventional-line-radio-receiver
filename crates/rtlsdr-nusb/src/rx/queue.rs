@@ -2,7 +2,7 @@
 
 use super::{SampleBlock, StreamingStats};
 use crate::{
-    errors::{Error, Result},
+    errors::{Error, ErrorKind, Result},
     protocol::TRANSFER_COUNT,
     usb::{BulkInBackend, BulkInCompletion},
 };
@@ -30,6 +30,8 @@ pub(crate) struct Queue<B: BulkInBackend> {
     pub(super) stats: StreamingStats,
     discard_remaining: usize,
     dropped_samples: u64,
+    /// Transfers that failed in a row (JR-CLRR, see `accept`).
+    consecutive_errors: usize,
 }
 
 impl<B: BulkInBackend> Queue<B> {
@@ -46,6 +48,7 @@ impl<B: BulkInBackend> Queue<B> {
             stats: StreamingStats::default(),
             discard_remaining: 0,
             dropped_samples: 0,
+            consecutive_errors: 0,
         }
     }
 
@@ -66,6 +69,11 @@ impl<B: BulkInBackend> Queue<B> {
 
     pub(crate) fn is_closed(&self) -> bool {
         self.bulk_in.is_none()
+    }
+    fn resubmit(&mut self, buffer: B::Buffer) {
+        if let Some(bulk_in) = &mut self.bulk_in {
+            bulk_in.submit(buffer);
+        }
     }
     pub(crate) fn release_current(&mut self) {
         if let Some(buffer) = self.current.take()
@@ -113,24 +121,51 @@ impl<B: BulkInBackend> Queue<B> {
                 .submit(completion.buffer);
             return Ok(false);
         }
-        let result = completion.status.and_then(|_| {
-            if completion.actual_len == 0
-                || completion.actual_len % 2 != 0
-                || completion.actual_len > completion.buffer.len()
+        // JR-CLRR: survive transient transfer errors the way librtlsdr does
+        // (it gives up only after as many failed transfers in a row as it has
+        // in flight, or when the device is gone). Stopping on the first one
+        // cut reception off after a while on phones, where an occasional
+        // EPROTO/EOVERFLOW on the OTG link (or a hub) is normal. The failed
+        // buffer counts as dropped, so the caller sees the gap, and is
+        // resubmitted.
+        let fault = match completion.status {
+            Err(error) => Some(error),
+            // An empty completion carries nothing; librtlsdr resubmits it.
+            Ok(()) if completion.actual_len == 0 => {
+                self.resubmit(completion.buffer);
+                return Ok(false);
+            }
+            Ok(())
+                if completion.actual_len % 2 != 0
+                    || completion.actual_len > completion.buffer.len() =>
             {
-                Err(Error::protocol(
+                Some(Error::protocol(
                     "receive transfer",
                     "completed with an unexpected length",
                 ))
-            } else {
-                Ok(())
             }
-        });
-        if let Err(error) = result {
+            Ok(()) => None,
+        };
+        if let Some(error) = fault {
             self.stats.buffers_dropped += 1;
-            self.close();
-            return Err(error);
+            self.consecutive_errors += 1;
+            let fatal = error.kind() == ErrorKind::DeviceDisconnected
+                || matches!(
+                    error,
+                    Error::Transfer(nusb::transfer::TransferError::InvalidArgument)
+                )
+                || self.consecutive_errors >= TRANSFER_COUNT;
+            if fatal {
+                self.close();
+                return Err(error);
+            }
+            self.stats.transfer_errors += 1;
+            // The device kept streaming: about one transfer of samples is lost.
+            self.dropped_samples += (completion.buffer.len() / 2) as u64;
+            self.resubmit(completion.buffer);
+            return Ok(false);
         }
+        self.consecutive_errors = 0;
         self.current = Some(completion.buffer);
         self.current_len = completion.actual_len;
         self.stats.buffers_processed += 1;

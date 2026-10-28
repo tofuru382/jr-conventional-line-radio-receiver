@@ -157,6 +157,93 @@ fn short_even_completions_are_data_and_blocking_timeout_is_retryable() {
     assert!(rx.next_block(None).wait().unwrap().is_some());
 }
 
+// JR-CLRR: transient transfer errors are survived, like librtlsdr.
+#[test]
+fn a_failed_transfer_is_dropped_and_resubmitted_not_fatal() {
+    let (control, _, mut rx) = setup::<RawIq>();
+    rx.start().wait().unwrap();
+    rx.next_block(None).wait().unwrap().unwrap();
+    control
+        .state
+        .fault_bulk_completions
+        .store(3, Ordering::SeqCst);
+    let block = rx.next_block(None).wait().unwrap().unwrap();
+    assert_eq!(block.raw_bytes().len(), DEFAULT_BUFFER_SIZE);
+    assert_eq!(block.dropped_samples(), 3 * DEFAULT_BUFFER_SIZE as u64 / 2);
+    let stats = rx.current_stats();
+    assert_eq!(stats.transfer_errors, 3);
+    assert_eq!(stats.buffers_dropped, 3);
+    // The failed buffers went back to the endpoint.
+    let pending = rx
+        .queue
+        .as_ref()
+        .unwrap()
+        .bulk_in
+        .as_ref()
+        .unwrap()
+        .submitted
+        .len();
+    assert_eq!(pending, crate::protocol::TRANSFER_COUNT - 1);
+    assert!(rx.next_block(None).wait().unwrap().is_some());
+}
+
+#[test]
+fn as_many_failed_transfers_in_a_row_as_in_flight_end_the_stream() {
+    let (control, _, mut rx) = setup::<RawIq>();
+    rx.start().wait().unwrap();
+    control
+        .state
+        .fault_bulk_completions
+        .store(crate::protocol::TRANSFER_COUNT, Ordering::SeqCst);
+    assert!(rx.next_block(None).wait().is_err());
+}
+
+#[test]
+fn errors_must_be_consecutive_to_end_the_stream() {
+    let (control, _, mut rx) = setup::<RawIq>();
+    rx.start().wait().unwrap();
+    for _ in 0..3 {
+        control
+            .state
+            .fault_bulk_completions
+            .store(crate::protocol::TRANSFER_COUNT - 1, Ordering::SeqCst);
+        assert!(rx.next_block(None).wait().unwrap().is_some());
+    }
+    assert_eq!(
+        rx.current_stats().transfer_errors,
+        3 * (crate::protocol::TRANSFER_COUNT as u64 - 1)
+    );
+}
+
+#[test]
+fn a_disconnected_device_ends_the_stream_at_once() {
+    let (control, _, mut rx) = setup::<RawIq>();
+    rx.start().wait().unwrap();
+    control
+        .state
+        .disconnect_bulk_completion
+        .store(true, Ordering::SeqCst);
+    let error = rx.next_block(None).wait().unwrap_err();
+    assert_eq!(error.kind(), crate::ErrorKind::DeviceDisconnected);
+}
+
+#[test]
+fn empty_completions_are_skipped_without_a_gap() {
+    let (_, _, mut rx) = setup::<RawIq>();
+    rx.start().wait().unwrap();
+    rx.queue
+        .as_mut()
+        .unwrap()
+        .bulk_in
+        .as_mut()
+        .unwrap()
+        .empty_next = true;
+    let block = rx.next_block(None).wait().unwrap().unwrap();
+    assert_eq!(block.raw_bytes().len(), DEFAULT_BUFFER_SIZE);
+    assert_eq!(block.dropped_samples(), 0);
+    assert_eq!(rx.current_stats().buffers_dropped, 0);
+}
+
 #[test]
 fn restart_reuses_queue_and_discards_every_old_submission() {
     let (control, _, mut rx) = setup::<RawIq>();
@@ -178,7 +265,7 @@ fn failed_read_requires_stop_before_rebuilding_queue() {
     rx.start().wait().unwrap();
     control
         .state
-        .fail_bulk_completion
+        .disconnect_bulk_completion
         .store(true, Ordering::SeqCst);
     assert!(rx.next_block(None).wait().is_err());
     assert!(matches!(rx.start().wait(), Err(Error::Busy)));

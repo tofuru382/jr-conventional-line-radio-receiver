@@ -38,6 +38,9 @@ pub struct StreamingStats {
     /// transfer cancellation, including WebUSB, consuming these old submissions may
     /// delay the first fresh block after restarting.
     pub buffers_discarded_on_restart: u64,
+    /// Transfers that failed with a transient USB error and were resubmitted
+    /// (JR-CLRR). A subset of [`StreamingStats::buffers_dropped`].
+    pub transfer_errors: u64,
 }
 
 impl StreamingStats {
@@ -46,6 +49,7 @@ impl StreamingStats {
         self.buffers_processed += other.buffers_processed;
         self.buffers_dropped += other.buffers_dropped;
         self.buffers_discarded_on_restart += other.buffers_discarded_on_restart;
+        self.transfer_errors += other.transfer_errors;
     }
 
     pub(crate) fn combined(mut self, other: Self) -> Self {

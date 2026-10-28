@@ -32,6 +32,9 @@ pub(crate) struct FakeState {
     pub(crate) pause_control_out_at: AtomicUsize,
     pub(crate) pause_clear_halt: AtomicBool,
     pub(crate) fail_bulk_completion: AtomicBool,
+    /// The next this many completions fail with a transfer fault.
+    pub(crate) fault_bulk_completions: AtomicUsize,
+    pub(crate) disconnect_bulk_completion: AtomicBool,
     pub(crate) bulk_in_count: AtomicUsize,
     pub(crate) cancel_count: AtomicUsize,
     pub(crate) events: Mutex<Vec<FakeEvent>>,
@@ -54,6 +57,8 @@ impl Default for FakeState {
             pause_control_out_at: Default::default(),
             pause_clear_halt: Default::default(),
             fail_bulk_completion: Default::default(),
+            fault_bulk_completions: Default::default(),
+            disconnect_bulk_completion: Default::default(),
             bulk_in_count: Default::default(),
             cancel_count: Default::default(),
             events: Default::default(),
@@ -180,6 +185,7 @@ pub(crate) struct FakeBulkIn {
     pub(crate) pending_once: bool,
     pub(crate) fail_next: bool,
     pub(crate) short_next: bool,
+    pub(crate) empty_next: bool,
     pub(crate) timeout_next: bool,
     pub(crate) last_timeout: Option<Duration>,
     pub(crate) cancelled: bool,
@@ -199,22 +205,37 @@ impl FakeBulkIn {
             .submitted
             .pop_front()
             .expect("fake endpoint has submitted buffers");
-        let status = if std::mem::take(&mut self.fail_next)
+        let status = if self
+            .state
+            .disconnect_bulk_completion
+            .swap(false, Ordering::SeqCst)
+        {
+            Err(nusb::transfer::TransferError::Disconnected.into())
+        } else if std::mem::take(&mut self.fail_next)
             || self
                 .state
                 .fail_bulk_completion
                 .swap(false, Ordering::SeqCst)
+            || self
+                .state
+                .fault_bulk_completions
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
         {
             Err(nusb::transfer::TransferError::Fault.into())
         } else {
             Ok(())
         };
-        let actual_len = buffer.len()
-            - if std::mem::take(&mut self.short_next) {
-                2
-            } else {
-                0
-            };
+        let actual_len = if std::mem::take(&mut self.empty_next) {
+            0
+        } else {
+            buffer.len()
+                - if std::mem::take(&mut self.short_next) {
+                    2
+                } else {
+                    0
+                }
+        };
         BulkInCompletion {
             buffer,
             actual_len,
