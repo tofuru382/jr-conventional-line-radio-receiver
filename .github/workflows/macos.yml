@@ -14,6 +14,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shown in the app's version dialog, so a test report names its build.
+  JR_CLRR_BUILD: ${{ github.sha }}
 
 jobs:
   app:

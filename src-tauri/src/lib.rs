@@ -278,6 +278,8 @@ struct Platform {
     name: Option<&'static str>,
     /// Default voice decoder of the selector ("v1.3" on phones, "v1.5" on Mac).
     voice_decoder: &'static str,
+    /// Commit this app was built from (set by the CI workflows).
+    build: Option<&'static str>,
 }
 #[tauri::command]
 fn platform() -> Platform {
@@ -297,6 +299,7 @@ fn platform() -> Platform {
         } else {
             "v1.5"
         },
+        build: option_env!("JR_CLRR_BUILD"),
     }
 }
 /// Starts the "Rtl-sdr driver" app (marto.rtl_tcp_andro), which owns the USB

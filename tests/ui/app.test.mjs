@@ -531,6 +531,37 @@ test("Android built-in driver asks for the dongle before starting", async (t) =>
   assert.equal(start.args.config.input.radio.sample_rate, 240000);
   assert.ok(!("host" in start.args.config.input.radio));
 });
+test("a failed session's error does not come back after switching input or starting again", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  await app.change("input-kind", "rtl_tcp");
+  await app.click("start");
+  const refused = "RTL-TCP: 127.0.0.1:1234 に接続できません (Connection refused (os error 111))";
+  app.setSnapshot({ status: { ...status(), running: false, state: "failed", error: refused }, audio: [] });
+  await app.poll();
+  assert.match($("error").textContent, /Connection refused/);
+  assert.equal($("state").textContent, "受信エラー");
+  // Switching to the built-in driver forgets the dead RTL-TCP session.
+  await app.change("input-kind", "usb");
+  assert.equal($("error").hidden, true);
+  assert.equal($("state").textContent, "停止中");
+  const polled = app.calls.filter((c) => c.command === "snapshot").length;
+  await app.poll();
+  assert.equal(app.calls.filter((c) => c.command === "snapshot").length, polled);
+  assert.equal($("error").hidden, true);
+  // A USB start that fails shows its own reason, not the old one.
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "none" };
+  await app.click("start");
+  await app.poll();
+  assert.match($("error").textContent, /ドングルが見つかりません/);
+  assert.doesNotMatch($("error").textContent, /RTL-TCP/);
+});
+test("the version dialog names the build", async (t) => {
+  const app = await setup(t, {
+    platformInfo: { android: true, soapy: false, simple: true, name: "JR-CLRR For Android", build: "6ee67ce0123456789abcdef" },
+  });
+  assert.match(app.$("about-dialog").textContent, /ビルド 6ee67ce(?!0)/);
+});
 test("volume leveling is remembered and reaches both players", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;

@@ -1481,8 +1481,19 @@ function updateSource() {
       ? "利用するサーバーの IP アドレスとポートを入力してください。接続設定は自動保存されます。選択した波を同時受信します。RTL-TCP は設定値の読み戻しとサーバー側の欠落通知に対応していません。"
       : "SoapySDR 対応デバイスを検索するか、詳細設定にデバイス引数を入力してください。接続設定は自動保存されます。";
 }
-$("input-kind").addEventListener("change", () => {
+// The last session stays in the receiver after it ends, and polling it would
+// show its error again; forget it once the user moves on.
+function forgetSession() {
+  if (running) return;
+  sessionVisible = false;
+  lastSnapshot = null;
+  uiGeneration++;
   clearError();
+  $("state").textContent = "停止中";
+  $("state").classList.remove("active");
+}
+$("input-kind").addEventListener("change", () => {
+  forgetSession();
   updateSource();
 });
 $("host").addEventListener("input", updateSource);
@@ -1569,6 +1580,10 @@ function applySimpleLayout(name) {
   document.querySelector(".topbar .eyebrow").textContent =
     "JR 在来線デジタル列車無線受信";
   $("about-product").textContent = name;
+  if (platform.build) {
+    const version = document.querySelector(".about-metadata dd");
+    version.textContent = `${version.textContent} · ビルド ${platform.build.slice(0, 7)}`;
+  }
   renderAbout();
   document.querySelector("footer > span").firstChild.textContent = `${name} `;
 }
@@ -1690,6 +1705,7 @@ $("start").addEventListener("click", async () => {
   try {
     uiGeneration++;
     clearError();
+    forgetSession();
     const values = Object.fromEntries(
       [
         "center",
