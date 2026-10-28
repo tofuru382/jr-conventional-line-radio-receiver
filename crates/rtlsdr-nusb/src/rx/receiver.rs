@@ -86,12 +86,23 @@ impl<C: Transport, M: SampleMode> Receiver<C, M> {
                 Ok(())
             };
             ready(prepare).and_then(move |_| {
-                shared.receiver_mode(true).and_then(move |_| {
-                    if fresh {
-                        Either::left(queue.as_mut().expect("prepared queue").initialize())
-                    } else {
-                        Either::right(ready(Ok(())))
-                    }
+                // JR-CLRR: clear a stale halt while the FIFO is still held in
+                // reset, then start the FIFO, then submit the buffers. Clearing
+                // the halt of an endpoint that is already streaming is
+                // something librtlsdr never does.
+                let clear = if fresh {
+                    Either::left(queue.as_mut().expect("prepared queue").clear_halt())
+                } else {
+                    Either::right(ready(Ok(())))
+                };
+                clear.and_then(move |_| {
+                    shared.receiver_mode(true).map(move |result| {
+                        result?;
+                        if fresh {
+                            queue.as_mut().expect("prepared queue").submit_all();
+                        }
+                        Ok(())
+                    })
                 })
             })
         });

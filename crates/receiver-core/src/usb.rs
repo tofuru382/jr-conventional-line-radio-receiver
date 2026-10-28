@@ -118,6 +118,9 @@ const OPEN_WAIT: Duration = Duration::from_secs(30);
 const RETRY_EVERY: Duration = Duration::from_millis(200);
 /// No samples for this long: the dongle stalled.
 const STALL: Duration = Duration::from_secs(5);
+/// A dongle that just came back on USB is left alone this long before it is
+/// initialised (it dropped off during initialisation 15 ms after returning).
+const SETTLE: Duration = Duration::from_secs(1);
 
 /// Opening from a descriptor needs Linux usbfs (Android is Linux).
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -343,27 +346,32 @@ impl Usb {
         if stop.load(Ordering::Relaxed) {
             return Ok(Read::Timeout);
         }
-        match take_offered() {
-            Some(fd) => match open_device(&self.config, fd) {
-                Ok((device, rx)) => {
-                    WANTED.store(false, Ordering::Relaxed);
-                    self.info = describe(&device);
-                    self.device = Some(device);
-                    self.rx = Some(rx);
-                    self.dropped = 0;
-                    self.last_data = Instant::now();
-                    self.lost_at = None;
-                    self.failed_attempts = 0;
-                    self.reconnects += 1;
-                    self.noted_errors = (0, Instant::now());
-                    note("ドライバー: 再接続しました");
-                }
-                Err(e) => {
-                    note(format!("ドライバー: 再接続に失敗しました: {e}"));
-                    self.failed_attempts += 1
-                }
-            },
-            None => std::thread::sleep(RETRY_EVERY),
+        let Some(fd) = take_offered() else {
+            std::thread::sleep(RETRY_EVERY);
+            return Ok(Read::Timeout);
+        };
+        let settled = Instant::now();
+        while settled.elapsed() < SETTLE && !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        match open_device(&self.config, fd) {
+            Ok((device, rx)) => {
+                WANTED.store(false, Ordering::Relaxed);
+                self.info = describe(&device);
+                self.device = Some(device);
+                self.rx = Some(rx);
+                self.dropped = 0;
+                self.last_data = Instant::now();
+                self.lost_at = None;
+                self.failed_attempts = 0;
+                self.reconnects += 1;
+                self.noted_errors = (0, Instant::now());
+                note("ドライバー: 再接続しました");
+            }
+            Err(e) => {
+                note(format!("ドライバー: 再接続に失敗しました: {e}"));
+                self.failed_attempts += 1
+            }
         }
         Ok(Read::Timeout)
     }

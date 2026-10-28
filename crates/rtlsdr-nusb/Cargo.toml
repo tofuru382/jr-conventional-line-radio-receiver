@@ -10,6 +10,7 @@
 # - librtlsdr's 16 MHz tuner crystal for an R828D that is not a Blog V4, with
 #   the R828D PLL integer limit of 127 it needs, and
 # - librtlsdr's 15 transfers in flight instead of 8,
+# - the endpoint halt cleared before the FIFO starts, not while it streams,
 # - the last transfer error in StreamingStats, for diagnosis, and
 # - librtlsdr's tolerance of transient transfer errors: a failed transfer is
 #   counted as dropped and resubmitted; the stream ends only when the device

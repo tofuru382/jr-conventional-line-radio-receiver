@@ -50,19 +50,25 @@ impl<B: BulkInBackend> Queue<B> {
         }
     }
 
-    pub(crate) fn initialize(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
+    /// Clears a halt an earlier user may have left on the endpoint.
+    ///
+    /// JR-CLRR: called while the device FIFO is still held in reset, so the
+    /// request never reaches an endpoint that is already streaming (librtlsdr
+    /// does not send it at all).
+    pub(crate) fn clear_halt(&mut self) -> impl MaybeFuture<Output = Result<()>> + use<B> {
         self.bulk_in
             .as_mut()
             .expect("new queue has an endpoint")
             .clear_halt()
-            .map(move |result| {
-                result?;
-                for buffer in self.buffers.drain(..) {
-                    self.bulk_in.as_mut().expect("new endpoint").submit(buffer);
-                }
-                self.initialized = true;
-                Ok(())
-            })
+    }
+
+    /// Submits every receive buffer (after the device FIFO has started).
+    pub(crate) fn submit_all(&mut self) {
+        let bulk_in = self.bulk_in.as_mut().expect("new endpoint");
+        for buffer in self.buffers.drain(..) {
+            bulk_in.submit(buffer);
+        }
+        self.initialized = true;
     }
 
     pub(crate) fn is_closed(&self) -> bool {

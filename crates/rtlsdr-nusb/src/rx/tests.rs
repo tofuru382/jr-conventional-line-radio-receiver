@@ -157,6 +157,29 @@ fn short_even_completions_are_data_and_blocking_timeout_is_retryable() {
     assert!(rx.next_block(None).wait().unwrap().is_some());
 }
 
+// JR-CLRR: the endpoint halt is cleared before the FIFO streams.
+#[test]
+fn halt_is_cleared_before_the_fifo_starts_and_buffers_follow() {
+    let (control, _, mut rx) = setup::<RawIq>();
+    control.state.events.lock().unwrap().clear();
+    rx.start().wait().unwrap();
+    let events = control.state.events.lock().unwrap();
+    let clear = events
+        .iter()
+        .position(|e| *e == FakeEvent::ClearHalt)
+        .unwrap();
+    let fifo_on = events
+        .iter()
+        .position(|e| matches!(e, FakeEvent::Control(r) if r.value == 0x2148 && r.data == [0, 0]))
+        .unwrap();
+    let submit = events.iter().position(|e| *e == FakeEvent::Submit).unwrap();
+    assert!(clear < fifo_on, "halt cleared after the FIFO started");
+    assert!(
+        fifo_on < submit,
+        "buffers submitted before the FIFO started"
+    );
+}
+
 // JR-CLRR: transient transfer errors are survived, like librtlsdr.
 #[test]
 fn a_failed_transfer_is_dropped_and_resubmitted_not_fatal() {

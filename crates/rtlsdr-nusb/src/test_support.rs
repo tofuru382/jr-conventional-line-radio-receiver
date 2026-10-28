@@ -70,6 +70,8 @@ impl Default for FakeState {
 pub(crate) enum FakeEvent {
     Control(OutRequest),
     QueueDropped,
+    ClearHalt,
+    Submit,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -252,12 +254,14 @@ impl FakeBulkIn {
 impl BulkInBackend for FakeBulkIn {
     type Buffer = Vec<u8>;
     fn clear_halt(&mut self) -> impl MaybeFuture<Output = Result<()>> + use<> {
+        self.state.events.lock().unwrap().push(FakeEvent::ClearHalt);
         ClearHalt(Arc::clone(&self.state))
     }
     fn allocate(&self, len: usize) -> Vec<u8> {
         (0..len).map(|i| (i % 256) as u8).collect()
     }
     fn submit(&mut self, buffer: Vec<u8>) {
+        self.state.events.lock().unwrap().push(FakeEvent::Submit);
         self.submit_count += 1;
         self.submitted.push_back(buffer);
     }
