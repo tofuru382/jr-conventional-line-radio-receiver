@@ -163,7 +163,8 @@ fn describe(device: &Device) -> String {
     if info.rtl_sdr_blog_v4 {
         format!("{tuner} · RTL-SDR Blog V4")
     } else if info.tuner == rtlsdr_nusb::TunerKind::R828D {
-        format!("{tuner} · V4 として認識されていません")
+        // Not a Blog V4: driven as a plain R828D with its own 16 MHz crystal.
+        format!("{tuner}（16 MHz・V4 以外）")
     } else {
         tuner.into()
     }

@@ -133,7 +133,13 @@ impl Hardware {
         }
         let crystal = corrected_crystal(config.correction_ppm);
         let tuner = self.tuner.as_mut().ok_or(Error::UnsupportedTuner)?;
-        tuner.crystal_hz = crystal;
+        // JR-CLRR change (librtlsdr): an R828D is clocked by its own 16 MHz
+        // crystal, except on the RTL-SDR Blog V4 which shares the 28.8 MHz one.
+        tuner.crystal_hz = if tuner.kind == TunerKind::R828D && !tuner.blog_v4 {
+            scaled_crystal(R828D_XTAL_HZ, config.correction_ppm)
+        } else {
+            crystal
+        };
         let direct = config.frequency_hz < XTAL_HZ && config.direct_sampling != DirectSampling::Off;
         com.i2c_gate(true).await?;
         if reinitialize || (self.direct && !direct) {
@@ -241,7 +247,12 @@ impl Hardware {
 }
 
 pub(crate) fn corrected_crystal(ppm: i32) -> u64 {
-    (XTAL_HZ as i64 * (1_000_000 + i64::from(ppm)) / 1_000_000) as u64
+    scaled_crystal(XTAL_HZ, ppm)
+}
+/// Crystal of an R828D that is not an RTL-SDR Blog V4 (librtlsdr R828D_XTAL_FREQ).
+pub(crate) const R828D_XTAL_HZ: u64 = 16_000_000;
+fn scaled_crystal(hz: u64, ppm: i32) -> u64 {
+    (hz as i64 * (1_000_000 + i64::from(ppm)) / 1_000_000) as u64
 }
 pub(crate) fn correction_word(ppm: i32) -> u16 {
     (-((i64::from(ppm) * (1 << 24)).div_euclid(1_000_000)) & 0x3fff) as u16
@@ -260,6 +271,35 @@ fn if_word(hz: u64, crystal: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn r828d_tuner_crystal_is_16_mhz_unless_blog_v4() {
+        for (blog_v4, expected) in [(false, R828D_XTAL_HZ), (true, XTAL_HZ)] {
+            let control = FakeTransport::default();
+            control
+                .state
+                .tuner_address
+                .store(0x74, std::sync::atomic::Ordering::SeqCst);
+            let descriptor = DeviceDescriptor {
+                index: 0,
+                vid: 0x0bda,
+                pid: 0x2838,
+                serial: None,
+                manufacturer: blog_v4.then(|| "RTLSDRBlog".into()),
+                product: blog_v4.then(|| "Blog V4".into()),
+            };
+            let mut hardware = Hardware::default();
+            let config = Settings {
+                frequency_hz: 352_603_125,
+                sample_rate_hz: 240_000,
+                ..Settings::default()
+            };
+            futures_lite::future::block_on(hardware.configure(&control, &config, &descriptor))
+                .unwrap();
+            let tuner = hardware.tuner.as_ref().unwrap();
+            assert_eq!(tuner.kind, TunerKind::R828D);
+            assert_eq!(tuner.crystal_hz, expected, "blog_v4 {blog_v4}");
+        }
+    }
     #[test]
     fn low_rates_report_the_rate_the_resampler_really_uses() {
         // Bit 27 of the 28-bit ratio register sign-extends (librtlsdr).

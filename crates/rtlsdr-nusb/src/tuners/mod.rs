@@ -354,7 +354,9 @@ fn pll(hz: u64, crystal: u64, fine: u8, power_ref: u8) -> Result<Pll> {
     }
     let vco = hz * mix;
     let integer = vco / (2 * crystal);
-    if !(13..=63).contains(&integer) {
+    // JR-CLRR change (librtlsdr): the limit is 128 / vco_power_ref - 1, i.e.
+    // 127 for the R828D (needed with its 16 MHz crystal) and 63 for the R820T.
+    if !(13..=(128 / u64::from(power_ref.max(1)) - 1)).contains(&integer) {
         return Err(Error::PllUnlocked);
     }
     let sdm = ((vco % (2 * crystal)) * 32768 / crystal).min(65535) as u16;
