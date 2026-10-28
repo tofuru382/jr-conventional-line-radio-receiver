@@ -1567,6 +1567,16 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   margin-block-start: 12px;
 }
 
+.iq-group {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  padding: 0 24px 20px;
+}
+.iq-group p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 .decoder-choice {
   display: grid;
   gap: 6px;

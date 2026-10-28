@@ -234,6 +234,7 @@ async function setup(
             if (command === "platform") return structuredClone(platformInfo);
             if (command === "list_recordings") return structuredClone(recordings);
             if (command === "read_recording") return new ArrayBuffer(8);
+            if (command === "capture_iq") return "/sdcard/Download/JR-CLRR/Recordings/iq-1-352603125Hz-240000.wav";
             if (command === "native_audio_status")
               return { underruns: 2, buffer_ms: 1000, rate: 48000 };
             if (command === "start_rtl_driver") {
@@ -642,6 +643,21 @@ test("the measured input rate is shown and flagged when it differs from the sett
   app.setSnapshot({ status: { ...status(), input_rate: 514285 }, audio: [] });
   await app.poll();
   assert.match($("capture-info").textContent, /実測 514,285 S\/s（設定と違います）$/);
+});
+test("Android saves 10 s of raw IQ for diagnosis while receiving", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.equal($("iq-group").hidden, false);
+  assert.equal($("iq-capture").disabled, true);
+  await app.click("start");
+  await app.poll();
+  assert.equal($("iq-capture").disabled, false);
+  await app.click("iq-capture");
+  assert.equal(app.calls.filter((c) => c.command === "capture_iq").length, 1);
+  assert.match($("iq-status").textContent, /保存中.*iq-1-352603125Hz-240000\.wav/);
+  app.setSnapshot({ status: { ...status(), iq_capture: "保存しました：/sdcard/x.wav" }, audio: [] });
+  await app.poll();
+  assert.equal($("iq-status").textContent, "保存しました：/sdcard/x.wav");
 });
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });

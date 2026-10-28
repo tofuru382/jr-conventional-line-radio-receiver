@@ -225,6 +225,32 @@ mod usb_jni {
         u8::from(receiver_core::usb::wants_device())
     }
 }
+/// Diagnosis: save the next 10 s of raw IQ as a WAV next to the recordings
+/// (the IQ WAV input replays it). Returns the file path.
+#[tauri::command]
+fn capture_iq(
+    directory: Option<String>,
+    state: tauri::State<'_, Receiver>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let folder = match directory.filter(|d| !d.trim().is_empty()) {
+        Some(d) => std::path::PathBuf::from(d),
+        None => recording_directory::default_directory(&app)?,
+    };
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    let session = guard.as_ref().ok_or("受信中に保存してください。")?;
+    let (overview, _) = session.snapshot(None);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let path = folder.join(format!(
+        "iq-{stamp}-{}Hz-{}.wav",
+        overview.center_hz.round() as u64,
+        overview.sample_rate.round() as u64
+    ));
+    session.capture_iq(path.clone(), 10.0)?;
+    Ok(path.to_string_lossy().into_owned())
+}
 #[tauri::command]
 fn native_audio_status(
     monitor: tauri::State<'_, native_audio::NativeMonitor>,
@@ -333,6 +359,7 @@ pub fn run() {
             set_native_monitor,
             play_test_sound,
             native_audio_status,
+            capture_iq,
             list_recordings,
             read_recording,
             devices,

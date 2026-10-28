@@ -654,6 +654,15 @@ function setControls() {
   $("start").disabled = !native || running || busy || !channels.length;
   $("stop").disabled = !running || busy;
   $("selected-format").disabled = running || busy || !channels.length;
+  $("iq-capture").disabled =
+    !running ||
+    busy ||
+    lastSnapshot?.state !== "receiving" ||
+    $("input-kind").value === "wave" ||
+    lastSnapshot?.iq_capture === "保存中";
+  if (lastSnapshot?.iq_capture && $("iq-status").textContent !== lastSnapshot.iq_capture)
+    $("iq-status").textContent =
+      lastSnapshot.iq_capture === "保存中" ? "保存中（10 秒）…" : lastSnapshot.iq_capture;
   if ($("voice-decoder")) $("voice-decoder").disabled = running || busy;
   $("preferences-retry").disabled = busy || (preferencesLoadFailed && running);
   $("total-enabled").textContent = enabled.size;
@@ -1945,6 +1954,18 @@ function maybeRefreshRecent() {
     void refreshRecent();
 }
 $("recent-refresh").addEventListener("click", () => void refreshRecent());
+// Diagnosis: 10 s of raw IQ, to compare the built-in driver with RTL-TCP.
+$("iq-capture").addEventListener("click", async () => {
+  try {
+    const path = await invoke("capture_iq", {
+      directory: $("record-directory").value.trim() || null,
+    });
+    $("iq-status").textContent = `保存中（10 秒）… ${path}`;
+    $("iq-capture").disabled = true;
+  } catch (e) {
+    $("iq-status").textContent = String(e.message ?? e);
+  }
+});
 // Volume leveling (live playback only; recordings keep the original level).
 const levelKey = "jr-clrr.level";
 try {
@@ -2102,6 +2123,7 @@ try {
       addRecordingsBrowser();
       // Filled once the presets are loaded (channel names and lines).
       $("recent-block").hidden = false;
+      $("iq-group").hidden = false;
     }
   }
   bundledCatalog = native

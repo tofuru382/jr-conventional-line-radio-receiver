@@ -380,3 +380,48 @@ fn rtl_tcp_drop_reconnects_and_keeps_receiving() {
     session.stop();
     server.join().unwrap();
 }
+
+#[test]
+fn raw_iq_capture_writes_a_replayable_wav() {
+    let input = temporary("iq-source.wav");
+    let output = temporary("iq-capture.wav");
+    let _ = fs::remove_file(&output);
+    silence(&input, 240_000 * 3);
+    let mut session = Session::start(Config {
+        input: Input::Wave {
+            path: input.to_string_lossy().into(),
+            center_hz: 352603125.0,
+        },
+        channels: presets("east")[..2].to_vec(),
+        voice_decoder: Default::default(),
+    })
+    .unwrap();
+    let start = Instant::now();
+    while session.snapshot(None).0.state != "receiving" {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.capture_iq(output.clone(), 1.0).unwrap();
+    assert!(
+        session.capture_iq(output.clone(), 1.0).is_err(),
+        "one capture at a time"
+    );
+    let status = loop {
+        let s = session.snapshot(None).0.iq_capture.unwrap();
+        if s != "保存中" {
+            break s;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "capture did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.starts_with("保存しました"), "{status}");
+    let wave = IqWave::open(&output).unwrap();
+    assert_eq!(wave.sample_rate, 240_000.0);
+    assert_eq!(wave.samples, 240_000);
+    session.stop();
+    let _ = fs::remove_file(&input);
+    let _ = fs::remove_file(&output);
+}

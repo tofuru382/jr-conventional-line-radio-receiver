@@ -119,6 +119,8 @@ pub struct Overview {
     /// IQ samples per second actually arriving (over the last few seconds;
     /// 0 until measured). Should match `sample_rate` for live inputs.
     pub input_rate: f64,
+    /// Diagnostic raw IQ capture state ("保存中", the saved path, or an error).
+    pub iq_capture: Option<String>,
 }
 struct Shared {
     state: String,
@@ -129,6 +131,9 @@ struct Shared {
     progress: f64,
     reconnection: (bool, u32, u64),
     input_rate: f64,
+    /// Diagnostic raw IQ capture: requested file and sample count.
+    iq_request: Option<(std::path::PathBuf, u64)>,
+    iq_status: Option<String>,
 }
 pub struct Session {
     stop: Arc<AtomicBool>,
@@ -269,6 +274,8 @@ impl Session {
             progress: 0.0,
             reconnection: (false, 0, 0),
             input_rate: 0.0,
+            iq_request: None,
+            iq_status: None,
         }));
         let channels: Vec<_> = config
             .channels
@@ -414,6 +421,7 @@ impl Session {
                 reconnect_failures: s.reconnection.1,
                 reconnects: s.reconnection.2,
                 input_rate: s.input_rate,
+                iq_capture: s.iq_status.clone(),
             },
             audio,
         )
@@ -463,6 +471,83 @@ impl Session {
     }
     pub fn stop_recording(&self) -> RecordingStatus {
         self.recorder.stop()
+    }
+    /// Saves the next `seconds` of raw IQ (16-bit stereo WAV, I left / Q
+    /// right) for diagnosis; the IQ WAV input can replay it.
+    pub fn capture_iq(&self, path: std::path::PathBuf, seconds: f64) -> Result<(), String> {
+        let mut s = self.shared.lock().unwrap();
+        if s.state != "receiving" {
+            return Err("受信中に保存してください。".into());
+        }
+        if s.iq_request.is_some() || s.iq_status.as_deref() == Some("保存中") {
+            return Err("IQ を保存中です。".into());
+        }
+        let samples = (s.rate * seconds.clamp(1.0, 60.0)).round() as u64;
+        s.iq_request = Some((path, samples));
+        s.iq_status = Some("保存中".into());
+        Ok(())
+    }
+}
+
+/// Raw IQ to a 16-bit stereo WAV (I left, Q right), header sized on finish.
+struct IqWriter {
+    file: std::io::BufWriter<std::fs::File>,
+    path: std::path::PathBuf,
+    remaining: u64,
+    written: u64,
+}
+impl IqWriter {
+    fn create(path: std::path::PathBuf, samples: u64, rate: f64) -> std::io::Result<Self> {
+        use std::io::Write;
+        let mut file = std::io::BufWriter::new(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?,
+        );
+        let rate = rate.round() as u32;
+        file.write_all(b"RIFF\0\0\0\0WAVEfmt ")?;
+        file.write_all(&16u32.to_le_bytes())?;
+        file.write_all(&1u16.to_le_bytes())?; // PCM
+        file.write_all(&2u16.to_le_bytes())?; // I, Q
+        file.write_all(&rate.to_le_bytes())?;
+        file.write_all(&(rate * 4).to_le_bytes())?;
+        file.write_all(&4u16.to_le_bytes())?;
+        file.write_all(&16u16.to_le_bytes())?;
+        file.write_all(b"data\0\0\0\0")?;
+        Ok(Self {
+            file,
+            path,
+            remaining: samples,
+            written: 0,
+        })
+    }
+    /// Returns true when the requested length has been written.
+    fn write(&mut self, iq: &[Complex32]) -> std::io::Result<bool> {
+        use std::io::Write;
+        let n = (iq.len() as u64).min(self.remaining) as usize;
+        let mut bytes = Vec::with_capacity(n * 4);
+        for s in &iq[..n] {
+            for v in [s.real, s.imaginary] {
+                let x = (v * 32767.0).round().clamp(-32768.0, 32767.0) as i16;
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        self.file.write_all(&bytes)?;
+        self.remaining -= n as u64;
+        self.written += n as u64;
+        Ok(self.remaining == 0)
+    }
+    fn finish(mut self) -> std::io::Result<std::path::PathBuf> {
+        use std::io::{Seek, SeekFrom, Write};
+        let data = (self.written * 4) as u32;
+        self.file.seek(SeekFrom::Start(4))?;
+        self.file.write_all(&(36 + data).to_le_bytes())?;
+        self.file.seek(SeekFrom::Start(40))?;
+        self.file.write_all(&data.to_le_bytes())?;
+        self.file.flush()?;
+        self.file.get_ref().sync_all()?;
+        Ok(self.path)
     }
 }
 impl Drop for Session {
@@ -629,6 +714,7 @@ fn run(
     let mut samples = 0u64;
     let start = Instant::now();
     let mut window = (Instant::now(), 0u64);
+    let mut iq_capture: Option<IqWriter> = None;
     let mut buf = vec![Complex32::default(); (rate * 0.04).round().clamp(384.0, 65536.0) as usize];
     let result = (|| -> Result<(), String> {
         while !stop.load(Ordering::Relaxed) {
@@ -647,6 +733,29 @@ fn run(
                     continue;
                 }
                 Some(Read::Samples(n)) => {
+                    if iq_capture.is_none() {
+                        let request = shared.lock().unwrap().iq_request.take();
+                        if let Some((path, count)) = request {
+                            match IqWriter::create(path, count, rate) {
+                                Ok(w) => iq_capture = Some(w),
+                                Err(e) => {
+                                    shared.lock().unwrap().iq_status =
+                                        Some(format!("IQ を保存できません：{e}"))
+                                }
+                            }
+                        }
+                    }
+                    if let Some(w) = iq_capture.as_mut() {
+                        let done = w.write(&buf[..n]);
+                        if !matches!(done, Ok(false)) {
+                            let w = iq_capture.take().unwrap();
+                            let status = done.and_then(|_| w.finish()).map_or_else(
+                                |e| format!("IQ を保存できません：{e}"),
+                                |p| format!("保存しました：{}", p.display()),
+                            );
+                            shared.lock().unwrap().iq_status = Some(status);
+                        }
+                    }
                     samples += n as u64;
                     window.1 += n as u64;
                     let elapsed = window.0.elapsed();
@@ -894,6 +1003,8 @@ mod tests {
                 progress: 0.0,
                 reconnection: (false, 0, 0),
                 input_rate: 0.0,
+                iq_request: None,
+                iq_status: None,
             })),
             channels: configs
                 .iter()
