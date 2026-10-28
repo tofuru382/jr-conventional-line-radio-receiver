@@ -29,8 +29,12 @@ object UsbDongle {
   private var asking = false
   private var receiverRegistered = false
 
-  /** Implemented in Rust (src-tauri/src/lib.rs, `usb_jni`). */
-  @JvmStatic external fun offerFd(fd: Int)
+  /**
+   * Implemented in Rust (src-tauri/src/lib.rs, `usb_jni`). [identity]: 1 =
+   * RTL-SDR Blog V4, 2 = another dongle, 0 = unknown. The V4 needs its own
+   * input switching at 350 MHz, and Android already read the USB strings.
+   */
+  @JvmStatic external fun offerFd(fd: Int, identity: Int)
 
   @JvmStatic external fun wantsDevice(): Boolean
 
@@ -76,8 +80,21 @@ object UsbDongle {
     val opened = manager(context).openDevice(device) ?: return false
     connection?.close()
     connection = opened
+    val identity =
+      try {
+        val manufacturer = device.manufacturerName
+        val product = device.productName
+        Log.i(TAG, "dongle: $manufacturer / $product")
+        when {
+          manufacturer == null && product == null -> 0
+          manufacturer == "RTLSDRBlog" && product == "Blog V4" -> 1
+          else -> 2
+        }
+      } catch (e: SecurityException) {
+        0
+      }
     return try {
-      offerFd(opened.fileDescriptor)
+      offerFd(opened.fileDescriptor, identity)
       true
     } catch (e: UnsatisfiedLinkError) {
       Log.w(TAG, "driver library not loaded", e)

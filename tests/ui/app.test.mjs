@@ -639,10 +639,13 @@ test("the measured input rate is shown and flagged when it differs from the sett
   await app.click("start");
   app.setSnapshot({ status: { ...status(), input_rate: 239990.4 }, audio: [] });
   await app.poll();
-  assert.match($("capture-info").textContent, /実測 239,990 S\/s$/);
+  assert.match($("capture-info").textContent, /実測 239,990 S\/s · 入力 -10\.0 dBFS$/);
   app.setSnapshot({ status: { ...status(), input_rate: 514285 }, audio: [] });
   await app.poll();
-  assert.match($("capture-info").textContent, /実測 514,285 S\/s（設定と違います）$/);
+  assert.match($("capture-info").textContent, /実測 514,285 S\/s（設定と違います） · 入力 -10\.0 dBFS$/);
+  app.setSnapshot({ status: { ...status(), input_rate: 240000, source_info: "R828D · RTL-SDR Blog V4" }, audio: [] });
+  await app.poll();
+  assert.match($("capture-info").textContent, /実測 240,000 S\/s · R828D · RTL-SDR Blog V4 · 入力/);
 });
 test("Android saves 10 s of raw IQ for diagnosis while receiving", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });

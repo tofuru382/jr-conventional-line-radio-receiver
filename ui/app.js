@@ -1844,6 +1844,12 @@ $("pause-messages").addEventListener("click", () => {
         .messages ?? [],
     );
 });
+// Wideband input level (same for every channel of the capture): very low
+// means hardly any signal reaches the dongle's output.
+function inputLevel(s) {
+  const level = s.channels?.find((c) => c.status.iq_samples)?.status.input_dbfs;
+  return Number.isFinite(level) ? ` · 入力 ${level.toFixed(1)} dBFS` : "";
+}
 // Samples per second actually arriving; far from the setting means the
 // dongle is not running at the requested rate (or input is being lost).
 function measuredRate(s) {
@@ -2044,7 +2050,7 @@ async function poll() {
         $("state").classList.toggle("active", s.running);
         if (s.error) fail(s.error);
         $("capture-info").textContent = s.sample_rate
-          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}${measuredRate(s)}`
+          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}${measuredRate(s)}${s.source_info ? ` · ${s.source_info}` : ""}${inputLevel(s)}`
           : s.running
             ? "接続を準備しています"
             : "未接続 · 受信設定と接続先を確認してください";

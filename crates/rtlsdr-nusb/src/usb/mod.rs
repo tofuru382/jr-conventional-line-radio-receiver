@@ -84,20 +84,25 @@ impl NusbTransport {
     /// descriptor of an Android `UsbDeviceConnection` (apps cannot enumerate
     /// or open USB devices themselves there).
     #[cfg(any(target_os = "linux", target_os = "android"))]
+    /// `manufacturer`/`product` come from the OS when it already read them
+    /// (Android's UsbDevice); reading string descriptors over a wrapped
+    /// descriptor is not reliable everywhere, and they decide V4 handling.
     pub(crate) fn open_fd(
         fd: std::os::fd::OwnedFd,
+        manufacturer: Option<String>,
+        product: Option<String>,
     ) -> impl MaybeFuture<Output = Result<(Self, crate::DeviceDescriptor)>> {
         nusb::Device::from_fd(fd)
             .map_err(|e| Error::from(e).at("opening USB device from a file descriptor"))
-            .and_then(|device| {
+            .and_then(move |device| {
                 let d = device.device_descriptor();
                 let descriptor = crate::DeviceDescriptor {
                     index: 0,
                     vid: d.vendor_id(),
                     pid: d.product_id(),
                     serial: None,
-                    manufacturer: None,
-                    product: None,
+                    manufacturer,
+                    product,
                 };
                 Self::from_device(device, descriptor)
             })

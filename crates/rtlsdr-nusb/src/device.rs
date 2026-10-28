@@ -238,16 +238,29 @@ impl<M: SampleMode> DeviceBuilder<M> {
     /// after a `dup`). Probes and configures it like [`DeviceBuilder::open`].
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn open_fd(self, fd: std::os::fd::OwnedFd) -> impl MaybeFuture<Output = Result<Device<M>>> {
+        self.open_fd_with_strings(fd, None, None)
+    }
+    /// [`DeviceBuilder::open_fd`] with the USB manufacturer and product strings
+    /// the OS already knows (they identify an RTL-SDR Blog V4).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn open_fd_with_strings(
+        self,
+        fd: std::os::fd::OwnedFd,
+        manufacturer: Option<String>,
+        product: Option<String>,
+    ) -> impl MaybeFuture<Output = Result<Device<M>>> {
         ready(self.config.build()).and_then(move |config| {
-            NusbTransport::open_fd(fd).and_then(move |(control, descriptor)| {
-                Session::initialize(control, descriptor, config.settings.clone()).map_ok(
-                    move |(session, applied)| Device {
-                        session,
-                        config,
-                        applied,
-                    },
-                )
-            })
+            NusbTransport::open_fd(fd, manufacturer, product).and_then(
+                move |(control, descriptor)| {
+                    Session::initialize(control, descriptor, config.settings.clone()).map_ok(
+                        move |(session, applied)| Device {
+                            session,
+                            config,
+                            applied,
+                        },
+                    )
+                },
+            )
         })
     }
     /// Request WebUSB permission from a browser user gesture. Opening afterwards

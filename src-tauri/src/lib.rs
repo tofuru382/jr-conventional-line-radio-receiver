@@ -210,12 +210,15 @@ fn set_native_monitor(
 mod usb_jni {
     use std::ffi::c_void;
     #[no_mangle]
+    /// `identity`: 1 = RTL-SDR Blog V4, 2 = another dongle, 0 = unknown
+    /// (from Android's UsbDevice manufacturer/product names).
     pub extern "system" fn Java_io_jrradio_receiver_UsbDongle_offerFd(
         _env: *mut c_void,
         _class: *mut c_void,
         fd: i32,
+        identity: i32,
     ) {
-        receiver_core::usb::offer_fd(fd);
+        receiver_core::usb::offer_fd(fd, receiver_core::usb::Identity::from_code(identity));
     }
     #[no_mangle]
     pub extern "system" fn Java_io_jrradio_receiver_UsbDongle_wantsDevice(

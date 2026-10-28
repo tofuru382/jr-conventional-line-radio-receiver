@@ -121,6 +121,9 @@ pub struct Overview {
     pub input_rate: f64,
     /// Diagnostic raw IQ capture state ("保存中", the saved path, or an error).
     pub iq_capture: Option<String>,
+    /// What the input reports about the receiver (built-in driver: tuner and
+    /// RTL-SDR Blog V4 handling).
+    pub source_info: Option<String>,
 }
 struct Shared {
     state: String,
@@ -134,6 +137,7 @@ struct Shared {
     /// Diagnostic raw IQ capture: requested file and sample count.
     iq_request: Option<(std::path::PathBuf, u64)>,
     iq_status: Option<String>,
+    source_info: Option<String>,
 }
 pub struct Session {
     stop: Arc<AtomicBool>,
@@ -216,6 +220,15 @@ impl Source {
             }
         }
     }
+    fn info(&self) -> Option<String> {
+        match self {
+            #[cfg(feature = "usb")]
+            Self::Usb(s) => Some(s.info.clone()),
+            #[cfg(test)]
+            Self::Gated { source, .. } => source.info(),
+            _ => None,
+        }
+    }
     /// RTL-TCP reconnection state: (reconnecting, failed attempts, reconnects).
     fn reconnection(&self) -> (bool, u32, u64) {
         match self {
@@ -276,6 +289,7 @@ impl Session {
             input_rate: 0.0,
             iq_request: None,
             iq_status: None,
+            source_info: None,
         }));
         let channels: Vec<_> = config
             .channels
@@ -422,6 +436,7 @@ impl Session {
                 reconnects: s.reconnection.2,
                 input_rate: s.input_rate,
                 iq_capture: s.iq_status.clone(),
+                source_info: s.source_info.clone(),
             },
             audio,
         )
@@ -582,6 +597,7 @@ fn run(
         )?;
     }
     let (mut source, rate, center) = open_source(&config.input, stop)?;
+    shared.lock().unwrap().source_info = source.info();
     validate_channels(&config.channels, rate, center)?;
     let total = source.samples();
     // Construct every pipeline before starting threads: no partial receiver on invalid input.
@@ -721,7 +737,9 @@ fn run(
             let read = source.read(&mut buf, stop)?;
             let reconnection = source.reconnection();
             if shared.lock().unwrap().reconnection != reconnection {
-                shared.lock().unwrap().reconnection = reconnection;
+                let mut s = shared.lock().unwrap();
+                s.reconnection = reconnection;
+                s.source_info = source.info();
             }
             match read {
                 None => break,
@@ -1005,6 +1023,7 @@ mod tests {
                 input_rate: 0.0,
                 iq_request: None,
                 iq_status: None,
+                source_info: None,
             })),
             channels: configs
                 .iter()

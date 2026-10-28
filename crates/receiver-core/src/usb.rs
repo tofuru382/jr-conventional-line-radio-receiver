@@ -62,28 +62,48 @@ impl Config {
     }
 }
 
+/// What the Java side knows about the dongle besides its descriptor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Identity {
+    /// Let the driver read the USB strings itself.
+    #[default]
+    Unknown,
+    /// Android reported manufacturer "RTLSDRBlog", product "Blog V4".
+    BlogV4,
+    /// Android read the strings and they are not a Blog V4.
+    Other,
+}
+impl Identity {
+    pub fn from_code(code: i32) -> Self {
+        match code {
+            1 => Self::BlogV4,
+            2 => Self::Other,
+            _ => Self::Unknown,
+        }
+    }
+}
 /// The descriptor most recently handed over by the Java side.
-static OFFERED: Mutex<Option<OwnedFd>> = Mutex::new(None);
+static OFFERED: Mutex<Option<(OwnedFd, Identity)>> = Mutex::new(None);
 /// A session is waiting for a dongle.
 static WANTED: AtomicBool = AtomicBool::new(false);
 
 /// Hands over an opened USB device. The descriptor is duplicated, so the
 /// caller keeps (and may later close) its own.
-pub fn offer_fd(fd: i32) {
+pub fn offer_fd(fd: i32, identity: Identity) {
     if fd < 0 {
         return;
     }
     // SAFETY: the caller passes a descriptor that is open for this call.
     let owned = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned();
     if let Ok(owned) = owned {
-        *OFFERED.lock().unwrap() = Some(owned);
+        *OFFERED.lock().unwrap() = Some((owned, identity));
     }
 }
 /// Whether a session is waiting for [`offer_fd`].
 pub fn wants_device() -> bool {
     WANTED.load(Ordering::Relaxed)
 }
-fn take_offered() -> Option<OwnedFd> {
+fn take_offered() -> Option<(OwnedFd, Identity)> {
     OFFERED.lock().unwrap().take()
 }
 
@@ -95,11 +115,17 @@ const STALL: Duration = Duration::from_secs(5);
 
 /// Opening from a descriptor needs Linux usbfs (Android is Linux).
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn open_device(_config: &Config, _fd: OwnedFd) -> Result<(Device, RxStream), String> {
+fn open_device(
+    _config: &Config,
+    (_fd, _identity): (OwnedFd, Identity),
+) -> Result<(Device, RxStream), String> {
     Err("USB: 内蔵ドライバーは Android 版でのみ使えます".into())
 }
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn open_device(config: &Config, fd: OwnedFd) -> Result<(Device, RxStream), String> {
+fn open_device(
+    config: &Config,
+    (fd, identity): (OwnedFd, Identity),
+) -> Result<(Device, RxStream), String> {
     let gain = config.gain_db.map_or(rtlsdr_nusb::GainConfig::Auto, |g| {
         rtlsdr_nusb::GainConfig::Manual(g as f32)
     });
@@ -107,8 +133,14 @@ fn open_device(config: &Config, fd: OwnedFd) -> Result<(Device, RxStream), Strin
         .frequency_hz(config.center_hz.into())
         .sample_rate_hz(config.sample_rate)
         .gain(gain)
-        .correction_ppm(config.ppm)
-        .open_fd(fd)
+        .correction_ppm(config.ppm);
+    let (manufacturer, product) = match identity {
+        Identity::BlogV4 => (Some("RTLSDRBlog".into()), Some("Blog V4".into())),
+        Identity::Other => (Some(String::new()), Some(String::new())),
+        Identity::Unknown => (None, None),
+    };
+    let device = device
+        .open_fd_with_strings(fd, manufacturer, product)
         .wait()
         .map_err(|e| format!("USB: ドングルを初期化できません ({e})"))?;
     let mut rx = device
@@ -120,8 +152,27 @@ fn open_device(config: &Config, fd: OwnedFd) -> Result<(Device, RxStream), Strin
     Ok((device, rx))
 }
 
+/// Tuner and V4 handling of an opened dongle, for the app's status line.
+fn describe(device: &Device) -> String {
+    let info = device.info();
+    let tuner = match info.tuner {
+        rtlsdr_nusb::TunerKind::R820T => "R820T",
+        rtlsdr_nusb::TunerKind::R828D => "R828D",
+        _ => "不明なチューナー",
+    };
+    if info.rtl_sdr_blog_v4 {
+        format!("{tuner} · RTL-SDR Blog V4")
+    } else if info.tuner == rtlsdr_nusb::TunerKind::R828D {
+        format!("{tuner} · V4 として認識されていません")
+    } else {
+        tuner.into()
+    }
+}
+
 pub struct Usb {
     config: Config,
+    /// Tuner and V4 handling, e.g. "R828D · RTL-SDR Blog V4".
+    pub info: String,
     /// Kept for the stream's lifetime (shut down on drop).
     device: Option<Device>,
     rx: Option<RxStream>,
@@ -161,6 +212,7 @@ impl Usb {
         let (device, rx) = open_device(config, fd)?;
         Ok(Self {
             config: config.clone(),
+            info: describe(&device),
             device: Some(device),
             rx: Some(rx),
             scratch: Vec::new(),
@@ -237,6 +289,7 @@ impl Usb {
             Some(fd) => match open_device(&self.config, fd) {
                 Ok((device, rx)) => {
                     WANTED.store(false, Ordering::Relaxed);
+                    self.info = describe(&device);
                     self.device = Some(device);
                     self.rx = Some(rx);
                     self.dropped = 0;
@@ -323,13 +376,14 @@ mod tests {
     fn offered_descriptors_are_duplicated_and_taken_once() {
         let file = std::fs::File::open("/dev/null").unwrap();
         use std::os::fd::AsRawFd;
-        offer_fd(file.as_raw_fd());
+        offer_fd(file.as_raw_fd(), Identity::BlogV4);
         drop(file);
         // The duplicate stays valid after the caller closed its own.
-        let fd = take_offered().unwrap();
+        let (fd, identity) = take_offered().unwrap();
+        assert_eq!(identity, Identity::BlogV4);
         assert!(fd.try_clone().is_ok());
         assert!(take_offered().is_none());
-        offer_fd(-1);
+        offer_fd(-1, Identity::Unknown);
         assert!(take_offered().is_none());
     }
 }
