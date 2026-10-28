@@ -5,7 +5,9 @@ use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 use std::time::Duration;
 
 pub(crate) const RX_ENDPOINT: u8 = 0x81;
-pub(crate) const TRANSFER_COUNT: usize = 8;
+// JR-CLRR: 64 smaller transfers in flight (was 8 × 256 KiB, the same 2 MiB);
+// see rx/queue.rs.
+pub(crate) const TRANSFER_COUNT: usize = 64;
 pub(crate) fn timeout() -> Duration {
     Duration::from_millis(500)
 }

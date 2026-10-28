@@ -570,6 +570,22 @@ impl Drop for Session {
         self.stop();
     }
 }
+/// IQ samples per block handed to the channel workers (40 ms).
+fn block_samples(rate: f64) -> usize {
+    (rate * 0.04).round().clamp(384.0, 65536.0) as usize
+}
+/// Blocks each channel worker may have queued. TCP delivers bursts at network
+/// packet boundaries, and USB a whole bulk transfer at once; at 240 kS/s 32
+/// blocks hold 1.28 seconds, still bounded and with explicit loss/reset on
+/// overrun. An overrun resets the channel's synchronisation, so a queue
+/// shorter than one burst would never synchronise.
+fn queue_capacity(input: &Input) -> usize {
+    if matches!(input, Input::RtlTcp { .. } | Input::Usb { .. }) {
+        32
+    } else {
+        8
+    }
+}
 fn run(
     config: Config,
     stop: &Arc<AtomicBool>,
@@ -601,13 +617,7 @@ fn run(
     validate_channels(&config.channels, rate, center)?;
     let total = source.samples();
     // Construct every pipeline before starting threads: no partial receiver on invalid input.
-    // TCP delivers bursts at network packet boundaries. At 240 kS/s this holds
-    // at most 1.28 seconds, still bounded and with explicit loss/reset on overrun.
-    let queue_capacity = if matches!(config.input, Input::RtlTcp { .. }) {
-        32
-    } else {
-        8
-    };
+    let queue_capacity = queue_capacity(&config.input);
     let pipelines = config
         .channels
         .into_iter()
@@ -731,7 +741,7 @@ fn run(
     let start = Instant::now();
     let mut window = (Instant::now(), 0u64);
     let mut iq_capture: Option<IqWriter> = None;
-    let mut buf = vec![Complex32::default(); (rate * 0.04).round().clamp(384.0, 65536.0) as usize];
+    let mut buf = vec![Complex32::default(); block_samples(rate)];
     let result = (|| -> Result<(), String> {
         while !stop.load(Ordering::Relaxed) {
             let read = source.read(&mut buf, stop)?;
@@ -831,6 +841,25 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every USB transfer arrives at once; a channel queue that cannot hold
+    /// it drops blocks on each transfer and never synchronises.
+    #[cfg(feature = "usb")]
+    #[test]
+    fn usb_queue_holds_two_transfers() {
+        let input = Input::Usb {
+            radio: UsbRadio {
+                sample_rate: 240_000,
+                center_hz: 352_603_125,
+                gain_db: None,
+                ppm: 0,
+                reconnect_seconds: 60,
+            },
+        };
+        let held = queue_capacity(&input) * block_samples(240_000.0);
+        assert!(held >= 2 * rtlsdr_nusb::MAX_F32_IQ_SAMPLES_PER_TRANSFER);
+    }
+
     mod recording_lifecycle {
         use super::*;
         use std::{

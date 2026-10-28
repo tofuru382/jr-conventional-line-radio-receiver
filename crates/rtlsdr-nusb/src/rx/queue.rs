@@ -11,7 +11,11 @@ use std::task::{Context, Poll};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
-pub(crate) const DEFAULT_BUFFER_SIZE: usize = 262_144;
+// JR-CLRR: 32 KiB (was 256 KiB). At 240 kS/s a 256 KiB transfer is 0.55 s of
+// IQ arriving at once, which overran the receiver's per-channel queues and
+// forced a resynchronisation on every transfer. 32 KiB is 68 ms; with 64
+// transfers in flight the stream still buffers 2.2 s against stalls.
+pub(crate) const DEFAULT_BUFFER_SIZE: usize = 32_768;
 /// Maximum number of unpacked complex `F32Iq` samples produced by one USB transfer.
 ///
 /// Short USB transfers may contain fewer samples.

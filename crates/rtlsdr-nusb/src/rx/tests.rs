@@ -166,7 +166,10 @@ fn restart_reuses_queue_and_discards_every_old_submission() {
     rx.start().wait().unwrap();
     rx.next_block(None).wait().unwrap().unwrap();
     assert_eq!(control.state.bulk_in_count.load(Ordering::SeqCst), 1);
-    assert_eq!(rx.current_stats().buffers_discarded_on_restart, 8);
+    assert_eq!(
+        rx.current_stats().buffers_discarded_on_restart,
+        crate::protocol::TRANSFER_COUNT as u64
+    );
 }
 
 #[test]
