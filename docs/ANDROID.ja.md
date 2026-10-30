@@ -16,8 +16,8 @@ USB ドングルはアプリ内蔵のドライバーで直接動かします（�
    **Artifacts** の `jr-radio-receiver-android-arm64` をダウンロードして展開します。
 2. APK をスマホに送り、「提供元不明のアプリ」のインストールを許可して開きます。
 
-リポジトリに署名鍵のシークレット（後述）がない場合、ビルドごとに使い捨ての鍵で署名されます。
-その場合、新しいビルドを入れる前に古いアプリをアンインストールしてください（設定も消えます）。
+リポジトリに署名鍵のシークレット（後述）があれば、新しいビルドはアンインストールせずに上書きで更新できます。
+ない場合はビルドごとに使い捨ての鍵で署名されるため、新しいビルドを入れる前に古いアプリをアンインストールしてください（設定も消えます）。
 
 ## 使い方
 
@@ -130,18 +130,25 @@ v1.3.0・v1.4.0 の復号器をそのまま使っています（`crates/jr-voice
 
 ## 署名鍵を固定する（任意）
 
-同じ鍵で署名すると、アンインストールせずに上書き更新できます。PC で鍵を作り、
+同じ鍵で署名すると、アンインストールせずに上書き更新できます（設定・アプリ専用フォルダーの録音も残ります）。
+ビルドごとに versionCode を上げているので、新しい APK はそのまま「アップデート」としてインストールされます。
+
+鍵ファイル（PKCS12、別名・パスワードはどちらも `jrradio`）を作り、base64 にしてリポジトリの
+Settings → Secrets and variables → Actions → **New repository secret** に登録します。
 
 ```
-keytool -genkeypair -keystore release.jks -alias jrradio -keyalg RSA -keysize 2048 -validity 10000
-base64 -w0 release.jks
+keytool -genkeypair -keystore release.p12 -storetype PKCS12 -alias jrradio -keyalg RSA -keysize 3072 \
+  -validity 18250 -storepass jrradio -keypass jrradio -dname "CN=JR-CLRR For Android"
+base64 -w0 release.p12   # macOS は base64 -i release.p12
 ```
-
-リポジトリの Settings → Secrets and variables → Actions に次を登録します。
 
 | 名前 | 値 |
 | --- | --- |
-| `ANDROID_KEYSTORE_BASE64` | 上の base64 出力 |
-| `ANDROID_KEYSTORE_PASSWORD` | キーストアのパスワード |
-| `ANDROID_KEY_ALIAS` | `jrradio` |
-| `ANDROID_KEY_PASSWORD` | 鍵のパスワード（キーストアと同じなら省略可） |
+| `ANDROID_KEYSTORE_BASE64` | 上の base64 出力（必須。鍵ファイル自体が秘密なので、これだけで足ります） |
+| `ANDROID_KEYSTORE_PASSWORD` | 別のパスワードで作った場合のみ |
+| `ANDROID_KEY_ALIAS` | 別の別名で作った場合のみ |
+| `ANDROID_KEY_PASSWORD` | 鍵のパスワードがキーストアと違う場合のみ |
+
+登録後のビルドでは、実行結果の注釈に「Signing key: repository key」と証明書の SHA-256 が出ます。
+固定鍵に切り替える最初の 1 回だけは、使い捨て鍵で入れたアプリをアンインストールしてから入れてください。
+鍵ファイルはなくさないように保管してください（なくすと、次の鍵に切り替えるときにもう一度アンインストールが必要になります）。

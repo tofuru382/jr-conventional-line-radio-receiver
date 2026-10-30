@@ -60,7 +60,13 @@ jobs:
       - name: Build release APK (arm64)
         run: |
           set -o pipefail
-          npm run tauri -- android build --apk --target aarch64 --ci 2>&1 | tee "$RUNNER_TEMP/build.log"
+          # A higher versionCode on every build, so each APK installs as an
+          # update of the previous one (with the repository signing key).
+          version_code=$((10000000 + GITHUB_RUN_NUMBER))
+          echo "versionCode $version_code"
+          npm run tauri -- android build --apk --target aarch64 --ci \
+            --config "{\"bundle\":{\"android\":{\"versionCode\":$version_code}}}" \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
 
       # Surface the build errors as annotations, which stay readable from the
       # run summary and the checks API even where raw logs are not.
@@ -76,6 +82,8 @@ jobs:
       # Release builds are unsigned. Sign with a stable key when the repository
       # has one (secrets below), otherwise with a throwaway key: such APKs install
       # fine, but each new build must replace the app by uninstalling it first.
+      # Only ANDROID_KEYSTORE_BASE64 is required: the keystore file itself is the
+      # secret; alias and password default to "jrradio".
       - name: Sign APK
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -91,7 +99,7 @@ jobs:
           keystore="$RUNNER_TEMP/release.jks"
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
-            alias="$KEY_ALIAS"; store_pass="$KEYSTORE_PASSWORD"; key_pass="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+            alias="${KEY_ALIAS:-jrradio}"; store_pass="${KEYSTORE_PASSWORD:-jrradio}"; key_pass="${KEY_PASSWORD:-$store_pass}"
             echo "Signing with the repository key"
           else
             alias=ci; store_pass=android; key_pass=android
@@ -106,6 +114,12 @@ jobs:
             --ks-pass env:STORE_PASS --key-pass env:KEY_PASS \
             --out dist/jr-radio-receiver-android-arm64.apk "$RUNNER_TEMP/aligned.apk"
           "$tools/apksigner" verify dist/jr-radio-receiver-android-arm64.apk
+          # The certificate as an annotation: the same digest on every build
+          # means each APK installs over the previous one.
+          digest=$("$tools/apksigner" verify --print-certs dist/jr-radio-receiver-android-arm64.apk | grep -m1 'SHA-256 digest' | sed 's/.*: //' || true) 
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "::notice title=Signing key::repository key, SHA-256 $digest"
+          fi
           rm -f "$keystore"
 
       - uses: actions/upload-artifact@v7
