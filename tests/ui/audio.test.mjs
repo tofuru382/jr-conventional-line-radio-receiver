@@ -209,3 +209,22 @@ test("leveler raises quiet speech, keeps loud speech unclipped and never boosts 
   assert.deepEqual(quietLeveler.process(hiss), hiss);
   assert.equal(quietLeveler.gain, 1);
 });
+
+test("leveler brings a quiet transmission up within a quarter second", () => {
+  // 0.25 s in, the quiet speaker plays at least 12 dB louder.
+  const out = new Leveler().process(toneAt(0.02, 8000));
+  assert.ok(rms(out.slice(2000, 4000)) > rms(toneAt(0.02, 2000)) * 4);
+});
+
+test("leveler measures each transmission afresh after a pause", () => {
+  const l = new Leveler();
+  l.process(toneAt(0.02, 16000)); // quiet speaker: high gain
+  assert.ok(l.gain > 4);
+  l.process(Array(8000).fill(0)); // 1 s pause keeps it
+  assert.ok(l.gain > 4);
+  // A loud speaker next must not start with the quiet one's boost.
+  const loud = toneAt(0.5, 800);
+  const out = l.process(loud);
+  assert.ok(rms(out.slice(0, 160)) <= rms(loud.slice(0, 160)) * 1.05);
+  assert.ok(l.gain <= 1);
+});

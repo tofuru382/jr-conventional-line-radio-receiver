@@ -12,11 +12,18 @@ const MAX_BUFFER_SECONDS = 1.5;
 // Automatic level control for live playback (mirrors native_audio::leveler in
 // src-tauri): raises quiet speakers toward a common loudness, leaves loud ones
 // alone and never amplifies silence or hiss. Recordings are not affected.
-const BLOCK = 160;
-const TARGET = 0.125;
-const GATE = 0.003;
+// Radio transmissions are short and each may be another speaker, so speech
+// after a pause is re-measured quickly instead of inheriting the last gain.
+const BLOCK = 160; // 20 ms
+const TARGET = 0.125; // about −18 dBFS
+const GATE = 0.003; // about −50 dBFS: silence or hiss below
 const MAX_GAIN = 8;
 const MIN_GAIN = 0.5;
+const RISE = 0.5; // per block: follow louder speech, turn down
+const FALL = 0.15; // per block: follow quieter speech
+const UP = 0.25; // per voiced block: turn up
+const PAUSE_BLOCKS = 30; // 0.6 s without speech: next speech is new
+const FRESH_BLOCKS = 10; // re-measure it quickly for 200 ms
 function softLimit(x) {
   const y = x / 32767;
   const limited = y / Math.pow(1 + y ** 4, 0.25);
@@ -25,6 +32,8 @@ function softLimit(x) {
 export class Leveler {
   envelope = TARGET;
   gain = 1;
+  quiet = PAUSE_BLOCKS;
+  fresh = 0;
   /** Returns a new Int16-range array; the input is not modified. */
   process(pcm) {
     const out = Array.from(pcm);
@@ -33,20 +42,31 @@ export class Leveler {
       let sum = 0;
       for (let i = start; i < end; i++) sum += (out[i] / 32768) ** 2;
       const rms = Math.sqrt(sum / (end - start));
-      if (rms > GATE) {
-        const rate = rms > this.envelope ? 0.5 : 0.05;
+      const voiced = rms > GATE;
+      if (voiced) {
+        if (this.quiet >= PAUSE_BLOCKS) {
+          // New speech after a pause: start from unity gain (the change
+          // happens in silence) and measure the speaker afresh.
+          this.fresh = FRESH_BLOCKS;
+          this.gain = 1;
+          this.envelope = TARGET;
+        }
+        this.quiet = 0;
+        const rate = rms > this.envelope || this.fresh > 0 ? RISE : FALL;
         this.envelope += (rms - this.envelope) * rate;
-      }
+      } else this.quiet++;
       const wanted = Math.min(
         MAX_GAIN,
         Math.max(MIN_GAIN, TARGET / Math.max(this.envelope, GATE)),
       );
+      // Turn down fast, turn up quickly but only while someone speaks.
       const next =
         wanted < this.gain
-          ? this.gain + (wanted - this.gain) * 0.5
-          : rms > GATE
-            ? this.gain + (wanted - this.gain) * 0.1
+          ? this.gain + (wanted - this.gain) * RISE
+          : voiced
+            ? this.gain + (wanted - this.gain) * (this.fresh > 0 ? RISE : UP)
             : this.gain;
+      if (voiced && this.fresh > 0) this.fresh--;
       const step = (next - this.gain) / (end - start);
       for (let i = start; i < end; i++)
         out[i] = softLimit(out[i] * (this.gain + step * (i - start + 1)));

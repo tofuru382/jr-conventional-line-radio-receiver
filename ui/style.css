@@ -1563,52 +1563,7 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   line-clamp: 2;
   overflow: hidden;
 }
-.output-choice {
-  margin-block-start: 12px;
-}
 
-.iq-group {
-  display: grid;
-  gap: 6px;
-  justify-items: start;
-  padding: 0 24px 20px;
-}
-.iq-group p {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.log-group {
-  padding: 0 24px 20px;
-}
-.log-group summary {
-  cursor: pointer;
-}
-.log-group[open] {
-  display: grid;
-  gap: 8px;
-}
-.log-group p {
-  margin: 0;
-}
-.log-actions {
-  display: flex;
-  gap: 8px;
-}
-#connection-log {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 12em;
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--inset);
-  color: var(--text);
-  font-family: ui-monospace, monospace;
-  font-size: 0.75rem;
-  line-height: 1.4;
-  white-space: pre;
-  overflow: auto;
-}
 .decoder-choice {
   display: grid;
   gap: 6px;
@@ -1695,16 +1650,12 @@ body:has(#route-dialog[open]) { overflow: hidden; }
 .live-heading h2 {
   margin: 0;
 }
-.live-calls,
-.recent-list {
+.live-calls {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
   gap: 6px;
-}
-.recent-list {
-  margin-block-start: 8px;
 }
 .live-call {
   width: 100%;
@@ -1758,40 +1709,6 @@ body:has(#route-dialog[open]) { overflow: hidden; }
 .live-call .tag-play {
   color: var(--accent);
 }
-.recent-item {
-  width: 100%;
-  display: grid;
-  gap: 2px;
-  text-align: start;
-}
-.recent-when {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-.recent-saving {
-  padding: 0 5px;
-  border: 1px solid currentColor;
-  border-radius: 3px;
-  font-size: 0.6875rem;
-  color: #ff7b6b;
-}
-.recent-what {
-  font-size: var(--text-caption);
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#recent-player {
-  width: 100%;
-  margin-block-start: 8px;
-}
-#recent-now {
-  margin-block-start: 4px;
-}
 @media (prefers-reduced-motion: no-preference) {
   .live-call .lamp {
     animation: live-blink 1.2s steps(2, jump-none) infinite;
@@ -1801,4 +1718,200 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   50% {
     opacity: 0.35;
   }
+}
+
+/* View switch next to the logo (JR-CLRR builds). */
+.mode-switch {
+  display: inline-flex;
+  flex: none;
+  margin-inline-start: auto;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.mode-switch[hidden] {
+  display: none;
+}
+.mode-switch button {
+  border: 0;
+  border-radius: 0;
+  min-height: 36px;
+  padding: 6px 14px;
+  background: var(--control);
+}
+.mode-switch button + button {
+  border-inline-start: 1px solid var(--control-border);
+}
+.mode-switch button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 650;
+}
+.simple .brand {
+  flex: 1 1 auto;
+  align-self: stretch;
+}
+
+/* Top bar: one start/stop button, and saving on/off. */
+button.stop {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  font-weight: 650;
+}
+#save-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--selected);
+}
+#save-toggle.saving {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+/* Empty status and hint lines take no room. */
+:is(#selection-hint, #recording-summary, #data-status, #route-common-hint,
+  #driver-hint, #recordings-status, #route-effect, .field-hint):empty {
+  display: none;
+}
+
+/* Compact view: the essentials on one phone screen. */
+.quick {
+  margin-block-start: 10px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 10px;
+}
+.quick p {
+  margin: 0;
+}
+.quick-caption {
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
+.quick-frequency {
+  font-family: ui-monospace, monospace;
+  font-size: 1.625rem;
+  line-height: 1.15;
+  font-weight: 650;
+}
+.quick-frequency small {
+  font-size: var(--text-caption);
+  color: var(--muted);
+  font-weight: 400;
+}
+.quick-channel {
+  font-weight: 600;
+}
+.quick-lines {
+  font-size: var(--text-caption);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quick-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-block-start: 4px;
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
+.quick-sync::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.quick-sync.locked {
+  color: var(--accent);
+}
+.quick-sync.calling {
+  color: var(--success);
+}
+.quick-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+.quick-stats div {
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--inset);
+  border-radius: var(--radius-control);
+}
+.quick-stats dt {
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.quick-stats dd {
+  margin: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quick-stats dd.active {
+  color: var(--danger);
+}
+.quick-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  align-items: center;
+}
+.quick-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-caption);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.quick-volume input {
+  padding: 0;
+  min-height: 32px;
+  border: 0;
+  background: none;
+}
+.compact .overview,
+.compact #source-panel,
+.compact .recording,
+.compact #recordings-browser,
+.compact .workspace-navigation,
+.compact #route-feedback,
+.compact .workspace,
+.compact footer,
+.compact .topbar .eyebrow {
+  display: none;
+}
+.compact .topbar {
+  padding-block: 10px;
+  gap: 8px;
+}
+.compact .topbar h1 {
+  font-size: 1rem;
+}
+.compact .live-panel {
+  margin-block: 12px;
+  padding: 12px 16px;
+}
+.compact #live-calls {
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+/* Recordings: more on request. */
+.recordings-more {
+  display: block;
+  width: 100%;
+  margin-block-start: 10px;
+}
+.about-driver span {
+  display: block;
 }

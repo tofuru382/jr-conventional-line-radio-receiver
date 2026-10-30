@@ -222,7 +222,9 @@ impl Resampler {
 /// Automatic level control for live playback: quiet speakers (a driver far
 /// from the microphone) are raised toward a common loudness, loud ones are
 /// left alone, and silence or background hiss is never amplified. Mirrors
-/// `Leveler` in ui/audio.mjs (the Web Audio path).
+/// `Leveler` in ui/audio.mjs (the Web Audio path). Radio transmissions are
+/// short and each may be another speaker, so speech after a pause is measured
+/// afresh from unity gain instead of inheriting the last speaker's gain.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub mod leveler {
     /// Analysis block: 20 ms at 8 kHz.
@@ -234,16 +236,30 @@ pub mod leveler {
     /// At most +18 dB; loud speech may be lowered to half.
     const MAX_GAIN: f32 = 8.0;
     const MIN_GAIN: f32 = 0.5;
+    /// Per block: follow louder speech, and turn down.
+    const RISE: f32 = 0.5;
+    /// Per block: follow quieter speech.
+    const FALL: f32 = 0.15;
+    /// Per voiced block: turn up.
+    const UP: f32 = 0.25;
+    /// 0.6 s without speech: the next speech is a new transmission.
+    const PAUSE_BLOCKS: u32 = 30;
+    /// It is measured quickly for its first 200 ms.
+    const FRESH_BLOCKS: u32 = 10;
 
     pub struct Leveler {
         envelope: f32,
         gain: f32,
+        quiet: u32,
+        fresh: u32,
     }
     impl Default for Leveler {
         fn default() -> Self {
             Self {
                 envelope: TARGET,
                 gain: 1.0,
+                quiet: PAUSE_BLOCKS,
+                fresh: 0,
             }
         }
     }
@@ -259,20 +275,37 @@ pub mod leveler {
                     .sum::<f32>()
                     / block.len() as f32)
                     .sqrt();
-                if rms > GATE {
-                    // Follow rises quickly, falls slowly (syllable gaps).
-                    let rate = if rms > self.envelope { 0.5 } else { 0.05 };
+                let voiced = rms > GATE;
+                if voiced {
+                    if self.quiet >= PAUSE_BLOCKS {
+                        // The gain changes in silence, so no click.
+                        self.fresh = FRESH_BLOCKS;
+                        self.gain = 1.0;
+                        self.envelope = TARGET;
+                    }
+                    self.quiet = 0;
+                    let rate = if rms > self.envelope || self.fresh > 0 {
+                        RISE
+                    } else {
+                        FALL
+                    };
                     self.envelope += (rms - self.envelope) * rate;
+                } else {
+                    self.quiet = self.quiet.saturating_add(1);
                 }
                 let wanted = (TARGET / self.envelope.max(GATE)).clamp(MIN_GAIN, MAX_GAIN);
-                // Turn down fast, turn up gently; never raise during silence.
+                // Turn down fast, turn up quickly but only while someone speaks.
                 let next = if wanted < self.gain {
-                    self.gain + (wanted - self.gain) * 0.5
-                } else if rms > GATE {
-                    self.gain + (wanted - self.gain) * 0.1
+                    self.gain + (wanted - self.gain) * RISE
+                } else if voiced {
+                    let up = if self.fresh > 0 { RISE } else { UP };
+                    self.gain + (wanted - self.gain) * up
                 } else {
                     self.gain
                 };
+                if voiced && self.fresh > 0 {
+                    self.fresh -= 1;
+                }
                 let step = (next - self.gain) / block.len() as f32;
                 for (i, s) in block.iter_mut().enumerate() {
                     let g = self.gain + step * (i + 1) as f32;
@@ -799,6 +832,26 @@ mod tests {
     }
 
     #[test]
+    fn leveler_raises_a_quiet_transmission_within_a_quarter_second() {
+        let mut quiet = tone_at(0.02, 8_000);
+        leveler::Leveler::default().process(&mut quiet);
+        assert!(rms(&quiet[2_000..4_000]) > rms(&tone_at(0.02, 2_000)) * 4.0);
+    }
+
+    #[test]
+    fn leveler_measures_each_transmission_afresh_after_a_pause() {
+        let mut l = leveler::Leveler::default();
+        l.process(&mut tone_at(0.02, 16_000));
+        assert!(l.gain() > 4.0);
+        l.process(&mut vec![0; 8_000]);
+        let loud = tone_at(0.5, 800);
+        let mut out = loud.clone();
+        l.process(&mut out);
+        assert!(rms(&out[..160]) <= rms(&loud[..160]) * 1.05);
+        assert!(l.gain() <= 1.0);
+    }
+
+    #[test]
     fn leveler_never_amplifies_silence_or_hiss() {
         let mut hiss = tone_at(0.002, 16_000);
         let before = hiss.clone();
@@ -811,7 +864,7 @@ mod tests {
         l.process(&mut tone_at(0.03, 8_000));
         let raised = l.gain();
         l.process(&mut vec![0; 8_000]);
-        assert_eq!(l.gain(), raised);
+        assert!((l.gain() - raised).abs() < raised * 0.01);
     }
 
     #[test]

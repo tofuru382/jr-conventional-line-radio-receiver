@@ -8,6 +8,7 @@ import { buildCatalog } from "../../ui/presets.mjs";
 import { AudioPlayer, Leveler } from "../../ui/audio.mjs";
 import { OperationMonitorView } from "../../ui/operation-monitor.mjs";
 import { RoutePicker } from "../../ui/route-picker.mjs";
+import { friendlyError } from "../../ui/errors.mjs";
 const html = await readFile(
   new URL("../../ui/index.html", import.meta.url),
   "utf8",
@@ -132,7 +133,7 @@ async function setup(
   let snapshot = { status: status(), audio: [] };
   let recording = { state: "idle", files: 0, pcm_samples: 0, error: null };
   let closeHandler;
-  w.testDependencies = { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker };
+  w.testDependencies = { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError };
   w.structuredClone = structuredClone;
   // jsdom has no native modal behavior. Exercise our handlers, not a focus trap
   // or Escape key implementation; those belong to the browser's dialog element.
@@ -268,7 +269,7 @@ async function setup(
     };
   };
   await w.eval(
-    `(async () => {const { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker } = window.testDependencies;\n${source}\n})()`,
+    `(async () => {const { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError } = window.testDependencies;\n${source}\n})()`,
   );
   const $ = (id) => w.document.getElementById(id);
   if (!catalogError)
@@ -389,7 +390,7 @@ test("Android hides SoapySDR and pickers, defaults to the built-in USB driver, a
   await app.change("input-kind", "wave");
   assert.equal($("driver-group").hidden, true);
 });
-test("Android plays audio natively and holds the background service while receiving", async (t) => {
+test("Android plays live audio through Web Audio and holds the background service while receiving", async (t) => {
   const app = await setup(t, {
     platformInfo: { android: true, soapy: false },
   });
@@ -401,21 +402,12 @@ test("Android plays audio natively and holds the background service while receiv
   assert.deepEqual(service, [true]);
   const snapshots = app.calls.filter((c) => c.command === "snapshot");
   assert.ok(snapshots.length > 0);
-  assert.ok(snapshots.every((c) => c.args.audio === false));
-  const monitor = () =>
-    app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args
-      .settings;
-  assert.equal(monitor().enabled, true);
-  assert.equal(monitor().automatic, true);
-  assert.equal(app.$("audio-state").textContent, "音声オン");
-  app.input("volume", "40");
-  assert.equal(monitor().volume, 0.4);
-  app.$("listen").checked = false;
-  app.$("listen").dispatchEvent(new app.w.Event("change"));
-  assert.equal(monitor().enabled, false);
-  await app.click("stop");
+  // The app's own player stays off: audio frames come with each snapshot.
+  assert.ok(snapshots.every((c) => !("audio" in c.args)));
+  assert.equal(app.calls.some((c) => c.command === "set_native_monitor"), false);
+  assert.equal(app.$("native-output"), null);
+  await app.click("start");
   assert.deepEqual(service, [true, false]);
-  assert.equal(monitor().enabled, false);
 });
 test("Android layout has the route picker but no search, only the detailed list, a top mute toggle and its own name", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -437,17 +429,12 @@ test("Android layout has the route picker but no search, only the detailed list,
   await app.poll();
   assert.equal(mute.getAttribute("aria-pressed"), "false");
   assert.equal(mute.textContent, "音声オン");
-  const monitor = () =>
-    app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args.settings;
-  assert.equal(monitor().enabled, true);
   mute.click();
   assert.equal($("listen").checked, false);
   assert.equal(mute.getAttribute("aria-pressed"), "true");
   assert.equal(mute.textContent, "ミュート中");
-  assert.equal(monitor().enabled, false);
   mute.click();
   assert.equal($("listen").checked, true);
-  assert.equal(monitor().enabled, true);
 });
 test("Android shows reconnection and restarts a driver that does not answer", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -479,7 +466,7 @@ test("a saving session without any call reports that nothing was saved", async (
   await app.click("record-start");
   await app.poll();
   assert.equal($("recording-state").textContent, "保存中");
-  assert.match($("recording-summary").textContent, /通話を受信したら保存を始めます/);
+  assert.equal($("recording-summary").textContent, "通話を待っています");
   app.setRecording({
     state: "completed", options: { audio: true, raw_frames: false, data_messages: false },
     files: 0, pcm_samples: 0, raw_frames: 0, data_messages: 0, error: null,
@@ -487,34 +474,17 @@ test("a saving session without any call reports that nothing was saved", async (
   });
   await app.poll();
   assert.equal($("recording-state").textContent, "通話なし");
-  assert.match($("recording-summary").textContent, /何も保存しませんでした/);
+  assert.equal($("recording-summary").textContent, "通話がなかったため保存しませんでした");
   assert.equal($("recording-output").hidden, true);
 });
-test("Android chooses the voice decoder, remembers it and sends it with the session", async (t) => {
+test("every session uses the v1.5 voice decoder, with no choice to make", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
-  const select = $("voice-decoder");
-  assert.equal(select.value, "v13");
-  assert.deepEqual([...select.options].map((o) => o.value), ["v13", "v14", "v15"]);
-  select.value = "v14";
-  select.dispatchEvent(new app.w.Event("change"));
-  assert.equal(app.w.localStorage.getItem("jr-clrr.voice-decoder"), "v14");
-  assert.match($("about-description").textContent, /v1\.4 の復号器/);
+  assert.equal($("voice-decoder"), null);
+  assert.match($("about-description").textContent, /v1\.5/);
   await app.click("start");
   const start = app.calls.find((c) => c.command === "start");
-  assert.equal(start.args.config.voice_decoder, "v14");
-  await app.poll();
-  assert.equal(select.disabled, true);
-});
-test("Android shows live playback health", async (t) => {
-  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
-  const { $ } = app;
-  assert.equal($("playback-health").hidden, true);
-  await app.click("start");
-  await app.poll();
-  await app.poll();
-  assert.equal($("playback-health").hidden, false);
-  assert.match($("playback-health").textContent, /再生の途切れ 2 回 · 再生の遅れ 1\.0 秒 · 出力 48,000 Hz/);
+  assert.equal(start.args.config.voice_decoder, "v15");
 });
 test("Android built-in driver asks for the dongle before starting", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -525,14 +495,14 @@ test("Android built-in driver asks for the dongle before starting", async (t) =>
   await app.click("start");
   assert.equal(asked.length, 1);
   assert.equal(app.calls.some((c) => c.command === "start"), false);
-  assert.match($("error").textContent, /ドングルが見つかりません。スマホに USB 機器が 1 台も/);
+  assert.equal($("error").textContent, "ドングルが見つかりません。挿し直して、OTG がオンか確認してください。");
   // Only a hub is visible, or the dongle is there but cannot be opened.
   answer = "other:1";
   await app.click("start");
-  assert.match($("error").textContent, /USB 機器は 1 台見えていますが、RTL-SDR ドングルではありません/);
+  assert.match($("error").textContent, /ハブとドングルの差し込み/);
   answer = "busy";
   await app.click("start");
-  assert.match($("error").textContent, /ドングルは見えていますが、開けませんでした/);
+  assert.match($("error").textContent, /ドングルを開けません/);
   assert.equal(app.calls.some((c) => c.command === "start"), false);
   answer = "asking";
   await app.click("start");
@@ -549,7 +519,8 @@ test("a failed session's error does not come back after switching input or start
   const refused = "RTL-TCP: 127.0.0.1:1234 に接続できません (Connection refused (os error 111))";
   app.setSnapshot({ status: { ...status(), running: false, state: "failed", error: refused }, audio: [] });
   await app.poll();
-  assert.match($("error").textContent, /Connection refused/);
+  // A short message, without the OS error code.
+  assert.equal($("error").textContent, "ドライバーに接続できません。ドライバーを起動してください。");
   assert.equal($("state").textContent, "受信エラー");
   // Switching to the built-in driver forgets the dead RTL-TCP session.
   await app.change("input-kind", "usb");
@@ -566,64 +537,34 @@ test("a failed session's error does not come back after switching input or start
   assert.match($("error").textContent, /ドングルが見つかりません/);
   assert.doesNotMatch($("error").textContent, /RTL-TCP/);
 });
-test("Android shows the receiver's and Android's connection notes in time order, ready to copy", async (t) => {
-  const at = (h, m, s) => new Date(2026, 9, 28, h, m, s).getTime();
-  const app = await setup(t, {
-    platformInfo: { android: true, soapy: false, simple: true, name: "JR-CLRR For Android", build: "abcdef0123" },
-    connectionLog: [
-      [at(16, 0, 1), "受信を開始します（USB 直結・22 波）"],
-      [at(16, 0, 3), "ドライバー: 接続が切れました"],
-    ],
-  });
-  const { $ } = app;
-  app.w.JrAndroid = {
-    setReceiving() {},
-    usbLog: () => `${at(16, 0, 2)}\tAndroid: USB 機器が外れました（0bda:2838）\n`,
-  };
-  assert.equal($("log-group").hidden, false);
-  const copied = [];
-  Object.defineProperty(app.w.navigator, "clipboard", {
-    value: { writeText: async (text) => copied.push(text) },
-  });
-  $("log-group").open = true;
-  await app.click("log-refresh");
-  const lines = $("connection-log").value.split("\n");
-  assert.match(lines[0], /JR-CLRR For Android ビルド abcdef0 · 入力 usb/);
-  assert.match(lines[1], /^16:00:01\.000 受信を開始します/);
-  assert.match(lines[2], /^16:00:02\.000 Android: USB 機器が外れました/);
-  assert.match(lines[3], /^16:00:03\.000 ドライバー: 接続が切れました/);
-  await app.click("log-copy");
-  assert.deepEqual(copied, [$("connection-log").value]);
-  assert.equal($("log-copy").textContent, "コピーしました");
-});
-test("desktop has no connection log", async (t) => {
-  const app = await setup(t);
-  assert.equal(app.$("log-group").hidden, true);
-});
 test("the version dialog names the build", async (t) => {
   const app = await setup(t, {
     platformInfo: { android: true, soapy: false, simple: true, name: "JR-CLRR For Android", build: "6ee67ce0123456789abcdef" },
   });
   assert.match(app.$("about-dialog").textContent, /ビルド 6ee67ce(?!0)/);
 });
-test("volume leveling is remembered and reaches both players", async (t) => {
+test("volume leveling is remembered and raises quiet live audio", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
+  // The checkbox and the wideband input figure no longer share an id.
+  assert.equal($("level").tagName, "DD");
+  assert.equal($("auto-level").type, "checkbox");
+  assert.equal($("auto-level").checked, false);
   $("listen").checked = true;
-  assert.equal($("level").checked, false);
   await app.click("start");
+  const id = status().selected_channel ?? presets[0].id;
+  const quiet = (index) => ({ channel: id, epoch: 0, index, pcm: Array(320).fill(300) });
+  app.setSnapshot({ status: { ...status(), selected_channel: id }, audio: [quiet(0), quiet(1)] });
   await app.poll();
-  $("level").checked = true;
-  $("level").dispatchEvent(new app.w.Event("change"));
+  assert.deepEqual(app.playback.slice(-1), [300 / 32768]);
+  // Turned on (here from the compact view): later frames play louder.
+  $("quick-level").checked = true;
+  $("quick-level").dispatchEvent(new app.w.Event("change"));
+  assert.equal($("auto-level").checked, true);
   assert.equal(app.w.localStorage.getItem("jr-clrr.level"), "on");
-  const monitor = app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args.settings;
-  assert.equal(monitor.level, true);
-  // Switching to Web Audio uses the same leveling.
-  const box = $("native-output");
-  box.checked = false;
-  box.dispatchEvent(new app.w.Event("change"));
+  app.setSnapshot({ status: { ...status(), selected_channel: id }, audio: [quiet(2), quiet(3)] });
   await app.poll();
-  await app.tick?.();
+  assert.ok(app.playback.at(-1) > (300 / 32768) * 2);
 });
 test("receive targets, the monitored channel and auto-select survive reloading the preset", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -647,37 +588,11 @@ test("receive targets, the monitored channel and auto-select survive reloading t
   assert.equal($("selected-frequency").textContent, chosen);
   assert.equal($("auto-select").checked, false);
 });
-test("main page shows calls in progress and the latest recordings, playable in place", async (t) => {
-  const root = "/sdcard/Download/JR-CLRR/Recordings";
-  const session = "recording-20261026T090000.000Z-001";
-  const recordings = [
-    {
-      name: session,
-      directory: `${root}/${session}`,
-      root,
-      incomplete: true,
-      files: Array.from({ length: 10 }, (_, i) => ({
-        name: `352606250Hz-D7_音声第2波-${String(i + 1).padStart(6, "0")}.wav`,
-        path: `${root}/${session}/${i}.wav`,
-        bytes: 44 + 16000 * (i + 1),
-        modified: Date.UTC(2026, 9, 26, 9, 0, i) / 1000,
-      })),
-    },
-  ];
-  const app = await setup(t, { platformInfo: { android: true, soapy: false }, recordings });
+test("main page shows calls in progress, with background saving and the one being heard", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
-  app.w.URL.createObjectURL = () => "blob:recent";
-  app.w.URL.revokeObjectURL = () => {};
-  assert.equal($("tab-radio"), null);
-  assert.equal($("radio-view"), null);
-  assert.equal($("live-calls-empty").textContent, "受信していません。");
-  await tick();
-  // The newest 8 recordings, newest first.
-  const items = () => [...$("recent-list").querySelectorAll(".recording-play")].map((b) => b.textContent);
-  assert.equal($("recent-block").hidden, false);
-  assert.equal(items().length, 8);
-  assert.match($("recent-list").querySelector(".recent-when").textContent, /^▶ 10\/26 18:00:09 · 10 秒保存中$/);
-  assert.match($("recent-list").querySelector(".recent-what").textContent, /^352\.60625 MHz · D7 音声第2波 · 山手線/);
+  assert.equal($("recent-list"), null);
+  assert.equal($("live-calls-empty").textContent, "受信していません");
   $("listen").checked = true;
   await app.click("start");
   const snapshot = status();
@@ -689,24 +604,13 @@ test("main page shows calls in progress and the latest recordings, playable in p
   assert.equal($("live-calls-empty").hidden, true);
   assert.match(calls()[0].textContent, /再生中/);
   assert.doesNotMatch($("live-calls").textContent, /REC/);
-  // Saving in the background marks every call, and a new file refreshes the list.
-  const listed = () => app.calls.filter((c) => c.command === "list_recordings").length;
-  const before = listed();
-  app.setRecording({ state: "recording", options: { audio: true, raw_frames: false, data_messages: false }, files: 1, pcm_samples: 8000, raw_frames: 0, data_messages: 0, error: null, directory: `${root}/${session}` });
+  app.setRecording({ state: "recording", options: { audio: true, raw_frames: false, data_messages: false }, files: 1, pcm_samples: 8000, raw_frames: 0, data_messages: 0, error: null, directory: "/sdcard/x" });
   await app.poll();
   assert.equal($("live-calls").querySelectorAll(".tag-rec").length, 2);
-  assert.ok(listed() > before);
   // Tapping a call listens to it (manual selection).
   calls()[1].click();
   assert.equal($("auto-select").checked, false);
   assert.match(calls()[1].textContent, /再生中/);
-  // A recording plays right here.
-  $("recent-list").querySelector(".recording-play").click();
-  await tick();
-  await tick();
-  assert.equal(app.calls.filter((c) => c.command === "read_recording").at(-1).args.path, `${root}/${session}/9.wav`);
-  assert.equal($("recent-player").hidden, false);
-  assert.match($("recent-now").textContent, /^再生中：/);
 });
 test("the measured input rate is shown and flagged when it differs from the setting", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -722,20 +626,10 @@ test("the measured input rate is shown and flagged when it differs from the sett
   await app.poll();
   assert.match($("capture-info").textContent, /実測 240,000 S\/s · R828D · RTL-SDR Blog V4 · 入力/);
 });
-test("Android saves 10 s of raw IQ for diagnosis while receiving", async (t) => {
+test("no diagnosis panels: IQ capture and the connection log are gone", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
-  const { $ } = app;
-  assert.equal($("iq-group").hidden, false);
-  assert.equal($("iq-capture").disabled, true);
-  await app.click("start");
-  await app.poll();
-  assert.equal($("iq-capture").disabled, false);
-  await app.click("iq-capture");
-  assert.equal(app.calls.filter((c) => c.command === "capture_iq").length, 1);
-  assert.match($("iq-status").textContent, /保存中.*iq-1-352603125Hz-240000\.wav/);
-  app.setSnapshot({ status: { ...status(), iq_capture: "保存しました：/sdcard/x.wav" }, audio: [] });
-  await app.poll();
-  assert.equal($("iq-status").textContent, "保存しました：/sdcard/x.wav");
+  for (const id of ["iq-group", "iq-capture", "log-group", "connection-log", "recent-block"])
+    assert.equal(app.$(id), null, id);
 });
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -760,8 +654,9 @@ test("Mac uses the simplified layout but keeps SoapySDR, pickers and Web Audio",
   assert.ok(root.classList.contains("simple"));
   assert.equal(root.classList.contains("android"), false);
   assert.equal(app.w.document.title, "JR-CLRR For Mac");
-  assert.match($("about-description").textContent, /Mac 版（音声の復号は v1\.5 の復号器）$/);
-  assert.equal($("voice-decoder").value, "v15");
+  assert.match($("about-description").textContent, /Mac 版（音声の復号は v1\.5）$/);
+  assert.equal($("voice-decoder"), null);
+  assert.match($("about-driver").textContent, /SoapySDR/);
   assert.equal($("route-open").hidden, false);
   assert.equal($("channel-search").closest("label").hidden, true);
   assert.equal($("channels-table").hidden, false);
@@ -777,34 +672,15 @@ test("Mac uses the simplified layout but keeps SoapySDR, pickers and Web Audio",
   assert.equal(app.calls.some((c) => c.command === "set_native_monitor"), false);
   assert.ok(app.calls.filter((c) => c.command === "snapshot").every((c) => !("audio" in c.args)));
 });
-test("Android can switch between its own player and Web Audio", async (t) => {
-  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
-  const { $ } = app;
-  $("listen").checked = true;
-  await app.click("start");
-  await app.poll();
-  const box = $("native-output");
-  assert.equal(box.checked, true);
-  box.checked = false;
-  box.dispatchEvent(new app.w.Event("change"));
-  await app.poll();
-  const last = app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args.settings;
-  assert.equal(last.inactive, true);
-  assert.equal(last.enabled, false);
-  assert.ok(!("audio" in app.calls.filter((c) => c.command === "snapshot").at(-1).args));
-  box.checked = true;
-  box.dispatchEvent(new app.w.Event("change"));
-  await app.poll();
-  const back = app.calls.filter((c) => c.command === "set_native_monitor").at(-1).args.settings;
-  assert.equal(back.enabled, true);
-  assert.equal(back.inactive, undefined);
-  assert.equal(app.calls.filter((c) => c.command === "snapshot").at(-1).args.audio, false);
-});
-test("Android plays a test sound through its own player without receiving", async (t) => {
+test("Android plays a test sound through Web Audio without receiving", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   assert.ok(app.$("test-sound"));
+  assert.equal(app.$("test-sound-note").hidden, true);
+  const before = app.audioSources.length;
   await app.click("test-sound");
-  assert.equal(app.calls.filter((c) => c.command === "play_test_sound").length, 1);
+  await tick();
+  assert.equal(app.calls.some((c) => c.command === "play_test_sound"), false);
+  assert.equal(app.audioSources.length, before + 1);
   assert.equal(app.calls.some((c) => c.command === "start"), false);
 });
 test("Android lists saved recordings newest first, by channel or by session, and plays one", async (t) => {
@@ -893,13 +769,13 @@ test("desktop keeps SoapySDR and pickers and never shows the driver button", asy
       .filter((c) => c.command === "snapshot")
       .every((c) => !("audio" in c.args)),
   );
-  await app.click("stop");
+  await app.click("start");
   assert.ok($("input-kind").querySelector('option[value="sdr"]'));
   assert.equal($("driver-group").hidden, true);
   assert.equal($("mute-toggle"), null);
   assert.equal($("test-sound"), null);
   assert.equal($("voice-decoder"), null);
-  assert.ok(!("voice_decoder" in app.calls.find((c) => c.command === "start").args.config));
+  assert.equal(app.calls.find((c) => c.command === "start").args.config.voice_decoder, "v15");
   assert.equal($("route-open").hidden, false);
   for (const id of ["browse", "record-browse", "preset-browse"])
     assert.equal($(id).hidden, false, id);
@@ -1045,7 +921,7 @@ test("saving remains enabled across reception stops and restart, and an explicit
   await first.poll();
   await first.click("record-start");
   assert.equal(preferences.value.output.enabled, true);
-  await first.click("stop");
+  await first.click("start");
   assert.equal(preferences.value.output.enabled, true);
   assert.equal(first.$("record-stop").textContent, "保存を無効にする");
 
@@ -1078,7 +954,7 @@ test("saving remains enabled across reception stops and restart, and an explicit
   assert.equal(second.$("recording-state").textContent, "保存中");
   await second.click("record-stop");
   assert.equal(preferences.value.output.enabled, false);
-  assert.equal(second.$("stop").disabled, false);
+  assert.equal(second.$("start").textContent, "■ 受信を停止");
   const third = await setup(t, { preferences, configureConnection: false });
   await third.click("start");
   await third.poll();
@@ -1137,7 +1013,7 @@ test("automatic saving errors do not loop or stop reception, and EOF retains the
     1,
   );
   assert.equal(second.$("recording-error").hidden, false);
-  assert.equal(second.$("stop").disabled, false);
+  assert.equal(second.$("start").textContent, "■ 受信を停止");
   assert.equal(first.preferences.value.output.enabled, true);
   await second.click("record-stop");
   assert.equal(first.preferences.value.output.enabled, false);
@@ -1284,7 +1160,7 @@ test("external JSON selection persists custom profiles and supplies the receivin
   );
   for (const id of ["preset-browse", "preset-reload", "preset-builtin"])
     assert.equal(next.$(id).disabled, true);
-  await next.click("stop");
+  await next.click("start");
   await next.click("preset-builtin");
   assert.equal(preferences.value.preset_file, null);
   assert.equal(next.$("region").options.length, 3);
@@ -1445,7 +1321,7 @@ test("automatic selection plays the returned channel while a manual choice pins 
   );
   ui.$("channels-simple").children[0].querySelector(".channel-select").click();
   assert.equal(ui.$("auto-select").checked, false);
-  assert.match(ui.$("selection-hint").textContent, /手動選択を固定中/);
+  assert.match(ui.$("selection-hint").textContent, /固定中/);
   await ui.poll(); // even an automatic recommendation cannot overwrite manual mode
   assert.equal(ui.$("selected-frequency").textContent, "352.53750");
   assert.equal(
@@ -1621,7 +1497,7 @@ test("JSONL outputs can be selected without audio and empty output choices are r
   );
   await ui.click("record-stop");
   assert.equal(ui.$("output-data").matches(":disabled"), false);
-  assert.equal(ui.$("stop").disabled, false);
+  assert.equal(ui.$("start").textContent, "■ 受信を停止");
 });
 test("configuration load failure shows an error and blocks starting", async (t) => {
   const ui = await setup(t, { catalogError: "設定の検証に失敗しました" });
@@ -1668,7 +1544,7 @@ test("about dialog shows product and author, restores focus, and leaves receptio
   await ui.click("about-close");
   assert.equal(dialog.open, false);
   assert.equal(ui.w.document.activeElement.id, "about-open");
-  assert.equal(ui.$("stop").disabled, false);
+  assert.equal(ui.$("start").textContent, "■ 受信を停止");
   assert.equal(ui.$("record-stop").disabled, false);
   assert.equal(
     ui.calls.some(
@@ -1759,7 +1635,7 @@ test("simple and detailed views share selection, receive targets, filtering and 
   assert.equal(ui.$("pause-messages").getAttribute("aria-pressed"), "true");
   assert.equal(detailed[1].querySelectorAll(".numeric")[0].textContent, "7");
   assert.equal(detailed[1].querySelector("input").disabled, true);
-  await ui.click("stop");
+  await ui.click("start");
   assert.equal(tiles[1].querySelector(".compact-state").textContent, "停止");
   await ui.change("region", "central");
   assert.equal(ui.$("channels-simple").children.length, 3);
@@ -1818,7 +1694,7 @@ test("recording starts with the OS default folder without a picker and preserves
     false,
   );
   await ui.click("record-stop");
-  await ui.click("stop");
+  await ui.click("start");
   ui.input("record-directory", "/tmp/受信録音");
   await ui.change("region", "central");
   await ui.click("start");
@@ -1903,11 +1779,11 @@ test("recording validates its folder, is independent of monitoring, and stops wi
     directory: "/tmp/recordings/recording-test",
   });
   await ui.poll();
-  assert.match(ui.$("recording-summary").textContent, /2 ファイル.*1.0 秒/);
+  assert.equal(ui.$("recording-summary").textContent, "WAV 2 件 · 1.0 秒");
   await ui.click("record-stop");
   assert.equal(ui.$("recording-state").textContent, "保存完了");
   assert.equal(ui.$("record-directory").disabled, false);
-  assert.equal(ui.$("stop").disabled, false);
+  assert.equal(ui.$("start").textContent, "■ 受信を停止");
   assert.equal(ui.w.document.activeElement.id, "record-start");
   assert.equal(
     ui.calls.some((c) => c.command === "stop"),
@@ -1931,7 +1807,7 @@ test("receiving stop finalizes recording and leaves the saved folder visible", a
     status: { ...status(), running: false, state: "stopped" },
     audio: [],
   });
-  await ui.click("stop");
+  await ui.click("start");
   assert.equal(ui.$("recording-state").textContent, "保存完了");
   // Switching profiles cancels polling the old session. Final recording state
   // must come from the stop response, not depend on a subsequent poll.
@@ -1986,7 +1862,7 @@ test("cancelled directory picker and rejected recording start never report recor
   assert.equal(ui.$("recording-error").hidden, false);
   assert.match(ui.$("recording-error").textContent, /書き込めません/);
   assert.equal(ui.$("record-directory").disabled, false);
-  assert.equal(ui.$("stop").disabled, false);
+  assert.equal(ui.$("start").textContent, "■ 受信を停止");
 });
 test("default source requires a user endpoint; filtering never removes active channels", async (t) => {
   const ui = await setup(t, { configureConnection: false });
@@ -2022,7 +1898,7 @@ test("default source requires a user endpoint; filtering never removes active ch
   assert.equal(config.input.radio.host, "127.0.0.1");
   assert.equal(config.input.radio.port, 1234);
   assert.equal(ui.$("settings").disabled, true);
-  assert.equal(ui.w.document.activeElement.id, "stop");
+  assert.equal(ui.w.document.activeElement.id, "start");
   await ui.poll();
   assert.equal(ui.$("total-locked").textContent, "3");
   assert.equal(ui.$("total-data").textContent, "418");
@@ -2030,7 +1906,7 @@ test("default source requires a user endpoint; filtering never removes active ch
     status: { ...status(), running: false, state: "stopped" },
     audio: [],
   });
-  await ui.click("stop");
+  await ui.click("start");
   await ui.poll();
   assert.equal(ui.$("settings").disabled, false);
   assert.equal(ui.$("state").textContent, "停止中");
@@ -2257,14 +2133,14 @@ test("operation monitor distinguishes missing values and resets on a new receive
   const cells = app.$("operation-rows").querySelectorAll(".operation-value");
   assert.equal(cells[3].textContent, "0");
   assert.equal(cells[5].textContent, "不明");
-  await app.click("stop");
+  await app.click("start");
   assert.match(app.$("operation-state").textContent, /受信停止/);
   await app.click("start");
   assert.equal(app.$("operation-content").hidden, true);
   assert.equal(app.$("operation-rows").children.length, 0);
   app.setSnapshot({ status: operationStatus(), audio: [] });
   await app.poll();
-  await app.click("stop");
+  await app.click("start");
   await app.change("region", "central");
   assert.equal(app.$("operation-content").hidden, true);
   assert.match(app.$("operation-empty-title").textContent, /共用波が受信対象にありません/);
@@ -2299,4 +2175,128 @@ test("operation monitor selects by reception time and ignores legacy message dat
   view.update(s, { channels: s.channels.map((c) => c.config), enabled: new Set(), running: true, replay: true });
   assert.equal(app.$("operation-received-label").textContent, "最終読取日時");
   assert.equal(app.$("operation-state").textContent, "IQ再生 · 受信済み");
+});
+test("one top button starts and stops reception", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.equal($("stop"), null);
+  assert.equal($("start").textContent, "▶ 受信を開始");
+  assert.ok($("start").classList.contains("primary"));
+  await app.click("start");
+  assert.equal(app.calls.filter((c) => c.command === "start").length, 1);
+  assert.equal($("start").textContent, "■ 受信を停止");
+  assert.ok($("start").classList.contains("stop"));
+  await app.click("start");
+  assert.equal(app.calls.filter((c) => c.command === "stop").length, 1);
+  assert.equal($("start").textContent, "▶ 受信を開始");
+});
+test("the top save toggle arms saving while stopped, saves once receiving, and turns it off", async (t) => {
+  const preferences = { value: null };
+  const app = await setup(t, { platformInfo: { android: true, soapy: false }, preferences });
+  const { $ } = app;
+  const toggle = $("save-toggle");
+  assert.equal(toggle.textContent.trim(), "保存オフ");
+  assert.equal(toggle.getAttribute("aria-pressed"), "false");
+  assert.equal(toggle.disabled, false);
+  await app.click("save-toggle");
+  assert.equal(toggle.textContent, "● 保存オン");
+  assert.equal(toggle.getAttribute("aria-pressed"), "true");
+  assert.equal(app.calls.some((c) => c.command === "start_recording"), false);
+  assert.equal(preferences.value.output.enabled, true);
+  await app.click("start");
+  await app.poll();
+  assert.equal(app.calls.filter((c) => c.command === "start_recording").length, 1);
+  assert.equal(toggle.textContent, "● 保存中");
+  assert.ok(toggle.classList.contains("saving"));
+  await app.click("save-toggle");
+  assert.equal(app.calls.filter((c) => c.command === "stop_recording").length, 1);
+  assert.equal(toggle.textContent, "保存オフ");
+  assert.equal(preferences.value.output.enabled, false);
+  // Reception keeps running.
+  assert.equal(app.calls.some((c) => c.command === "stop"), false);
+});
+test("phones open in the compact view; the switch next to the logo shows the full page", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  const root = app.w.document.documentElement;
+  assert.equal($("view-mode").hidden, false);
+  assert.equal($("view-mode").parentElement, app.w.document.querySelector(".brand"));
+  assert.ok(root.classList.contains("compact"));
+  assert.equal($("quick").hidden, false);
+  assert.equal($("mode-compact").getAttribute("aria-pressed"), "true");
+  $("listen").checked = true;
+  await app.click("start");
+  const snapshot = status();
+  const id = presets[1].id;
+  snapshot.channels[1].status.voice_frames = 7;
+  app.setSnapshot({ status: { ...snapshot, selected_channel: id, active_calls: [id] }, audio: [] });
+  await app.poll();
+  assert.equal($("quick-frequency").textContent, "352.54375");
+  assert.equal($("quick-channel").textContent, presets[1].label);
+  assert.equal($("quick-sync").textContent, "通話中");
+  assert.equal($("quick-locked").textContent, "3/22");
+  assert.equal($("quick-recording").textContent, "オフ");
+  // Its controls drive the full page's.
+  $("quick-auto").checked = false;
+  $("quick-auto").dispatchEvent(new app.w.Event("change"));
+  assert.equal($("auto-select").checked, false);
+  $("quick-volume").value = "35";
+  $("quick-volume").dispatchEvent(new app.w.Event("input"));
+  assert.equal($("volume").value, "35");
+  await app.click("mode-full");
+  assert.equal(root.classList.contains("compact"), false);
+  assert.equal($("quick").hidden, true);
+  assert.equal(app.w.localStorage.getItem("jr-clrr.view"), "full");
+});
+test("the Mac app opens in the full view and desktop has no view switch", async (t) => {
+  const mac = await setup(t, {
+    configureConnection: false,
+    platformInfo: { android: false, soapy: true, simple: true, name: "JR-CLRR For Mac" },
+  });
+  assert.equal(mac.$("view-mode").hidden, false);
+  assert.equal(mac.w.document.documentElement.classList.contains("compact"), false);
+  const desktop = await setup(t);
+  assert.equal(desktop.$("view-mode").hidden, true);
+});
+test("the recordings list shows 30 at a time with a show-more button", async (t) => {
+  const root = "/sdcard/Download/JR-CLRR/Recordings";
+  const session = "recording-20261030T000000.000Z-001";
+  const recordings = [
+    {
+      name: session,
+      directory: `${root}/${session}`,
+      root,
+      incomplete: false,
+      files: Array.from({ length: 45 }, (_, i) => ({
+        name: `352606250Hz-${String(i + 1).padStart(6, "0")}.wav`,
+        path: `${root}/${session}/${i}.wav`,
+        bytes: 44 + 16000,
+        modified: 1793000000 + i,
+      })),
+    },
+  ];
+  const app = await setup(t, { platformInfo: { android: true, soapy: false }, recordings });
+  const { $ } = app;
+  $("recordings-browser").open = true;
+  $("recordings-browser").dispatchEvent(new app.w.Event("toggle"));
+  await tick();
+  await tick();
+  const shown = () => $("recordings-list").querySelectorAll(".recording-play").length;
+  assert.equal(shown(), 30);
+  assert.equal($("recordings-more").textContent, "もっと見る（残り 15 件）");
+  $("recordings-more").click();
+  assert.equal(shown(), 45);
+  assert.equal($("recordings-more"), null);
+  // A new order starts from the first page again.
+  $("recordings-sort").value = "oldest";
+  $("recordings-sort").dispatchEvent(new app.w.Event("change"));
+  assert.equal(shown(), 30);
+});
+test("the version dialog credits the dongle drivers", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.equal($("about-driver").hidden, false);
+  assert.match($("about-driver").textContent, /rtlsdr-nusb（bastibl、Apache-2\.0）/);
+  assert.match($("about-driver").textContent, /librtlsdr/);
+  assert.match($("about-driver").textContent, /Rtl-sdr driver/);
 });

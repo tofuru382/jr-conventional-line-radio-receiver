@@ -3,6 +3,7 @@ import { buildCatalog } from "./presets.mjs";
 import { AudioPlayer, Leveler } from "./audio.mjs";
 import { OperationMonitorView } from "./operation-monitor.mjs";
 import { RoutePicker } from "./route-picker.mjs";
+import { friendlyError } from "./errors.mjs";
 const operationMonitor = new OperationMonitorView(document);
 let sessionReplay = false;
 const $ = (id) => document.getElementById(id);
@@ -24,7 +25,7 @@ function syncNativeMonitor() {
     selected: selected || null,
     automatic: $("auto-select").checked,
     volume: Number($("volume").value) / 100,
-    level: $("level").checked,
+    level: $("auto-level").checked,
   };
   const next = JSON.stringify(settings);
   if (next === nativeMonitorState) return;
@@ -33,66 +34,6 @@ function syncNativeMonitor() {
     nativeMonitorState = "";
     fail(e);
   });
-}
-// Android output choice (kept per device): the app's own AAudio player, which
-// keeps playing in the background, or the WebView's Web Audio player used by
-// the desktop app (foreground only). Mainly for comparing the two.
-const outputKey = "jr-clrr.native-output";
-function nativeOutputPreferred() {
-  try {
-    return localStorage.getItem(outputKey) !== "off";
-  } catch {
-    return true;
-  }
-}
-function addOutputChoice() {
-  const label = el("label", undefined, "check-label output-choice");
-  label.htmlFor = "native-output";
-  const box = el("input");
-  box.id = "native-output";
-  box.type = "checkbox";
-  box.checked = nativeAudio;
-  label.append(box, "端末で直接再生（裏に回しても再生）");
-  const health = el("p", "", "field-hint");
-  health.id = "playback-health";
-  health.hidden = true;
-  box.addEventListener("change", () => {
-    try {
-      localStorage.setItem(outputKey, box.checked ? "on" : "off");
-    } catch {
-      // Not persisted; the choice still applies now.
-    }
-    // Stop the old path before starting the other.
-    if (nativeAudio) {
-      nativeMonitorState = "";
-      invoke("set_native_monitor", {
-        settings: { enabled: false, selected: null, automatic: false, volume: 0, inactive: true },
-      }).catch(() => {});
-    }
-    nativeAudio = box.checked;
-    resetAudio();
-    if (nativeAudio) syncNativeMonitor();
-    else prepareAudio().catch(fail);
-    setControls();
-  });
-  document.querySelector(".audio-controls").append(label, health);
-  addTestSound();
-}
-// Live playback health (Android player): underruns mean playback ran dry in
-// the middle of a call; the buffer then grows, adding delay but no gaps.
-let healthAt = 0;
-async function refreshPlaybackHealth() {
-  const node = $("playback-health");
-  if (!node || !nativeAudio || Date.now() - healthAt < 1000) return;
-  healthAt = Date.now();
-  try {
-    const s = await invoke("native_audio_status");
-    if (!s) return;
-    node.textContent = `再生の途切れ ${s.underruns} 回 · 再生の遅れ ${(s.buffer_ms / 1000).toFixed(1)} 秒${s.rate ? ` · 出力 ${s.rate.toLocaleString()} Hz` : ""}（途切れると、ためる量を自動で増やします）`;
-    node.hidden = false;
-  } catch {
-    // Older backend without the command: leave the line hidden.
-  }
 }
 // Three rising tones through the chosen output, so the playback path can be
 // checked without any radio signal (same as native_audio::test_tone).
@@ -136,15 +77,13 @@ function addTestSound() {
   const button = el("button", "テスト音を鳴らす");
   button.type = "button";
   button.id = "test-sound";
-  const note = el(
-    "p",
-    "「ポーン・ポーン・ポーン」と高くなる音が3回きれいに鳴れば、音の出口は正常です。受信していなくても試せます。",
-    "field-hint",
-  );
+  const note = el("p", "", "field-hint");
   note.id = "test-sound-note";
+  note.hidden = true;
   button.addEventListener("click", () => {
     playTestSound().catch((e) => {
-      note.textContent = `テスト音を鳴らせませんでした: ${e.message ?? e}`;
+      note.textContent = `テスト音を鳴らせません：${friendlyError(e)}`;
+      note.hidden = false;
     });
   });
   row.append(button, note);
@@ -196,10 +135,8 @@ function recordingLabel(file) {
         .join(" · ")
     : `${file.name} · ${length}`;
 }
-// Where a recording plays: the recordings browser or the main page's
-// "最近の録音" (each has its own player).
+// Where a recording plays (the recordings browser's player).
 const browserPlayer = { player: "recordings-player", now: "recordings-now", status: "recordings-status" };
-const recentPlayer = { player: "recent-player", now: "recent-now", status: "recent-status" };
 async function playRecording(session, file, target = browserPlayer) {
   try {
     $(target.status).textContent = "読み込み中…";
@@ -212,19 +149,15 @@ async function playRecording(session, file, target = browserPlayer) {
     const blob = new Blob([bytes], { type: "audio/wav" });
     if (recordingUrl) URL.revokeObjectURL(recordingUrl);
     recordingUrl = URL.createObjectURL(blob);
-    for (const other of [browserPlayer, recentPlayer])
-      if (other !== target) $(other.player).pause?.();
     const player = $(target.player);
     player.src = recordingUrl;
     player.hidden = false;
     $(target.now).textContent = `再生中：${fileTime(session, file)} · ${recordingLabel(file)}`;
     $(target.now).hidden = false;
-    $(target.status).textContent = session.incomplete
-      ? "保存中の回です。最後まで再生できない場合は、保存を停止してから再生してください。"
-      : "";
+    $(target.status).textContent = session.incomplete ? "保存中のため途中までの場合があります" : "";
     await Promise.resolve(player.play?.()).catch(() => {});
   } catch (e) {
-    $(target.status).textContent = String(e.message ?? e);
+    $(target.status).textContent = friendlyError(e);
   }
 }
 // When the call ended (file time), or the session start when unknown.
@@ -242,6 +175,22 @@ try {
   // Default order.
 }
 let recordingSessions = [];
+// The list grows by this many entries (sessions in "保存した回ごと") per
+// "もっと見る".
+const RECORDINGS_PAGE = 30,
+  SESSIONS_PAGE = 10;
+let recordingsShown = RECORDINGS_PAGE,
+  sessionsShown = SESSIONS_PAGE;
+function moreButton(left, onMore) {
+  const button = el("button", `もっと見る（残り ${left.toLocaleString()} 件）`, "recordings-more");
+  button.type = "button";
+  button.id = "recordings-more";
+  button.addEventListener("click", () => {
+    onMore();
+    renderRecordings();
+  });
+  return button;
+}
 function recordingButton(session, file, withTime, target = browserPlayer) {
   const text = `▶ ${withTime ? `${fileTime(session, file)} · ` : ""}${recordingLabel(file)}${session.incomplete ? " · 保存中" : ""}`;
   const button = el("button", text, "recording-play");
@@ -254,7 +203,7 @@ function renderRecordings() {
   list.replaceChildren();
   const order = $("recordings-sort").value;
   if (order === "session") {
-    recordingSessions.forEach((session, i) => {
+    recordingSessions.slice(0, sessionsShown).forEach((session, i) => {
       const group = el("details", undefined, "recording-session");
       group.open = i === 0;
       group.append(
@@ -266,6 +215,10 @@ function renderRecordings() {
       for (const file of session.files) group.append(recordingButton(session, file, false));
       list.append(group);
     });
+    if (recordingSessions.length > sessionsShown)
+      list.append(
+        moreButton(recordingSessions.length - sessionsShown, () => (sessionsShown += SESSIONS_PAGE)),
+      );
     return;
   }
   const all = recordingSessions.flatMap((session) =>
@@ -280,7 +233,7 @@ function renderRecordings() {
         : newest,
   );
   let heading = null;
-  for (const { session, file, info } of all.slice(0, 300)) {
+  for (const { session, file, info } of all.slice(0, recordingsShown)) {
     if (order === "channel") {
       const title = info
         ? [`${(info.hz / 1e6).toFixed(5)} MHz`, info.label, info.lines].filter(Boolean).join(" · ")
@@ -292,8 +245,15 @@ function renderRecordings() {
     }
     list.append(recordingButton(session, file, true));
   }
+  if (all.length > recordingsShown)
+    list.append(moreButton(all.length - recordingsShown, () => (recordingsShown += RECORDINGS_PAGE)));
+}
+function resetRecordingsPaging() {
+  recordingsShown = RECORDINGS_PAGE;
+  sessionsShown = SESSIONS_PAGE;
 }
 async function refreshRecordings() {
+  resetRecordingsPaging();
   $("recordings-status").textContent = "読み込み中…";
   try {
     recordingSessions =
@@ -302,12 +262,10 @@ async function refreshRecordings() {
       })) ?? [];
     const total = recordingSessions.reduce((n, s) => n + s.files.length, 0);
     $("recordings-count").textContent = `${recordingSessions.length} 回の保存 · ${total} 件`;
-    $("recordings-status").textContent = recordingSessions.length
-      ? `保存先：${[...new Set(recordingSessions.map((s) => s.root))].join("、")}`
-      : "録音はまだありません。保存をオンにして受信すると、通話ごとにここに追加されます。";
+    $("recordings-status").textContent = recordingSessions.length ? "" : "録音はまだありません";
     renderRecordings();
   } catch (e) {
-    $("recordings-status").textContent = String(e.message ?? e);
+    $("recordings-status").textContent = friendlyError(e);
   }
 }
 $("recordings-sort").addEventListener("change", () => {
@@ -316,6 +274,7 @@ $("recordings-sort").addEventListener("change", () => {
   } catch {
     // The order still applies now.
   }
+  resetRecordingsPaging();
   renderRecordings();
 });
 function addRecordingsBrowser() {
@@ -485,7 +444,7 @@ document.addEventListener("click", (event) => {
   target.focus({ preventScroll: true });
 });
 function fail(error) {
-  const text = `${error.message ?? error}\n設定と接続を確認し、受信を再開してください。`;
+  const text = friendlyError(error);
   if ($("error").textContent !== text) $("error").textContent = text;
   $("error").hidden = false;
 }
@@ -651,19 +610,12 @@ function setControls() {
   $("preset-reload").disabled = !native || running || busy || !presetFile;
   $("preset-builtin").disabled = !native || running || busy || !presetFile;
   $("all").disabled = running || busy || !channels.length;
-  $("start").disabled = !native || running || busy || !channels.length;
-  $("stop").disabled = !running || busy;
+  $("start").disabled = !native || busy || (!running && !channels.length);
+  const startLabel = running ? "■ 受信を停止" : "▶ 受信を開始";
+  if ($("start").textContent !== startLabel) $("start").textContent = startLabel;
+  $("start").classList.toggle("primary", !running);
+  $("start").classList.toggle("stop", running);
   $("selected-format").disabled = running || busy || !channels.length;
-  $("iq-capture").disabled =
-    !running ||
-    busy ||
-    lastSnapshot?.state !== "receiving" ||
-    $("input-kind").value === "wave" ||
-    lastSnapshot?.iq_capture === "保存中";
-  if (lastSnapshot?.iq_capture && $("iq-status").textContent !== lastSnapshot.iq_capture)
-    $("iq-status").textContent =
-      lastSnapshot.iq_capture === "保存中" ? "保存中（10 秒）…" : lastSnapshot.iq_capture;
-  if ($("voice-decoder")) $("voice-decoder").disabled = running || busy;
   $("preferences-retry").disabled = busy || (preferencesLoadFailed && running);
   $("total-enabled").textContent = enabled.size;
   renderMute();
@@ -687,8 +639,102 @@ function setControls() {
   $("all").checked = enabled.size === channels.length;
   $("all").indeterminate = enabled.size > 0 && enabled.size < channels.length;
   renderRecording();
+  renderQuick();
   operationMonitor.update(lastSnapshot, { channels, enabled, running, replay: sessionReplay });
 }
+// JR-CLRR builds: 簡易 (compact) shows what matters on one phone screen —
+// the channel being heard, calls in progress, totals and saving; 詳細 (full)
+// is the whole page. Kept per device; phones start compact.
+const viewKey = "jr-clrr.view";
+function setViewMode(compact, remember = true) {
+  document.documentElement.classList.toggle("compact", compact);
+  $("quick").hidden = !compact;
+  $("mode-compact").setAttribute("aria-pressed", String(compact));
+  $("mode-full").setAttribute("aria-pressed", String(!compact));
+  if (remember)
+    try {
+      localStorage.setItem(viewKey, compact ? "compact" : "full");
+    } catch {
+      // The choice still applies now.
+    }
+  renderQuick();
+}
+function addViewMode() {
+  $("view-mode").hidden = false;
+  let saved = null;
+  try {
+    saved = localStorage.getItem(viewKey);
+  } catch {
+    // Default for the platform.
+  }
+  setViewMode(saved ? saved === "compact" : !!platform.android, false);
+}
+$("mode-compact").addEventListener("click", () => setViewMode(true));
+$("mode-full").addEventListener("click", () => setViewMode(false));
+function setText(id, text) {
+  if ($(id).textContent !== text) $(id).textContent = text;
+}
+function renderQuick() {
+  if ($("quick").hidden) return;
+  const s = running ? lastSnapshot : null;
+  const c = channels.find((x) => x.id === selected);
+  const row = s?.channels.find((x) => x.config.id === selected);
+  const calling = (s?.active_calls ?? []).includes(selected);
+  setText("quick-frequency", c ? (c.frequency_hz / 1e6).toFixed(5) : "—");
+  setText("quick-channel", c?.label ?? "—");
+  setText("quick-lines", c ? shortLines(channelLineList(c.id), 3) : "");
+  const locked = !!row?.status.frame_locked;
+  setText(
+    "quick-sync",
+    !c
+      ? ""
+      : !enabled.has(selected)
+        ? "受信対象外"
+        : !running
+          ? "待機"
+          : calling
+            ? "通話中"
+            : locked
+              ? "同期中"
+              : "探索中",
+  );
+  $("quick-sync").classList.toggle("locked", running && locked);
+  $("quick-sync").classList.toggle("calling", running && calling);
+  const count = (f) => (s ? s.channels.reduce((n, x) => n + f(x), 0).toLocaleString() : "—");
+  setText("quick-locked", `${s ? s.channels.filter((x) => x.status.frame_locked).length : "—"}/${enabled.size}`);
+  setText("quick-voice", count((x) => x.status.voice_frames));
+  setText("quick-drops", count((x) => x.dropped_blocks));
+  const r = recordingStatus;
+  setText(
+    "quick-recording",
+    r.state === "recording" || r.state === "stopping"
+      ? `${r.files} 件`
+      : r.state === "failed"
+        ? "エラー"
+        : recordingEnabled
+          ? "オン"
+          : "オフ",
+  );
+  $("quick-recording").classList.toggle("active", r.state === "recording");
+  $("quick-auto").checked = $("auto-select").checked;
+  $("quick-level").checked = $("auto-level").checked;
+  if ($("quick-volume").value !== $("volume").value) $("quick-volume").value = $("volume").value;
+  $("quick-routes").disabled = $("route-open").disabled;
+}
+// The compact card's controls drive the full page's ones.
+$("quick-auto").addEventListener("change", () => {
+  $("auto-select").checked = $("quick-auto").checked;
+  $("auto-select").dispatchEvent(new Event("change"));
+});
+$("quick-level").addEventListener("change", () => {
+  $("auto-level").checked = $("quick-level").checked;
+  $("auto-level").dispatchEvent(new Event("change"));
+});
+$("quick-volume").addEventListener("input", () => {
+  $("volume").value = $("quick-volume").value;
+  $("volume").dispatchEvent(new Event("input"));
+});
+$("quick-routes").addEventListener("click", () => $("route-open").click());
 // Receive targets, the monitored channel and automatic selection are kept per
 // preset on this device, so a restart (or reinstall of settings) keeps them.
 const selectionKey = () => `jr-clrr.selection.${activePresetId}`;
@@ -725,9 +771,7 @@ function restoreSelection() {
 }
 function renderSelectionMode() {
   const automatic = $("auto-select").checked;
-  const hint = automatic
-    ? "先に始まった通話を優先します。手動で選ぶと固定します。"
-    : "手動選択を固定中。自動切替に戻すにはチェックを入れてください。";
+  const hint = automatic ? "" : "手動で選んだ波に固定中";
   if ($("selection-hint").textContent !== hint)
     $("selection-hint").textContent = hint;
 }
@@ -761,6 +805,14 @@ function renderRecording() {
   $("record-start").disabled = !native || busy || !receiving || active;
   $("record-stop").disabled = !native || busy || (!active && !recordingEnabled);
   $("record-stop").textContent = active ? "保存を停止" : "保存を無効にする";
+  // Top bar toggle: on = saving now, or from the next reception.
+  const on = recordingEnabled || active;
+  const toggle = $("save-toggle");
+  toggle.disabled = !native || busy || s.state === "stopping";
+  toggle.setAttribute("aria-pressed", String(on));
+  toggle.classList.toggle("saving", active);
+  const toggleLabel = active ? "● 保存中" : on ? "● 保存オン" : "保存オフ";
+  if (toggle.textContent !== toggleLabel) toggle.textContent = toggleLabel;
   // Sessions without any call (or selected JSONL row) leave no folder.
   const saved = s.files > 0 || (s.raw_frames ?? 0) > 0 || (s.data_messages ?? 0) > 0;
   const label =
@@ -776,24 +828,23 @@ function renderRecording() {
   if ($("recording-state").textContent !== label)
     $("recording-state").textContent = label;
   $("recording-state").classList.toggle("active", active);
-  const idleMessage = recordingEnabled
-    ? "受信開始後に自動で保存します。"
-    : receiving
-      ? "保存を開始できます。"
-      : "受信を開始してから保存できます。";
   const summary =
     s.state === "idle"
-      ? `${idleMessage}音声は 8 kHz・16 bit・モノラル。通話がなければ何も保存しません。`
+      ? recordingEnabled
+        ? "受信を始めると保存します"
+        : ""
       : s.discarded
-        ? "通話がなかったため、何も保存しませんでした。"
+        ? "通話がなかったため保存しませんでした"
         : s.state === "recording" && !saved
-          ? "通話を受信したら保存を始めます。通話がなければ何も保存しません。"
-          : `WAV ${s.files} ファイル · 復号音声 ${(s.pcm_samples / 8000).toFixed(1)} 秒 · 生フレーム ${s.raw_frames ?? 0} 件 · データ電文 ${s.data_messages ?? 0} 件（全波合計）。受信停止時にも保存を終了します。`;
-  $("recording-summary").textContent =
-    summary +
-    (recordingEnabled && s.state !== "idle"
-      ? "次回受信時も自動で保存します。"
-      : "");
+          ? "通話を待っています"
+          : [
+              `WAV ${s.files} 件 · ${(s.pcm_samples / 8000).toFixed(1)} 秒`,
+              s.raw_frames ? `生フレーム ${s.raw_frames} 件` : "",
+              s.data_messages ? `データ電文 ${s.data_messages} 件` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ");
+  $("recording-summary").textContent = summary;
   if (s.discarded) $("recording-output").hidden = true;
   else if (s.directory) {
     $("recording-output").textContent =
@@ -801,9 +852,7 @@ function renderRecording() {
     $("recording-output").hidden = false;
   }
   const error = recordingActionError || s.error;
-  const message = error
-    ? `${error} 設定を確認して、保存を再開してください。`
-    : "";
+  const message = error ? friendlyError(error) : "";
   if ($("recording-error").textContent !== message) {
     $("recording-error").textContent = message;
     if (error) $("recording-settings").open = true;
@@ -813,7 +862,7 @@ function renderRecording() {
 function clearRecordingError() {
   recordingActionError = "";
   $("record-directory").removeAttribute("aria-invalid");
-  $("record-directory").setAttribute("aria-describedby", "recording-hint");
+  $("record-directory").removeAttribute("aria-describedby");
 }
 $("record-directory").addEventListener("input", () => {
   clearRecordingError();
@@ -880,7 +929,8 @@ async function startRecording(automatic = false) {
   }
 }
 $("record-start").addEventListener("click", () => startRecording());
-$("record-stop").addEventListener("click", async () => {
+$("record-stop").addEventListener("click", () => stopSaving(true));
+async function stopSaving(fromCard = false) {
   try {
     uiGeneration++;
     busy = true;
@@ -896,8 +946,33 @@ $("record-stop").addEventListener("click", async () => {
   } finally {
     busy = false;
     setControls();
-    if (!$("record-start").disabled) $("record-start").focus();
+    if (fromCard && !$("record-start").disabled) $("record-start").focus();
   }
+}
+// Top bar: saving on/off. Turning it on while receiving saves now; while
+// stopped (or still connecting) it saves from the next reception, as the
+// setting is kept.
+$("save-toggle").addEventListener("click", async () => {
+  if (recordingEnabled || ["recording", "stopping"].includes(recordingStatus.state))
+    return stopSaving();
+  if (running && lastSnapshot?.state === "receiving") return startRecording();
+  clearRecordingError();
+  if (!$("record-directory").value.trim()) {
+    recordingActionError = "保存先フォルダーを選択してください。";
+    fail(recordingActionError);
+    renderRecording();
+    return;
+  }
+  if (!Object.values(outputOptions()).some(Boolean)) {
+    recordingActionError = "保存する内容を 1 つ以上選択してください。";
+    fail(recordingActionError);
+    renderRecording();
+    return;
+  }
+  recordingEnabled = true;
+  if (running) recordingResumePending = true;
+  await flushPreferences();
+  setControls();
 });
 function resetAudio() {
   audioPlayer?.reset();
@@ -1114,6 +1189,7 @@ function select(id, manual = false) {
     const row = lastSnapshot.channels.find((c) => c.config.id === id);
     if (row) detail({ ...row.status, messages: [] });
   }
+  renderQuick();
 }
 function constellation(points = []) {
   const canvas = $("constellation"),
@@ -1263,7 +1339,7 @@ function detail(s) {
     : "—";
   $("data-status").textContent = s
     ? `有効 ${s.data.valid_frames} · 訂正 ${s.data.corrected_frames} · 電文拒否 ${s.data.rejected_messages}`
-    : "RS / CRC 検証済みの情報を表示";
+    : "";
   constellation(s?.constellation);
   showMessages(s?.messages ?? []);
 }
@@ -1336,19 +1412,15 @@ async function loadPresets(applyTuning = false) {
     $("band-high").textContent = (
       Math.max(...channels.map((c) => c.frequency_hz)) / 1e6
     ).toFixed(5);
-    $("band-note").textContent =
-      `割当 ${channels.length} 波 · チェックした波を並列復号`;
+    $("band-note").textContent = `割当 ${channels.length} 波`;
     $("all-label").textContent = `全 ${channels.length} 波を受信`;
-    $("preset-note").textContent =
-      `${preset.note} 変則割当は選択波の詳細に表示。件数は受信開始からの累計。`;
-    $("capture-info").textContent =
-      `中心 ${$("center").value} MHz · 設定は停止中に変更できます`;
+    $("preset-note").textContent = preset.note;
+    $("capture-info").textContent = `中心 ${$("center").value} MHz`;
     $("progress").textContent = "";
     $("state").textContent = "停止中";
     $("state").classList.remove("active");
     buildRows();
     updateSource();
-    if (!$("recent-block").hidden) void refreshRecent();
   } catch (error) {
     $("region").value = activePresetId;
     throw error;
@@ -1471,15 +1543,6 @@ function updateSource() {
     : wave
       ? "IQ WAV ファイル"
       : "SoapySDR デバイス";
-  $("source-hint").textContent = usb
-    ? "ドングルをスマホに挿して「受信を開始」を押してください。Rtl-sdr driver は不要です。初回は USB の使用許可を求められます。ドングルが抜けても、挿し直せば自動で受信を再開します。"
-    : wave
-    ? "I は左、Q は右のステレオ WAV。サンプルレートはファイルから取得します。"
-    : tcp && platform.android
-      ? "ドングルを挿して「RTL-SDR ドライバーを起動」を押し、ドライバーが起動したら「受信を開始」を押してください。選択した波を同時受信します。"
-      : tcp
-      ? "利用するサーバーの IP アドレスとポートを入力してください。接続設定は自動保存されます。選択した波を同時受信します。RTL-TCP は設定値の読み戻しとサーバー側の欠落通知に対応していません。"
-      : "SoapySDR 対応デバイスを検索するか、詳細設定にデバイス引数を入力してください。接続設定は自動保存されます。";
 }
 // The last session stays in the receiver after it ends, and polling it would
 // show its error again; forget it once the user moves on.
@@ -1534,8 +1597,7 @@ $("driver-start").addEventListener("click", async () => {
   updateSource();
   try {
     await invoke("start_rtl_driver", { port: Number($("port").value) });
-    $("driver-hint").textContent =
-      "ドライバーの起動を確認したら「受信を開始」を押してください。";
+    $("driver-hint").textContent = "起動したら「受信を開始」";
   } catch (e) {
     fail(e);
   }
@@ -1589,59 +1651,23 @@ function applySimpleLayout(name) {
 }
 function renderAbout() {
   const edition = platform.android ? "Android 版" : "Mac 版";
-  const choice = $("voice-decoder")?.value;
-  const decoder = choice
-    ? `（音声の復号は ${decoders[choice].name} の復号器）`
-    : platform.voice_decoder === "v1.3" || (platform.android && !platform.voice_decoder)
-      ? "（音声の復号は軽量な v1.3 の復号器）"
-      : "";
   $("about-description").textContent =
-    `KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした ${edition}${decoder}`;
-}
-// Voice decoder generations (receiver-core VoiceDecoder). Later ones sound more
-// natural and need more CPU; the choice is kept per device.
-const decoders = {
-  v13: { name: "v1.3", label: "v1.3（軽い・機械的な声）" },
-  v14: { name: "v1.4", label: "v1.4（中間）" },
-  v15: { name: "v1.5", label: "v1.5（高音質・重い）" },
-};
-const decoderKey = "jr-clrr.voice-decoder";
-function addDecoderChoice() {
-  const fallback = platform.voice_decoder === "v1.3" || platform.android ? "v13" : "v15";
-  let saved = null;
-  try {
-    saved = localStorage.getItem(decoderKey);
-  } catch {
-    // Not persisted; use the platform default.
-  }
-  const wrap = el("div", undefined, "decoder-choice");
-  const label = el("label", "音声の復号器");
-  label.htmlFor = "voice-decoder";
-  const select = el("select");
-  select.id = "voice-decoder";
-  for (const [value, d] of Object.entries(decoders)) {
-    const option = el("option", d.label);
-    option.value = value;
-    select.append(option);
-  }
-  select.value = decoders[saved] ? saved : fallback;
-  label.append(select);
-  const hint = el(
-    "p",
-    "受信を停止してから変更できます。「処理欠落」が増え続けるときは軽いものにしてください。",
-    "field-hint",
-  );
-  select.addEventListener("change", () => {
-    try {
-      localStorage.setItem(decoderKey, select.value);
-    } catch {
-      // The choice still applies to the next reception.
-    }
-    renderAbout();
-  });
-  wrap.append(label, hint);
-  document.querySelector(".audio-controls").append(wrap);
-  renderAbout();
+    `KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした ${edition}（音声の復号は v1.5）`;
+  // The dongle drivers this build ships with or works with.
+  const credits = platform.android
+    ? [
+        "内蔵ドライバー：rtlsdr-nusb（bastibl、Apache-2.0）を改変して同梱",
+        "チューナー設定の一部：librtlsdr（Osmocom・RTL-SDR Blog、GPL-2.0）を参照",
+        "RTL-TCP：Rtl-sdr driver（Martin Marinov）に接続",
+      ]
+    : [
+        "SoapySDR（Pothosware、BSL-1.0）",
+        "SoapyRTLSDR（Pothosware、MIT）",
+        "librtlsdr（Osmocom、GPL-2.0）",
+        "libusb（LGPL-2.1）",
+      ];
+  $("about-driver").replaceChildren(...credits.map((line) => el("span", line)));
+  $("about-driver").hidden = $("about-driver-title").hidden = false;
 }
 function renderMute() {
   const mute = $("mute-toggle");
@@ -1662,11 +1688,11 @@ function adoptMacDefaults() {
 // What the phone saw when the built-in driver asked for the dongle.
 function usbProblem(answer) {
   if (answer === "none")
-    return "ドングルが見つかりません。スマホに USB 機器が 1 台もつながっていません。挿し直して、スマホの設定で OTG がオンになっているか確認してから「受信を開始」を押してください。";
+    return "ドングルが見つかりません。挿し直して、OTG がオンか確認してください。";
   if (typeof answer === "string" && answer.startsWith("other:"))
-    return `ドングルが見つかりません。USB 機器は ${answer.slice(6)} 台見えていますが、RTL-SDR ドングルではありません。ハブを使っている場合は、ハブとドングルの差し込みとハブの電源を確認してください。`;
+    return "ドングルが見つかりません。ハブとドングルの差し込みを確認してください。";
   if (answer === "busy")
-    return "ドングルは見えていますが、開けませんでした。Rtl-sdr driver など、ドングルを使っている別のアプリを閉じるか、ドングルを挿し直してから「受信を開始」を押してください。";
+    return "ドングルを開けません。Rtl-sdr driver を閉じるか、挿し直してください。";
   return null;
 }
 const usbDefaultKey = "jr-clrr.usb-default";
@@ -1710,7 +1736,9 @@ $("browse").addEventListener("click", async () => {
     fail(e);
   }
 });
-$("start").addEventListener("click", async () => {
+// One button starts and stops reception.
+$("start").addEventListener("click", () => (running ? stopReception() : startReception()));
+async function startReception() {
   let invalidField;
   try {
     uiGeneration++;
@@ -1736,11 +1764,9 @@ $("start").addEventListener("click", async () => {
     busy = true;
     setControls();
     resetAudio();
-    await prepareAudio().catch((e) => {
+    await prepareAudio().catch(() => {
       $("listen").checked = false;
-      fail(
-        `音声出力を開始できません (${e})。復号は継続します。「音声を聴く」で再試行できます。`,
-      );
+      fail("音声を再生できません。音声オンにすると再試行します。");
     });
     await flushPreferences();
     if (input.kind === "usb" && platform.android) {
@@ -1752,7 +1778,8 @@ $("start").addEventListener("click", async () => {
       config: {
         input,
         channels: activeChannels,
-        ...($("voice-decoder") ? { voice_decoder: $("voice-decoder").value } : {}),
+        // The most natural-sounding decoder, on every build.
+        voice_decoder: "v15",
       },
     });
     running = true;
@@ -1787,10 +1814,10 @@ $("start").addEventListener("click", async () => {
     busy = false;
     setControls();
     if (invalidField) invalidField.focus();
-    else if (running) $("stop").focus();
+    else if (running) $("start").focus();
   }
-});
-$("stop").addEventListener("click", async () => {
+}
+async function stopReception() {
   try {
     uiGeneration++;
     busy = true;
@@ -1812,9 +1839,9 @@ $("stop").addEventListener("click", async () => {
   } finally {
     busy = false;
     setControls();
-    if (!running) $("start").focus();
+    $("start").focus();
   }
-});
+}
 $("listen").addEventListener("change", () => {
   syncNativeMonitor();
   resetAudio();
@@ -1919,154 +1946,30 @@ function renderLive() {
     }),
   );
   $("live-calls-empty").hidden = calls.length > 0;
-  $("live-calls-empty").textContent = running ? "通話はありません。" : "受信していません。";
+  $("live-calls-empty").textContent = running ? "通話はありません" : "受信していません";
 }
-// Latest recordings (Android): refreshed while saving, and when saving ends.
-const RECENT_COUNT = 8;
-let recentAt = 0,
-  recentState = "";
-async function refreshRecent() {
-  recentAt = Date.now();
-  try {
-    const sessions =
-      (await invoke("list_recordings", {
-        directory: $("record-directory").value.trim() || null,
-      })) ?? [];
-    const latest = sessions
-      .flatMap((session) => session.files.map((file) => ({ session, file })))
-      .sort((a, b) => b.file.modified - a.file.modified || b.file.name.localeCompare(a.file.name))
-      .slice(0, RECENT_COUNT);
-    $("recent-list").replaceChildren(
-      ...latest.map(({ session, file }) => {
-        const li = el("li");
-        li.append(recentButton(session, file));
-        return li;
-      }),
-    );
-    if (!$("recent-player").src || $("recent-player").hidden)
-      $("recent-status").textContent = latest.length
-        ? ""
-        : "録音はまだありません。保存をオンにして受信すると、通話ごとにここに並びます。";
-  } catch (e) {
-    $("recent-status").textContent = String(e.message ?? e);
-  }
-}
-// Two compact lines: when and how long; then the channel.
-function recentButton(session, file) {
-  const seconds = Math.max(0, (file.bytes - 44) / 16000);
-  const p = parseRecordingName(file.name);
-  const button = el("button", undefined, "recording-play recent-item");
-  button.type = "button";
-  const top = el("span", undefined, "recent-when");
-  top.append(
-    `▶ ${fileTime(session, file)} · ${seconds >= 1 ? `${Math.round(seconds)} 秒` : "1 秒未満"}`,
-  );
-  if (session.incomplete) top.append(el("span", "保存中", "recent-saving"));
-  const bottom = el(
-    "span",
-    p
-      ? [`${(p.hz / 1e6).toFixed(5)} MHz`, p.label, p.lines].filter(Boolean).join(" · ")
-      : file.name,
-    "recent-what",
-  );
-  button.append(top, bottom);
-  button.addEventListener("click", () => playRecording(session, file, recentPlayer));
-  return button;
-}
-function maybeRefreshRecent() {
-  if ($("recent-block").hidden) return;
-  const state = `${recordingStatus.state}:${recordingStatus.files}`;
-  const changed = state !== recentState;
-  recentState = state;
-  // A new file appears (or saving ends): refresh; while saving, every 10 s.
-  if (changed || (recordingStatus.state === "recording" && Date.now() - recentAt > 10000))
-    void refreshRecent();
-}
-$("recent-refresh").addEventListener("click", () => void refreshRecent());
-// Diagnosis: 10 s of raw IQ, to compare the built-in driver with RTL-TCP.
-// Diagnosis: the receiver's and Android's notes about the connection, merged
-// by time, to copy into a report.
-async function refreshConnectionLog() {
-  if ($("log-group").hidden || !$("log-group").open) return;
-  const notes = [];
-  try {
-    for (const [ms, text] of await invoke("connection_log")) notes.push([ms, text]);
-  } catch {
-    // Older backends keep no log.
-  }
-  let android = "";
-  try {
-    android = window.JrAndroid?.usbLog?.() ?? "";
-  } catch {
-    // Not available.
-  }
-  for (const line of android.split("\n")) {
-    const tab = line.indexOf("\t");
-    if (tab > 0) notes.push([Number(line.slice(0, tab)), line.slice(tab + 1)]);
-  }
-  notes.sort((a, b) => a[0] - b[0]);
-  const time = (ms) => {
-    const d = new Date(ms);
-    return `${d.toLocaleTimeString("ja-JP", { hour12: false })}.${String(d.getMilliseconds()).padStart(3, "0")}`;
-  };
-  const header = `${document.title}${platform.build ? ` ビルド ${platform.build.slice(0, 7)}` : ""} · 入力 ${$("input-kind").value}`;
-  const text = [
-    header,
-    ...(notes.length ? notes.map(([ms, t]) => `${time(ms)} ${t}`) : ["（記録はまだありません）"]),
-  ].join("\n");
-  if ($("connection-log").value !== text) $("connection-log").value = text;
-}
-$("log-group").addEventListener("toggle", () => void refreshConnectionLog());
-$("log-refresh").addEventListener("click", () => void refreshConnectionLog());
-setInterval(() => void refreshConnectionLog(), 2000);
-$("log-copy").addEventListener("click", async () => {
-  await refreshConnectionLog();
-  const text = $("connection-log").value;
-  let copied = false;
-  try {
-    await navigator.clipboard.writeText(text);
-    copied = true;
-  } catch {
-    try {
-      $("connection-log").select();
-      copied = document.execCommand("copy");
-    } catch {
-      // Long-press the text to copy it by hand.
-    }
-  }
-  $("log-copy").textContent = copied ? "コピーしました" : "長押しで選んでコピーしてください";
-  setTimeout(() => ($("log-copy").textContent = "コピー"), 2500);
-});
-$("iq-capture").addEventListener("click", async () => {
-  try {
-    const path = await invoke("capture_iq", {
-      directory: $("record-directory").value.trim() || null,
-    });
-    $("iq-status").textContent = `保存中（10 秒）… ${path}`;
-    $("iq-capture").disabled = true;
-  } catch (e) {
-    $("iq-status").textContent = String(e.message ?? e);
-  }
-});
 // Volume leveling (live playback only; recordings keep the original level).
+// The checkbox once shared its id with the "広帯域入力" figure, so the page
+// read the figure's (absent) checked state and never leveled.
 const levelKey = "jr-clrr.level";
 try {
-  $("level").checked = localStorage.getItem(levelKey) === "on";
+  $("auto-level").checked = localStorage.getItem(levelKey) === "on";
 } catch {
   // Not persisted; off by default.
 }
 function applyLeveling() {
   if (audioPlayer)
-    audioPlayer.leveler = $("level").checked ? (audioPlayer.leveler ?? new Leveler()) : null;
+    audioPlayer.leveler = $("auto-level").checked ? (audioPlayer.leveler ?? new Leveler()) : null;
 }
-$("level").addEventListener("change", () => {
+$("auto-level").addEventListener("change", () => {
   try {
-    localStorage.setItem(levelKey, $("level").checked ? "on" : "off");
+    localStorage.setItem(levelKey, $("auto-level").checked ? "on" : "off");
   } catch {
     // The choice still applies now.
   }
   applyLeveling();
   syncNativeMonitor();
+  setControls();
 });
 $("volume").addEventListener("input", () => {
   $("volume-value").value = `${$("volume").value}%`;
@@ -2120,7 +2023,6 @@ async function poll() {
               failed: "受信エラー",
             }[s.state] ?? s.state);
         relaunchDriverIfNeeded(s);
-        void refreshPlaybackHealth();
         if ($("state").textContent !== stateLabel)
           $("state").textContent = stateLabel;
         $("state").classList.toggle("active", s.running);
@@ -2128,8 +2030,8 @@ async function poll() {
         $("capture-info").textContent = s.sample_rate
           ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}${measuredRate(s)}${s.source_info ? ` · ${s.source_info}` : ""}${inputLevel(s)}`
           : s.running
-            ? "接続を準備しています"
-            : "未接続 · 受信設定と接続先を確認してください";
+            ? "接続中"
+            : "未接続";
         $("total-locked").textContent = s.running
           ? s.channels.filter((c) => c.status.frame_locked).length
           : "—";
@@ -2149,7 +2051,6 @@ async function poll() {
         const c = s.channels.find((c) => c.config.id === selected);
         if (selectionCurrent) detail(c?.status ?? null);
         if (c?.error) fail(c.error);
-        maybeRefreshRecent();
         setControls();
         if (recordingResumePending) {
           if (!s.running) recordingResumePending = false;
@@ -2197,16 +2098,13 @@ try {
       platform.name ?? (platform.android ? "JR-CLRR For Android" : null);
     if ((platform.simple ?? platform.android) && simpleName) {
       applySimpleLayout(simpleName);
-      addDecoderChoice();
+      addViewMode();
     }
-    nativeAudio = platform.android && nativeOutputPreferred();
+    // Live audio always plays through Web Audio (the app's own player is off).
+    nativeAudio = false;
     if (platform.android) {
-      addOutputChoice();
+      addTestSound();
       addRecordingsBrowser();
-      // Filled once the presets are loaded (channel names and lines).
-      $("recent-block").hidden = false;
-      $("iq-group").hidden = false;
-      $("log-group").hidden = false;
     }
   }
   bundledCatalog = native
