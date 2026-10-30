@@ -51,7 +51,6 @@
       </div>
       <section id="quick" class="card quick" aria-label="受信の概要" hidden>
         <div class="quick-now">
-          <p class="quick-caption">聴いている波</p>
           <p class="quick-frequency">
             <bdi id="quick-frequency">—</bdi> <small>MHz</small>
           </p>
@@ -88,6 +87,25 @@
             >音量<input id="quick-volume" type="range" min="0" max="100" value="70"
           /></label>
           <button id="quick-routes" type="button">路線から選ぶ</button>
+        </div>
+        <div class="quick-scope">
+          <canvas
+            id="quick-constellation"
+            width="240"
+            height="240"
+            role="img"
+            aria-label="選択波の差動シンボル分布（π/4-DQPSK）"
+          ></canvas>
+          <dl class="quick-detail" aria-label="選択波の受信状態">
+            <div><dt>フレーム同期</dt><dd id="q-sync">待機</dd></div>
+            <div><dt>広帯域入力</dt><dd id="q-level">—</dd></div>
+            <div><dt>EVM</dt><dd id="q-evm">—</dd></div>
+            <div><dt>残留周波数</dt><dd id="q-offset">—</dd></div>
+            <div><dt>受信フレーム</dt><dd id="q-frames">—</dd></div>
+            <div><dt>音声受理</dt><dd id="q-voice-count">—</dd></div>
+            <div><dt>欠落 / 再同期</dt><dd id="q-drops">—</dd></div>
+            <div><dt>音声欠落</dt><dd id="q-audio-drops">—</dd></div>
+          </dl>
         </div>
       </section>
       <section class="overview" aria-label="受信全体の状態">

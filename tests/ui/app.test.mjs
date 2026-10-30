@@ -2236,6 +2236,13 @@ test("phones open in the compact view; the switch next to the logo shows the ful
   assert.equal($("quick-sync").textContent, "通話中");
   assert.equal($("quick-locked").textContent, "3/22");
   assert.equal($("quick-recording").textContent, "オフ");
+  // No caption; the selected channel's figures sit next to its constellation.
+  assert.equal(app.w.document.querySelector(".quick-caption"), null);
+  assert.ok($("quick-constellation"));
+  assert.equal($("q-sync").textContent, "同期中");
+  assert.equal($("q-level").textContent, "-10.0 dBFS");
+  assert.equal($("q-evm").textContent, $("evm").textContent);
+  assert.equal($("q-voice-count").textContent, "7");
   // Its controls drive the full page's.
   $("quick-auto").checked = false;
   $("quick-auto").dispatchEvent(new app.w.Event("change"));

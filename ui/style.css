@@ -1786,10 +1786,6 @@ button.stop {
 .quick p {
   margin: 0;
 }
-.quick-caption {
-  font-size: var(--text-caption);
-  color: var(--muted);
-}
 .quick-frequency {
   font-family: ui-monospace, monospace;
   font-size: 1.625rem;
@@ -1897,13 +1893,81 @@ button.stop {
 .compact .topbar h1 {
   font-size: 1rem;
 }
-.compact .live-panel {
-  margin-block: 12px;
-  padding: 12px 16px;
+/* The compact page fills the screen; the calls list takes what is left and
+   scrolls inside, so the page itself does not scroll. */
+.compact body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
 }
-.compact #live-calls {
-  max-height: 30vh;
+.compact .topbar {
+  width: 100%;
+  box-sizing: border-box;
+  flex: none;
+}
+.compact main {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding-block-end: 12px;
+}
+.compact .live-panel {
+  flex: 1 1 0;
+  min-height: 6.5rem;
   overflow-y: auto;
+  align-content: start;
+  margin-block: 10px 0;
+  padding: 10px 14px;
+}
+.compact .mode-switch button {
+  padding-inline: 10px;
+}
+/* Selected channel: DQPSK symbols on the left, its figures on the right. */
+.quick-scope {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding-block-start: 10px;
+  border-block-start: 1px solid var(--line);
+}
+#quick-constellation {
+  display: block;
+  width: 128px;
+  height: 128px;
+  background: var(--inset);
+  border-radius: var(--radius-control);
+}
+.quick-detail {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+.quick-detail div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.quick-detail dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.quick-detail dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.quick-detail dd.locked {
+  color: var(--accent);
 }
 
 /* Recordings: more on request. */

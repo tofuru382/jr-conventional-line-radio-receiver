@@ -649,6 +649,10 @@ const viewKey = "jr-clrr.view";
 function setViewMode(compact, remember = true) {
   document.documentElement.classList.toggle("compact", compact);
   $("quick").hidden = !compact;
+  if (compact) {
+    const row = lastSnapshot?.channels.find((c) => c.config.id === selected);
+    drawConstellation($("quick-constellation"), running ? (row?.status.constellation ?? []) : []);
+  }
   $("mode-compact").setAttribute("aria-pressed", String(compact));
   $("mode-full").setAttribute("aria-pressed", String(!compact));
   if (remember)
@@ -1191,35 +1195,41 @@ function select(id, manual = false) {
   }
   renderQuick();
 }
+// The selected channel's differential symbols, on the monitor panel and, in
+// the compact view, next to its figures.
 function constellation(points = []) {
-  const canvas = $("constellation"),
-    ctx = canvas.getContext("2d"),
+  drawConstellation($("constellation"), points);
+  if (!$("quick").hidden) drawConstellation($("quick-constellation"), points);
+}
+function drawConstellation(canvas, points) {
+  const ctx = canvas.getContext("2d"),
     w = canvas.width,
-    h = canvas.height;
+    h = canvas.height,
+    k = w / 230; // drawn for 230 px
   ctx.clearRect(0, 0, w, h);
   const palette = getComputedStyle(document.documentElement);
   ctx.strokeStyle = palette.getPropertyValue("--plot-grid");
-  ctx.lineWidth = 1;
+  ctx.lineWidth = k;
   ctx.beginPath();
-  ctx.moveTo(w / 2, 14);
-  ctx.lineTo(w / 2, h - 14);
-  ctx.moveTo(14, h / 2);
-  ctx.lineTo(w - 14, h / 2);
+  ctx.moveTo(w / 2, 14 * k);
+  ctx.lineTo(w / 2, h - 14 * k);
+  ctx.moveTo(14 * k, h / 2);
+  ctx.lineTo(w - 14 * k, h / 2);
   ctx.stroke();
   for (const radius of [40, 80]) {
     ctx.beginPath();
-    ctx.arc(w / 2, h / 2, radius, 0, Math.PI * 2);
+    ctx.arc(w / 2, h / 2, radius * k, 0, Math.PI * 2);
     ctx.stroke();
   }
   for (const x of [-1, 1])
     for (const y of [-1, 1]) {
       ctx.beginPath();
-      ctx.arc(w / 2 + x * 56.6, h / 2 + y * 56.6, 5, 0, Math.PI * 2);
+      ctx.arc(w / 2 + x * 56.6 * k, h / 2 + y * 56.6 * k, 5 * k, 0, Math.PI * 2);
       ctx.stroke();
     }
   ctx.fillStyle = palette.getPropertyValue("--plot-signal");
   for (const [x, y] of points) {
-    ctx.fillRect(w / 2 + x * 80 - 1, h / 2 - y * 80 - 1, 2.5, 2.5);
+    ctx.fillRect(w / 2 + x * 80 * k - k, h / 2 - y * 80 * k - k, 2.5 * k, 2.5 * k);
   }
   ctx.globalAlpha = 1;
 }
@@ -1341,6 +1351,10 @@ function detail(s) {
     ? `有効 ${s.data.valid_frames} · 訂正 ${s.data.corrected_frames} · 電文拒否 ${s.data.rejected_messages}`
     : "";
   constellation(s?.constellation);
+  // The compact view repeats the selected channel's figures.
+  for (const id of ["sync", "level", "evm", "offset", "frames", "voice-count", "drops", "audio-drops"])
+    setText(`q-${id}`, $(id).textContent);
+  $("q-sync").classList.toggle("locked", $("sync").classList.contains("locked"));
   showMessages(s?.messages ?? []);
 }
 async function scan() {
