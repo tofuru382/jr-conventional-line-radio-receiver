@@ -73,6 +73,41 @@ pub fn decode_frame(envelope: &[u8; 48]) -> Option<([u8; 28], usize)> {
     }
     Some((word[..28].try_into().unwrap(), corrections))
 }
+/// Most bytes erased in one soft retry. Twelve roots allow twelve erasures;
+/// stopping at eight keeps four roots of detection on top of CRC-16.
+const MAX_ERASURES: usize = 8;
+
+/// [`decode_frame`], then, if that fails and per-bit reliabilities are
+/// available, errors-and-erasures retries with the least reliable bytes erased.
+pub fn decode_frame_soft(envelope: &[u8; 48], confidence: &[u8]) -> Option<([u8; 28], usize)> {
+    if let Some(result) = decode_frame(envelope) {
+        return Some(result);
+    }
+    if confidence.len() != 384 {
+        return None;
+    }
+    let word = descramble(envelope);
+    let byte_reliability = |byte: usize| {
+        (0..8)
+            .map(|k| {
+                let i = 8 * byte + k;
+                confidence[128 * (i / 112) + 16 + i % 112]
+            })
+            .min()
+            .unwrap_or(0)
+    };
+    let mut order: Vec<usize> = (0..42).collect();
+    order.sort_by_key(|&b| byte_reliability(b));
+    let gf = Galois::get();
+    (2..=MAX_ERASURES).step_by(2).find_map(|erased| {
+        let mut repaired = word;
+        let mut positions = order[..erased].to_vec();
+        positions.sort_unstable();
+        let corrections = gf.correct_with_erasures(&mut repaired, 12, &positions)?;
+        (crc16(&repaired[..28]) == u16::from_be_bytes([repaired[28], repaired[29]]))
+            .then(|| (repaired[..28].try_into().unwrap(), corrections))
+    })
+}
 impl Decoder {
     pub fn new(format: Format) -> Self {
         Self {
@@ -95,7 +130,7 @@ impl Decoder {
         self.operation = operation::Assembler::default();
     }
     pub fn decode(&mut self, frame: &Frame) -> Vec<Message> {
-        let Some((info, corrected)) = decode_frame(&frame.received) else {
+        let Some((info, corrected)) = decode_frame_soft(&frame.received, &frame.confidence) else {
             self.stats.rejected_frames += 1;
             self.reset_assembly();
             return Vec::new();
@@ -509,5 +544,38 @@ mod tests {
         let mut packet = directory(13);
         packet.bytes[19] ^= 1;
         assert!(decoder.common(packet).is_err());
+    }
+}
+
+#[cfg(test)]
+mod soft_tests {
+    use super::*;
+    use crate::coding::scramble;
+
+    #[test]
+    fn unreliable_bytes_are_erased_beyond_the_errors_only_limit() {
+        let gf = Galois::get();
+        let mut word = [0u8; 42];
+        for (i, b) in word[..28].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(29).wrapping_add(7);
+        }
+        let crc = crc16(&word[..28]);
+        word[28..30].copy_from_slice(&crc.to_be_bytes());
+        gf.encode(&mut word, 12);
+        let mut corrupted = word;
+        let mut confidence = vec![180u8; 384];
+        // Eight byte errors: beyond six-error correction, within eight erasures.
+        for byte in [1, 6, 11, 17, 23, 30, 35, 40] {
+            corrupted[byte] ^= 0xa5;
+            for k in 0..8 {
+                let i = 8 * byte + k;
+                confidence[128 * (i / 112) + 16 + i % 112] = 2;
+            }
+        }
+        let envelope = scramble(&corrupted);
+        assert!(decode_frame(&envelope).is_none());
+        let (info, corrections) = decode_frame_soft(&envelope, &confidence).expect("erasures");
+        assert_eq!(info, word[..28]);
+        assert_eq!(corrections, 8);
     }
 }

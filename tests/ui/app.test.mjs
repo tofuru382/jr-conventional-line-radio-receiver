@@ -23,7 +23,7 @@ const catalog = buildCatalog(
 );
 const presets = catalog.find((p) => p.id === "east").channels;
 const defaultRecordingDirectory =
-  "/home/listener/Music/JR Cconventional-line Radio Receiver/Recordings";
+  "/home/listener/Music/JR Conventional-line Radio Receiver/Recordings";
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 function status(messages = []) {
   return {
@@ -103,6 +103,7 @@ async function setup(
       audioContext = this;
     }
     state = "running";
+    sampleRate = 48000;
     currentTime = 0;
     destination = {};
     async resume() {}
@@ -477,14 +478,15 @@ test("a saving session without any call reports that nothing was saved", async (
   assert.equal($("recording-summary").textContent, "通話がなかったため保存しませんでした");
   assert.equal($("recording-output").hidden, true);
 });
-test("every session uses the v1.5 voice decoder, with no choice to make", async (t) => {
+test("the app is based on v1.8 and has no voice decoder choice", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
   assert.equal($("voice-decoder"), null);
-  assert.match($("about-description").textContent, /v1\.5/);
+  assert.match($("about-description").textContent, /v1\.8 をもとにした Android 版$/);
+  assert.equal(app.w.document.querySelector(".about-metadata dd").textContent, "v1.8.0");
   await app.click("start");
   const start = app.calls.find((c) => c.command === "start");
-  assert.equal(start.args.config.voice_decoder, "v15");
+  assert.equal("voice_decoder" in start.args.config, false);
 });
 test("Android built-in driver asks for the dongle before starting", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -647,14 +649,14 @@ test("Android chooses receive targets by route", async (t) => {
 test("Mac uses the simplified layout but keeps SoapySDR, pickers and Web Audio", async (t) => {
   const app = await setup(t, {
     configureConnection: false,
-    platformInfo: { android: false, soapy: true, simple: true, name: "JR-CLRR For Mac", voice_decoder: "v1.5" },
+    platformInfo: { android: false, soapy: true, simple: true, name: "JR-CLRR For Mac" },
   });
   const { $ } = app;
   const root = app.w.document.documentElement;
   assert.ok(root.classList.contains("simple"));
   assert.equal(root.classList.contains("android"), false);
   assert.equal(app.w.document.title, "JR-CLRR For Mac");
-  assert.match($("about-description").textContent, /Mac 版（音声の復号は v1\.5）$/);
+  assert.match($("about-description").textContent, /v1\.8 をもとにした Mac 版$/);
   assert.equal($("voice-decoder"), null);
   assert.match($("about-driver").textContent, /SoapySDR/);
   assert.equal($("route-open").hidden, false);
@@ -775,7 +777,6 @@ test("desktop keeps SoapySDR and pickers and never shows the driver button", asy
   assert.equal($("mute-toggle"), null);
   assert.equal($("test-sound"), null);
   assert.equal($("voice-decoder"), null);
-  assert.equal(app.calls.find((c) => c.command === "start").args.config.voice_decoder, "v15");
   assert.equal($("route-open").hidden, false);
   for (const id of ["browse", "record-browse", "preset-browse"])
     assert.equal($(id).hidden, false, id);
@@ -1521,9 +1522,9 @@ test("about dialog shows product and author, restores focus, and leaves receptio
     ui.w.document.querySelector("footer").textContent,
     /Author|KIRISHIKI|protonmail/,
   );
-  assert.match(dialog.textContent, /JR Cconventional-line Radio Receiver/);
+  assert.match(dialog.textContent, /JR Conventional-line Radio Receiver/);
   assert.match(dialog.textContent, /JR 在来線デジタル列車無線受信アプリ/);
-  assert.match(dialog.textContent, /v1\.5\.0/);
+  assert.match(dialog.textContent, /v1\.8\.0/);
   assert.match(dialog.textContent, /KIRISHIKI Yudai/);
   assert.equal(
     dialog.querySelector("a").getAttribute("href"),
@@ -2173,7 +2174,7 @@ test("operation monitor selects by reception time and ignores legacy message dat
   assert.equal(app.$("operation-state").textContent, "受信済み");
   const view = new OperationMonitorView(app.w.document);
   view.update(s, { channels: s.channels.map((c) => c.config), enabled: new Set(), running: true, replay: true });
-  assert.equal(app.$("operation-received-label").textContent, "最終読取日時");
+  assert.equal(app.$("operation-received-label").textContent, "最終読取日時（JST）");
   assert.equal(app.$("operation-state").textContent, "IQ再生 · 受信済み");
 });
 test("one top button starts and stops reception", async (t) => {
@@ -2243,6 +2244,27 @@ test("phones open in the compact view; the switch next to the logo shows the ful
   assert.equal($("q-level").textContent, "-10.0 dBFS");
   assert.equal($("q-evm").textContent, $("evm").textContent);
   assert.equal($("q-voice-count").textContent, "7");
+  // The band map: each channel at its frequency, coloured by state; the one
+  // being heard is pressed, and tapping another listens to it.
+  const map = $("quick-band-map");
+  const cell = (n) => map.querySelector(`[data-id="${presets[n].id}"]`);
+  assert.equal(map.children.length, 22);
+  assert.equal(map.style.gridTemplateColumns, "repeat(22, minmax(0, 1fr))");
+  assert.equal($("quick-band-low").textContent, "352.53750");
+  assert.equal($("quick-band-high").textContent, "352.66875");
+  assert.equal(cell(1).dataset.state, "calling");
+  assert.equal(cell(1).getAttribute("aria-pressed"), "true");
+  assert.equal(cell(0).dataset.state, "locked");
+  assert.equal(cell(5).dataset.state, "idle");
+  assert.match(cell(0).getAttribute("aria-label"), /352\.\d{5} MHz .+ · 同期中/);
+  assert.equal($("band-map").children.length, 22);
+  cell(5).click();
+  assert.equal($("quick-frequency").textContent, (presets[5].frequency_hz / 1e6).toFixed(5));
+  assert.equal(cell(5).getAttribute("aria-pressed"), "true");
+  assert.equal(cell(1).getAttribute("aria-pressed"), "false");
+  assert.equal($("band-map").querySelector(`[data-id="${presets[5].id}"]`).getAttribute("aria-pressed"), "true");
+  assert.equal($("auto-select").checked, false);
+  $("auto-select").checked = true;
   // Its controls drive the full page's.
   $("quick-auto").checked = false;
   $("quick-auto").dispatchEvent(new app.w.Event("change"));

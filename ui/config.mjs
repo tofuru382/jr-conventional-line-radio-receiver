@@ -4,6 +4,23 @@ export class InputError extends Error {
     this.field = field;
   }
 }
+// Each channel needs its demodulation filter margin inside the complex band.
+export const FILTER_MARGIN_HZ = 4200;
+export function requiredRate(channels, center_hz) {
+  if (!channels.length) return 0;
+  return (
+    2 *
+    (Math.max(...channels.map((c) => Math.abs(c.frequency_hz - center_hz))) +
+      FILTER_MARGIN_HZ)
+  );
+}
+export const RATE_CANDIDATES = {
+  rtl_tcp: [240000, 288000, 1024000, 2048000, 2400000],
+  sdr: [240000, 250000, 1000000, 2048000],
+};
+export function rtlTcpRateSupported(rate) {
+  return (rate > 225000 && rate <= 300000) || (rate > 900000 && rate <= 3200000);
+}
 export function makeInput(values, channels) {
   const bad = (field, message) => {
     throw new InputError(field, message);
@@ -31,14 +48,10 @@ export function makeInput(values, channels) {
     return { kind: "wave", path: values.path.trim(), center_hz };
   }
   const sample_rate = number("rate", 9600, 20000000, true);
-  if (
-    channels.some(
-      (c) => Math.abs(c.frequency_hz - center_hz) + 4200 >= sample_rate / 2,
-    )
-  )
+  if (requiredRate(channels, center_hz) >= sample_rate)
     bad(
       "center",
-      `選択した ${channels.length} 波が帯域に収まるよう、中心周波数とサンプルレートを設定してください。周波数の中点は ${((Math.min(...channels.map((c) => c.frequency_hz)) + Math.max(...channels.map((c) => c.frequency_hz))) / 2e6).toFixed(6)} MHz です。`,
+      `受信対象の ${channels.length} 波が帯域に収まるよう、中心周波数とサンプルレートを設定してください。周波数の中点は ${((Math.min(...channels.map((c) => c.frequency_hz)) + Math.max(...channels.map((c) => c.frequency_hz))) / 2e6).toFixed(6)} MHz です。`,
     );
   const gain_db = values.gain === "" ? null : number("gain", -100, 100);
   if (values.kind === "usb") {
@@ -74,13 +87,10 @@ export function makeInput(values, channels) {
       );
     const port = number("port", 1, 65535, true),
       ppm = number("ppm", -1000, 1000, true);
-    if (
-      !(sample_rate > 225000 && sample_rate <= 300000) &&
-      !(sample_rate > 900000 && sample_rate <= 3200000)
-    )
+    if (!rtlTcpRateSupported(sample_rate))
       bad(
         "rate",
-        "RTL-TCP は 225001–300000 または 900001–3200000 S/s に対応します。選択したプリセットの全周波数が収まるレートを指定してください。",
+        "RTL-TCP は 225001–300000 または 900001–3200000 S/s に対応します。受信対象の全周波数が収まるレートを指定してください。",
       );
     if (gain_db !== null && gain_db < -10)
       bad(

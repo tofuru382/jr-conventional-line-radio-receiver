@@ -30,7 +30,7 @@ pub fn app_music_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
             format!("初期保存先を取得できませんでした。保存先フォルダーを選択してください。{e}")
         })?;
     Ok(music
-        .join("JR Cconventional-line Radio Receiver")
+        .join("JR Conventional-line Radio Receiver")
         .join("Recordings"))
 }
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "JR Cconventional-line Radio Receiver configuration, version 1",
+  "title": "JR Conventional-line Radio Receiver configuration, version 1",
   "description": "Application-owned channel definitions and receive profiles. Cross-reference, uniqueness and capture bandwidth checks run in receiver-core.",
   "type": "object",
   "additionalProperties": false,

@@ -112,6 +112,23 @@ impl<C: ControlBackend + 'static> Session<C> {
                 .await
         })
     }
+    /// JR-CLRR: see [`Hardware::set_manual_gain`].
+    pub(crate) fn set_manual_gain(
+        self: &Arc<Self>,
+        db: f32,
+    ) -> impl MaybeFuture<Output = Result<()>> + use<C> {
+        let shared = Arc::clone(self);
+        operation(async move {
+            shared.ensure_open()?;
+            let mut lease = shared.lease()?;
+            lease
+                .hardware
+                .as_mut()
+                .expect("leased hardware")
+                .set_manual_gain(shared.control.as_ref(), db)
+                .await
+        })
+    }
     pub(crate) fn initialize(
         control: C,
         descriptor: DeviceDescriptor,

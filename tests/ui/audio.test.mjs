@@ -7,14 +7,15 @@ const frame = (index, epoch = 0, channel = "a") => ({ channel, epoch, index, pcm
 const burst = (first, count) =>
   Array.from({ length: count }, (_, i) => frame(first + i));
 
-function setup() {
+function setup(sampleRate = 48000) {
   const nodes = [];
   const context = {
     state: "running",
+    sampleRate,
     currentTime: 0,
     createBuffer(_channels, length, rate) {
       const data = new Float32Array(length);
-      return { duration: length / rate, getChannelData: () => data };
+      return { length, sampleRate: rate, duration: length / rate, getChannelData: () => data };
     },
     createBufferSource() {
       const node = {
@@ -99,7 +100,7 @@ test("real frame loss preserves its silence and a long idle interval starts a ne
   player.enqueue([frame(200), frame(201), frame(202)], "a");
   assert.equal(nodes.length, 5);
   assert.ok(nodes[3].at > 9);
-  assert.equal(nodes[4].at, nodes[3].end);
+  assert.equal(Math.round(nodes[4].at * 48000), Math.round(nodes[3].end * 48000));
 });
 
 test("exceptional bursts cannot build an unbounded playback queue or replay dropped frames", () => {
@@ -147,7 +148,7 @@ for (const clockRate of [0.999, 1, 1.001]) {
           count++;
         }
         nodes.length = 0;
-        // Include the partly played frame and a playback rate above 1.
+        // Include the partly played frame and a resampling rate above 1.
         assert.ok(player.sources.size <= 39);
         index = available;
         time += intervals[poll % intervals.length];
@@ -174,7 +175,8 @@ for (const clockRate of [0.999, 1, 1.001]) {
         assert.ok(node.at >= time, `late frame at ${time}`);
         if (end !== undefined)
           assert.ok(Math.abs(node.at - end) < 1e-9, `gap or overlap at ${time}`);
-        assert.ok(Math.abs(node.playbackRate.value - 1) <= 0.005);
+        assert.equal(node.playbackRate.value, 1);
+        assert.ok(Math.abs(player.rate - 1) <= 0.005);
         end = node.end;
         count++;
       }
@@ -227,4 +229,56 @@ test("leveler measures each transmission afresh after a pause", () => {
   const out = l.process(loud);
   assert.ok(rms(out.slice(0, 160)) <= rms(loud.slice(0, 160)) * 1.05);
   assert.ok(l.gain <= 1);
+});
+
+for (const sampleRate of [44100, 48000, 96000]) {
+  test(`${sampleRate} Hz output retains waveform and fractional phase across PCM boundaries`, () => {
+    const { player, nodes, advance } = setup(sampleRate);
+    const input = Array.from({ length: 320 * 200 }, (_, i) =>
+      Math.round(8000 * Math.cos((2 * Math.PI * 997 * i) / 8000)),
+    );
+    let position = -1;
+    let previousEnd;
+    let maxError = 0;
+    for (let batch = 0; batch < 40; batch++) {
+      // Exercise continuous resampling while the drift correction changes.
+      advance(batch * 0.199);
+      player.enqueue(Array.from({ length: 5 }, (_, i) => {
+        const index = batch * 5 + i;
+        return { ...frame(index), pcm: input.slice(index * 320, (index + 1) * 320) };
+      }), "a");
+      for (const node of nodes) {
+        const start = Math.round(node.at * sampleRate);
+        assert.ok(Math.abs(node.at * sampleRate - start) < 1e-7);
+        if (previousEnd !== undefined) assert.equal(start, previousEnd);
+        assert.equal(node.buffer.sampleRate, sampleRate);
+        assert.equal(node.playbackRate.value, 1);
+        previousEnd = start + node.buffer.length;
+        for (const actual of node.buffer.getChannelData(0)) {
+          // Reference a single continuous input timeline, independently of
+          // PCM frame boundaries and the number of output samples per frame.
+          const at = Math.max(0, position);
+          const lower = Math.floor(at);
+          const expected = (input[lower] +
+            (input[lower + 1] - input[lower]) * (at - lower)) / 32768;
+          assert.ok(Number.isFinite(actual));
+          maxError = Math.max(maxError, Math.abs(actual - expected));
+          position += (8000 * player.rate) / sampleRate;
+        }
+      }
+      nodes.length = 0;
+    }
+    assert.ok(maxError < 1e-6, `streaming interpolation error: ${maxError}`);
+    assert.ok(Math.abs(position - (input.length - 1)) < 8000 * 1.005 / sampleRate);
+  });
+}
+
+test("gaps and epoch changes reset interpolation without mixing another call's samples", () => {
+  const { player, nodes } = setup(44100);
+  const positive = frame(0);
+  const negative = { ...frame(2), pcm: pcm.map(v => -v) };
+  player.enqueue([positive, negative], "a");
+  assert.ok(nodes[1].buffer.getChannelData(0).every(v => v === -8000 / 32768));
+  player.enqueue([frame(0, 1)], "a");
+  assert.ok(nodes[2].buffer.getChannelData(0).every(v => v === 8000 / 32768));
 });

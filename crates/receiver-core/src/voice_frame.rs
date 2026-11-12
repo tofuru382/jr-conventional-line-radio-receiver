@@ -113,6 +113,67 @@ fn viterbi(received: &[u8; 176]) -> [u8; 94] {
     }
     r
 }
+/// Viterbi decoding with per-bit weights: a disagreeing coded bit costs its
+/// reliability, so erased bits (weight 0) carry no evidence.
+fn soft_viterbi(received: &[u8; 176], weights: &[u8; 176]) -> [u8; 94] {
+    const UNREACHED: u32 = u32::MAX / 4;
+    let mut costs = [UNREACHED; 256];
+    costs[0] = 0;
+    let mut next = [0u32; 256];
+    let mut survivors = [[0u8; 32]; 94];
+    for t in 0..94 {
+        let punctured = COORDINATES[2 * t] == 255;
+        let a = received[COORDINATES[2 * t + 1]];
+        let wa = weights[COORDINATES[2 * t + 1]] as u32;
+        let (b, wb) = if punctured {
+            (0, 0)
+        } else {
+            (
+                received[COORDINATES[2 * t]],
+                weights[COORDINATES[2 * t]] as u32,
+            )
+        };
+        for prior in 0..128 {
+            let symbol = prior * 2;
+            let distance =
+                (parity(symbol & 0x11d) ^ a) as u32 * wa + (parity(symbol & 0x1af) ^ b) as u32 * wb;
+            let complement = wa + wb - distance;
+            let (left, right) = (costs[prior], costs[prior + 128]);
+            next[2 * prior] = (left + distance).min(right + complement);
+            next[2 * prior + 1] = (left + complement).min(right + distance);
+            set(
+                &mut survivors[t],
+                2 * prior,
+                u8::from(right + complement < left + distance),
+            );
+            set(
+                &mut survivors[t],
+                2 * prior + 1,
+                u8::from(right + distance < left + complement),
+            );
+        }
+        let floor = *next.iter().min().unwrap_or(&0);
+        for (c, n) in costs.iter_mut().zip(&next) {
+            *c = (n - floor).min(UNREACHED);
+        }
+    }
+    let mut state = 0;
+    let mut r = [0; 94];
+    for t in (0..94).rev() {
+        r[t] = (state & 1) as u8;
+        state = (state >> 1) | ((bit(&survivors[t], state) as usize) << 7);
+    }
+    r
+}
+/// Reliability of each descrambled word bit (LSB-first index) from the
+/// envelope's per-bit confidence (MSB-first).
+fn word_confidence(confidence: &[u8]) -> [u8; 336] {
+    let mut out = [0; 336];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = confidence[128 * (i / 112) + 16 + i % 112];
+    }
+    out
+}
 fn tail(word: &mut [u8; 42]) {
     let crc = crc16(&word[28..34]);
     word[34..36].copy_from_slice(&crc.to_be_bytes());
@@ -200,6 +261,81 @@ fn joint(word: &[u8; 42], received: &[u8; 176], source: &[u8; 94]) -> Option<Spe
     }
     None
 }
+/// Build a valid voice envelope for `payload` (158 bits; the top two bits of
+/// byte 19 are ignored). This mirrors [`decode`] and exists so tests and
+/// development tools can synthesize radio signals without recordings.
+#[cfg(any(test, feature = "synthesis"))]
+pub(crate) fn encode(payload: &[u8; 20], alternate: bool) -> [u8; 48] {
+    let mut input = [0u8; 94];
+    for i in 0..78 {
+        input[4 + i] = bit(payload, i);
+    }
+    let checksum = crc8(&input[4..]);
+    for (i, &p) in CRC_POS.iter().enumerate() {
+        input[p] = (checksum >> i) & 1;
+    }
+    let mut word = [0u8; 42];
+    for i in 0..40 {
+        set(&mut word, i, bit(payload, 78 + i));
+        set(&mut word[16..], i, bit(payload, 118 + i));
+    }
+    write_protected(&mut word, &convolution(&input));
+    word[32] = 0x80;
+    word[33] = u8::from(alternate);
+    tail(&mut word);
+    crate::coding::scramble(&word)
+}
+/// Largest Hamming distance accepted after soft decoding. Acceptance still
+/// requires CRC-8 over the protected payload and the re-encoded tail
+/// (CRC-16 and Reed–Solomon parity, 64 bits) to match the received tail.
+const SOFT_DISTANCE: u16 = 24;
+
+/// [`decode`], then, if that fails and per-bit reliabilities are available,
+/// soft-decision Viterbi decoding and errors-and-erasures repair of the
+/// Reed–Solomon tail with its least reliable bytes erased.
+pub fn decode_soft(envelope: &[u8; 48], confidence: &[u8]) -> Option<Speech> {
+    if let Some(speech) = decode(envelope) {
+        return Some(speech);
+    }
+    if confidence.len() != 384 {
+        return None;
+    }
+    let word = descramble(envelope);
+    let reliability = word_confidence(confidence);
+    let received = protected(&word);
+    let mut weights = [0u8; 176];
+    for i in 0..88 {
+        weights[2 * i] = reliability[40 + i];
+        weights[2 * i + 1] = reliability[168 + i];
+    }
+    let decoded = soft_viterbi(&received, &weights);
+    // Tail bytes 28..42 from least to most reliable.
+    let mut order: Vec<usize> = (0..14).collect();
+    order.sort_by_key(|&b| {
+        let byte = 28 + b;
+        (0..8).map(|k| reliability[8 * byte + k]).min().unwrap_or(0)
+    });
+    let gf = Galois::get();
+    let mut candidates = vec![word];
+    for erased in [0, 2, 4, 6] {
+        let mut repaired = word;
+        let mut positions = order[..erased].to_vec();
+        positions.sort_unstable();
+        if gf
+            .correct_with_erasures(&mut repaired[28..], 6, &positions)
+            .is_some()
+            && !candidates.contains(&repaired)
+        {
+            candidates.push(repaired);
+        }
+    }
+    candidates.into_iter().find_map(|c| {
+        if !mode(&c) || crc16(&c[28..34]) != u16::from_be_bytes([c[34], c[35]]) {
+            return None;
+        }
+        checked(&c, &received, &decoded, SOFT_DISTANCE)
+    })
+}
 pub fn decode(envelope: &[u8; 48]) -> Option<Speech> {
     let word = descramble(envelope);
     let received = protected(&word);
@@ -243,4 +379,87 @@ pub fn decode(envelope: &[u8; 48]) -> Option<Speech> {
         decoded = viterbi(&received);
     }
     joint(&word, &received, &decoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_frames_decode_to_the_same_payload_and_survive_bit_errors() {
+        let mut state = 0x2545_f491_u32;
+        for alternate in [false, true] {
+            for _ in 0..50 {
+                let mut payload = [0u8; 20];
+                for byte in &mut payload {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    *byte = state as u8;
+                }
+                payload[19] &= 0x3f;
+                let mut envelope = encode(&payload, alternate);
+                assert_eq!(descramble(&envelope)[32], 0x80);
+                let speech = decode(&envelope).expect("clean frame");
+                assert_eq!(speech.payload, payload);
+                assert_eq!(speech.corrected_bits, 0);
+                // Two scattered errors in the convolutionally protected area
+                // (word bytes 5..16 and 21..32); other payload bits are raw.
+                for word_bit in [48, 203] {
+                    let pos = 128 * (word_bit / 112) + 16 + word_bit % 112;
+                    envelope[pos / 8] ^= 1 << (7 - pos % 8);
+                }
+                assert_eq!(decode(&envelope).expect("corrected").payload, payload);
+            }
+        }
+    }
+
+    #[test]
+    fn soft_decoding_recovers_frames_hard_decoding_rejects() {
+        let mut payload = [0u8; 20];
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37) ^ 0x5a;
+        }
+        payload[19] &= 0x3f;
+        let mut envelope = encode(&payload, false);
+        let mut confidence = vec![200u8; 384];
+        // Twelve errors spread over the protected bits, each flagged unreliable,
+        // plus one corrupted tail byte that the erasure repair must restore.
+        for k in 0..12 {
+            let word_bit = if k % 2 == 0 { 40 + 7 * k } else { 168 + 7 * k };
+            let pos = 128 * (word_bit / 112) + 16 + word_bit % 112;
+            envelope[pos / 8] ^= 1 << (7 - pos % 8);
+            confidence[pos] = 3;
+        }
+        for word_bit in 8 * 38..8 * 39 {
+            let pos = 128 * (word_bit / 112) + 16 + word_bit % 112;
+            envelope[pos / 8] ^= 1 << (7 - pos % 8);
+            confidence[pos] = 1;
+        }
+        assert!(decode(&envelope).is_none());
+        let speech = decode_soft(&envelope, &confidence).expect("soft decode");
+        assert_eq!(speech.payload, payload);
+        // Without reliabilities the soft path is the hard path.
+        assert!(decode_soft(&envelope, &[]).is_none());
+    }
+
+    #[test]
+    fn random_frames_are_never_accepted() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let mut envelope = [0u8; 48];
+            for chunk in envelope.chunks_mut(8) {
+                chunk.copy_from_slice(&next().to_le_bytes());
+            }
+            let confidence: Vec<u8> = (0..384).map(|_| (next() >> 56) as u8).collect();
+            assert!(decode_soft(&envelope, &confidence).is_none());
+            assert!(crate::data::decode_frame_soft(&envelope, &confidence).is_none());
+        }
+    }
 }

@@ -8,7 +8,7 @@
       content="KIRISHIKI Yudai &lt;yudai.kirishiki@protonmail.com&gt;"
     />
     <title>
-      JR Cconventional-line Radio Receiver (JR 在来線デジタル列車無線受信アプリ)
+      JR Conventional-line Radio Receiver (JR 在来線デジタル列車無線受信アプリ)
     </title>
     <link rel="stylesheet" href="style.css" />
     <link rel="icon" type="image/png" href="assets/app-icon.png" />
@@ -26,7 +26,7 @@
           alt=""
         />
         <div>
-          <p class="eyebrow">JR Cconventional-line Radio Receiver</p>
+          <p class="eyebrow">JR Conventional-line Radio Receiver</p>
           <h1>JR 在来線デジタル列車無線受信アプリ</h1>
         </div>
         <div id="view-mode" class="mode-switch" role="group" aria-label="表示" hidden>
@@ -50,6 +50,12 @@
         <button id="preferences-retry" type="button">保存を再試行</button>
       </div>
       <section id="quick" class="card quick" aria-label="受信の概要" hidden>
+        <div class="band">
+          <div id="quick-band-map" class="band-map" role="group" aria-label="受信帯域の波（押すとその波を聴きます）"></div>
+          <div class="band-scale" aria-hidden="true">
+            <span id="quick-band-low"></span><span id="quick-band-high"></span>
+          </div>
+        </div>
         <div class="quick-now">
           <p class="quick-frequency">
             <bdi id="quick-frequency">—</bdi> <small>MHz</small>
@@ -115,6 +121,7 @@
             <bdi id="band-low">352.53750</bdi><span>–</span
             ><bdi id="band-high">352.66875</bdi> <small>MHz</small>
           </p>
+          <div id="band-map" class="band-map" role="group" aria-label="受信帯域の波（押すとその波を聴きます）"></div>
           <p id="band-note">22 波 · 音声とデータを並列復号</p>
         </div>
         <dl class="totals">
@@ -624,8 +631,8 @@
       </div>
       <footer>
         <span
-          >JR Cconventional-line Radio Receiver
-          <span class="version">v1.5.0</span></span
+          >JR Conventional-line Radio Receiver
+          <span class="version">v1.8.0</span></span
         >
         <button
           id="about-open"
@@ -648,14 +655,14 @@
         <h2 id="about-title">バージョン情報</h2>
       </div>
       <p id="about-product" class="about-product">
-        JR Cconventional-line Radio Receiver
+        JR Conventional-line Radio Receiver
       </p>
       <p id="about-description" class="muted">
         JR 在来線デジタル列車無線受信アプリ
       </p>
       <dl class="about-metadata">
         <dt>バージョン</dt>
-        <dd>v1.5.0</dd>
+        <dd>v1.8.0</dd>
         <dt>Author</dt>
         <dd class="about-author">
           <span>KIRISHIKI Yudai</span>
@@ -702,7 +709,8 @@
         <div class="route-actions">
           <p id="route-effect"></p>
           <p id="route-locked" class="field-hint" hidden>受信中・処理中は参照のみできます。受信を停止してから適用してください。</p>
-          <p id="route-error" class="field-error" role="alert" hidden></p>
+          <p id="route-error" class="field-error" hidden></p>
+          <p id="route-announcer" class="sr-only" role="alert"></p>
           <div><button id="route-cancel" type="button">キャンセル</button><button id="route-apply" type="button" class="primary">受信対象に適用</button></div>
         </div>
       </div>

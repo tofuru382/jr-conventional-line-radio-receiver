@@ -112,7 +112,9 @@ export class RoutePicker {
     const common = this.preset?.channels.some((c) => c.format === "common");
     this.get("route-common").checked = !!common;
     this.get("route-common").disabled = !common;
-    this.get("route-common-hint").textContent = common ? "" : "このプリセットにはありません";
+    // Only explain the disabled state; the checkbox label covers the rest.
+    this.get("route-common-hint").textContent = common ? "" : "このプリセットには割当がありません";
+    this.get("route-common-hint").hidden = !!common;
     const routes = [...(this.preset?.routes ?? [])].sort((a, b) => a.line.localeCompare(b.line, "ja") || a.section.localeCompare(b.section, "ja"));
     this.items = routes.map((route) => {
       const item = this.node("li");
@@ -189,11 +191,18 @@ export class RoutePicker {
     this.get("route-apply").textContent = channels.length ? `この ${channels.length} 波を受信対象にする` : "受信対象に適用";
     this.setBlocked(this.blocked);
   }
+  // The modal makes the page announcer inert, so the dialog keeps its own.
+  showError(text) {
+    this.get("route-error").textContent = text;
+    this.get("route-error").hidden = false;
+    const announcer = this.get("route-announcer");
+    announcer.textContent = "";
+    setTimeout(() => { announcer.textContent = text; }, 50);
+  }
   async submit() {
     if (this.blocked || this.applying || !this.preset?.routes?.length) return;
     if (!this.chosen.size) {
-      this.get("route-error").textContent = "受信したい路線・区間を1つ以上選択してください。";
-      this.get("route-error").hidden = false;
+      this.showError("受信したい路線・区間を1つ以上選択してください。");
       this.get("route-search").focus();
       return;
     }
@@ -212,8 +221,7 @@ export class RoutePicker {
       this.lastApplied = { profileId: preset.id, routeIds, channelIds: selection.channels.map((c) => c.id), common };
       this.dialog.close();
     } catch (error) {
-      this.get("route-error").textContent = error.message ?? String(error);
-      this.get("route-error").hidden = false;
+      this.showError(error.message ?? String(error));
     } finally {
       this.applying = false;
       this.dialog.removeAttribute("aria-busy");

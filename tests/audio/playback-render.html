@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Playback waveform regression</title>
+<pre id="result">Rendering synthetic PCM without speaker output…</pre>
+<script type="module">
+  import { AudioPlayer } from "../../ui/audio.mjs";
+
+  // This exercises real AudioBufferSourceNode rendering, not the scheduling
+  // mocks in tests/ui. Open via a local web server in other browser engines.
+  const results = [];
+  try {
+    for (const sampleRate of [44100, 48000, 96000]) {
+      for (const frequency of [0, 997]) {
+        const engine = new OfflineAudioContext(1, sampleRate * 9, sampleRate);
+        let now = 0;
+        const context = {
+          state: "running",
+          sampleRate,
+          get currentTime() { return now; },
+          createBuffer: (...args) => engine.createBuffer(...args),
+          createBufferSource: () => engine.createBufferSource(),
+        };
+        const player = new AudioPlayer(context, engine.destination);
+        // Batches arrive slightly faster than the output clock, forcing drift
+        // correction and fractional source positions across 200 PCM frames.
+        for (let batch = 0; batch < 40; batch++) {
+          now = batch * 0.199;
+          player.enqueue(Array.from({ length: 5 }, (_, i) => {
+            const index = batch * 5 + i;
+            return {
+              channel: "synthetic", epoch: 0, index,
+              pcm: Array.from({ length: 320 }, (_, j) => Math.round(
+                8000 * Math.cos(2 * Math.PI * frequency * (index * 320 + j) / 8000),
+              )),
+            };
+          }), "synthetic");
+        }
+        const rendered = await engine.startRendering();
+        const samples = rendered.getChannelData(0);
+        let maximumStep = 0, maximumAmplitudeError = 0;
+        // Exclude the intentional start/stop edges; include every PCM boundary.
+        for (let i = Math.ceil(0.45 * sampleRate); i < (player.end - 0.01) * sampleRate; i++) {
+          if (!Number.isFinite(samples[i])) throw Error("Non-finite output");
+          maximumStep = Math.max(maximumStep, Math.abs(samples[i] - samples[i - 1]));
+          maximumAmplitudeError = Math.max(maximumAmplitudeError, Math.abs(samples[i] - 8000 / 32768));
+        }
+        const maximumSlope = (8000 / 32768) * 2 * Math.PI * frequency * 1.005 / sampleRate + 2 / 32768;
+        const ok = frequency ? maximumStep < maximumSlope : maximumAmplitudeError < 1e-6;
+        results.push({ sampleRate, frequency, maximumStep, maximumAmplitudeError: frequency ? null : maximumAmplitudeError, ok });
+      }
+    }
+    window.audioTestResult = { ok: results.every(r => r.ok), results };
+  } catch (e) {
+    window.audioTestResult = { ok: false, error: String(e.stack ?? e), results };
+  }
+  const text = JSON.stringify(window.audioTestResult, null, 2);
+  document.getElementById("result").textContent = text;
+  window.webkit?.messageHandlers?.audioTest?.postMessage(text);
+</script>

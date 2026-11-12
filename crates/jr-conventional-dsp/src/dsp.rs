@@ -2,6 +2,7 @@
 //! Preserve the receiver filters and JR label convention; equalize before decisions.
 
 use crate::equalizer::{Equalizer, TAPS};
+use crate::sequence::{Sequence, Tracking};
 use crate::signal::SignalView;
 use std::f64::consts::PI;
 
@@ -272,7 +273,12 @@ impl ClockRecovery {
     }
 
     fn update(&mut self, error: f32) {
-        const BW: f32 = 0.02;
+        // Loop bandwidth. When two paths about half a symbol apart fade in
+        // turn, the timing error swings between them and a wide loop slips
+        // whole symbols. 0.01 halved slips with slow echoes in synthetic
+        // channels and gained frames in the field capture without losing
+        // flat-fading or frequency-offset margin; 0.005 cost fast-fading margin.
+        const BW: f32 = 0.01;
         const DENOMINATOR: f32 = 1.0 + 128.0 * BW + BW * BW;
         const ALPHA: f32 = 256.0 * BW / DENOMINATOR;
         const BETA: f32 = 4.0 * BW * BW / DENOMINATOR;
@@ -285,17 +291,34 @@ impl ClockRecovery {
     }
 }
 
-#[derive(Default)]
+// The primary carrier loop and detector use LMS tracking (low noise) and
+// drive the diagnostic constellation and lock state. When enabled, an
+// alternate carrier loop and detector with drift RLS tracking (fast
+// time-varying simulcast ISI) see the same matched-filter output; each loop
+// follows its own channel estimate. Both decision streams leave at the same
+// latency and the frame decoders use whichever passes their checks.
 struct Carrier {
     phase: f64,
     frequency: f64,
     alternation: i32,
     locked: bool,
     error: f64,
-    sequence: crate::sequence::Sequence,
+    sequence: Sequence,
 }
 impl Carrier {
-    fn process(&mut self, sample: Complex32, reliable: bool) -> Option<u8> {
+    fn new(tracking: Tracking) -> Self {
+        Self {
+            phase: 0.0,
+            frequency: 0.0,
+            alternation: 0,
+            locked: false,
+            error: 0.0,
+            sequence: Sequence::new(tracking),
+        }
+    }
+}
+impl Carrier {
+    fn process(&mut self, sample: Complex32, reliable: bool) -> Option<(u8, [u8; 2])> {
         let rotation = self.phase + self.alternation as f64 * PI / 4.0;
         let (sine, cosine) = rotation.sin_cos();
         let corrected = Complex32 {
@@ -321,6 +344,7 @@ struct SymbolChain {
     clock: ClockRecovery,
     equalizer: Equalizer,
     carrier: Carrier,
+    alternate: Option<Carrier>,
     agc: [Complex32; 64],
     head: usize,
     fill: usize,
@@ -336,7 +360,8 @@ impl SymbolChain {
             signal: SignalView::default(),
             clock: ClockRecovery::new(),
             equalizer: Equalizer::default(),
-            carrier: Carrier::default(),
+            carrier: Carrier::new(Tracking::Lms),
+            alternate: None,
             agc: [Complex32::default(); 64],
             head: 0,
             fill: 0,
@@ -347,7 +372,7 @@ impl SymbolChain {
         }
     }
 
-    fn process(&mut self, value: Complex32) -> Option<u8> {
+    fn process(&mut self, value: Complex32) -> Option<[(u8, [u8; 2]); 2]> {
         self.agc[self.head] = value;
         self.head = (self.head + 1) % self.agc.len();
         if self.fill < self.agc.len() {
@@ -375,16 +400,29 @@ impl SymbolChain {
         })?;
         let (symbol, timing_error) = self.equalizer.process(&matched, &derivatives, reliable);
         self.clock.update(timing_error);
-        self.signal.push(symbol);
-        let dibit = self.carrier.process(symbol, reliable)?;
+        let primary = self.carrier.process(symbol, reliable);
+        // Equal traceback depths make both detectors emit on the same symbol.
+        let dibit = match self.alternate.as_mut() {
+            Some(alternate) => primary.zip(alternate.process(symbol, reliable)),
+            None => primary.map(|p| (p, p)),
+        }
+        .map(|(a, b)| [a, b]);
+        // Observe only after all waveform, timing, carrier and survivor-channel
+        // corrections. Keep the received scatter rather than plotting dibits.
+        self.signal.push(self.carrier.sequence.equalized());
+        let streams = dibit?;
         self.symbols += 1;
         if self.carrier.locked {
             self.locked_symbols += 1;
         }
-        Some(match self.profile {
-            1 => [0, 3, 1, 2][dibit as usize],
-            _ => dibit,
-        })
+        Some(streams.map(|(dibit, soft)| match self.profile {
+            // Conjugated labels: MSB' = LSB, LSB' = MSB xor LSB.
+            1 => (
+                [0, 3, 1, 2][dibit as usize],
+                [soft[1], soft[0].min(soft[1])],
+            ),
+            _ => (dibit, soft),
+        }))
     }
 }
 
@@ -425,7 +463,56 @@ impl Demodulator {
         }
     }
 
+    /// Also run the alternate (drift RLS) detector; see [`Self::process_dual`].
+    pub fn enable_alternate(&mut self) {
+        if self.symbols.alternate.is_none() {
+            self.symbols.alternate = Some(Carrier::new(Tracking::Drift));
+        }
+    }
+
     pub fn process(&mut self, input: &[Complex32], output: &mut [u8]) -> usize {
+        self.process_soft(input, output, None)
+    }
+
+    /// As [`Self::process`], also writing two bit reliabilities per dibit
+    /// (MSB first) when `soft` is given; it needs the same capacity in pairs.
+    pub fn process_soft(
+        &mut self,
+        input: &[Complex32],
+        output: &mut [u8],
+        mut soft: Option<&mut [[u8; 2]]>,
+    ) -> usize {
+        self.run(input, |written, streams| {
+            output[written] = streams[0].0;
+            if let Some(soft) = soft.as_deref_mut() {
+                soft[written] = streams[0].1;
+            }
+        })
+    }
+
+    /// Primary and alternate decision streams with reliabilities, index for
+    /// index. Without [`Self::enable_alternate`] both are the primary stream.
+    pub fn process_dual(
+        &mut self,
+        input: &[Complex32],
+        output: [&mut [u8]; 2],
+        soft: [&mut [[u8; 2]]; 2],
+    ) -> usize {
+        let [first, second] = output;
+        let [first_soft, second_soft] = soft;
+        self.run(input, |written, streams| {
+            first[written] = streams[0].0;
+            first_soft[written] = streams[0].1;
+            second[written] = streams[1].0;
+            second_soft[written] = streams[1].1;
+        })
+    }
+
+    fn run(
+        &mut self,
+        input: &[Complex32],
+        mut sink: impl FnMut(usize, [(u8, [u8; 2]); 2]),
+    ) -> usize {
         let mut written = 0;
         for sample in input {
             let real = sample.real as f64 * self.oscillator_real
@@ -456,8 +543,8 @@ impl Demodulator {
             };
             let symbols = &mut self.symbols;
             self.resampler.process(sample, &mut |value| {
-                if let Some(dibit) = symbols.process(value) {
-                    output[written] = dibit;
+                if let Some(streams) = symbols.process(value) {
+                    sink(written, streams);
                     written += 1;
                 }
             });
@@ -478,5 +565,65 @@ impl Demodulator {
             carrier_locked: i32::from(self.symbols.carrier.locked),
             reserved: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constellation_tracks_filtered_carrier_and_isi_corrected_iq() {
+        // Synthetic pi/4-DQPSK at four samples/symbol: pulse shaping, a delayed
+        // reflection, a carrier offset and deterministic noise. No recordings.
+        let taps = root_raised_cosine(81, 4.0, 4.0);
+        let mut shaped = vec![Complex32::default(); 6000 * 4 + taps.len()];
+        let mut rng = 0x8123_4567_u32;
+        for i in 0..6000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            let angle = (rng >> 30) as f64 * PI / 2.0 + PI / 4.0 + i as f64 * PI / 4.0;
+            for (j, &tap) in taps.iter().enumerate() {
+                shaped[i * 4 + j].real += angle.cos() as f32 * tap;
+                shaped[i * 4 + j].imaginary += angle.sin() as f32 * tap;
+            }
+        }
+        let input: Vec<_> = shaped
+            .iter()
+            .enumerate()
+            .map(|(i, &direct)| {
+                let echo = shaped[i.saturating_sub(4)];
+                let real = direct.real + 0.45 * echo.real;
+                let imaginary = direct.imaginary + 0.45 * echo.imaginary;
+                let phase = 2.0 * PI * 90.0 * i as f64 / 19200.0;
+                // Two independent, repeatable bounded noise components.
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+                Complex32 {
+                    real: real * phase.cos() as f32 - imaginary * phase.sin() as f32
+                        + 0.03 * ((rng & 0xffff) as f32 / 32768.0 - 1.0),
+                    imaginary: real * phase.sin() as f32
+                        + imaginary * phase.cos() as f32
+                        + 0.03 * ((rng >> 16) as f32 / 32768.0 - 1.0),
+                }
+            })
+            .collect();
+        let mut receiver = Demodulator::new(19200.0, 0.0, 0);
+        let mut output = [0; 1024];
+        let mut points = [Complex32::default(); 256];
+        for chunk in input.chunks(509) {
+            receiver.process(chunk, &mut output);
+        }
+        let (count, evm) = receiver.read_signal(&mut points);
+        assert_eq!(count, points.len());
+        assert!(receiver.snapshot().carrier_locked != 0);
+        assert!(evm > 1.0 && evm < 20.0, "post-correction EVM: {evm}%");
+        // Hard-decided corners or per-point amplitude normalization would hide
+        // the scatter that operators use to assess reception quality.
+        assert!(points
+            .iter()
+            .any(|p| (p.real * p.real + p.imaginary * p.imaginary - 1.0).abs() > 0.02));
     }
 }

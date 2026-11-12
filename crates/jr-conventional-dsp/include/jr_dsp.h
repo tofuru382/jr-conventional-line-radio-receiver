@@ -40,7 +40,11 @@ int32_t JR_DSP_CALL jr_dsp_process(void *handle, const JrComplex32 *input, int32
     uint8_t *output, int32_t capacity, int32_t *written, JrDspSnapshot *snapshot);
 
 /* Passive diagnostic read. Capacity 0..1024; latest differential symbols,
- * oldest first, normalized by the window RMS amplitude. EVM is a percentage
+ * oldest first, after receive filtering, timing and carrier recovery, and
+ * ISI/complex-gain removal using the current best sequence survivor's channel.
+ * Unsliced observations, not hard traceback decisions; the known pi/4 increment
+ * is restored for the diagonal references. Normalized by the window RMS
+ * amplitude. EVM is a percentage
  * of that amplitude relative to the nearest ideal diagonal corner. No points
  * and zero EVM means no measurable symbol power, not perfect reception.
  * All points including outliers contribute; no clipping or noise calibration.

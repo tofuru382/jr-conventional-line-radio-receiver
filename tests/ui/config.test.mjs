@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { makeInput, InputError } from "../../ui/config.mjs";
+import {
+  makeInput,
+  InputError,
+  requiredRate,
+  rtlTcpRateSupported,
+} from "../../ui/config.mjs";
 import { buildCatalog } from "../../ui/presets.mjs";
 const catalog = buildCatalog(
   JSON.parse(
@@ -119,4 +124,13 @@ test("the built-in USB driver gets rate, center, gain and correction only", () =
       field,
     );
   }
+});
+test("required rate matches the band check used when starting", () => {
+  const band = [{ frequency_hz: 352537500 }, { frequency_hz: 352668750 }];
+  assert.equal(requiredRate(band, 352603125), 139650);
+  assert.equal(requiredRate([], 352603125), 0);
+  assert.equal(rtlTcpRateSupported(225000), false);
+  assert.equal(rtlTcpRateSupported(240000), true);
+  assert.equal(rtlTcpRateSupported(500000), false);
+  assert.equal(rtlTcpRateSupported(3200000), true);
 });

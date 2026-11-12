@@ -14,6 +14,7 @@
   --mint-950: #17392f;
   --red-200: #ffb7ab;
   --red-950: #472b2b;
+  --amber-300: #ffbe5c;
   --bg: var(--slate-950);
   --surface: var(--slate-900);
   --inset: var(--slate-950);
@@ -33,6 +34,7 @@
   --focus: var(--blue-300);
   --plot-grid: var(--slate-500);
   --plot-signal: var(--mint-300);
+  --call: var(--amber-300);
   --radius: 12px;
   --radius-control: 6px;
   --text-caption: 0.8125rem;
@@ -1781,7 +1783,24 @@ button.stop {
   margin-block-start: 10px;
   padding: 12px 14px;
   display: grid;
-  gap: 10px;
+  gap: 8px;
+}
+/* The sync lamp sits beside the frequency to keep the card short. */
+.quick-now {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 8px;
+}
+.quick-now > p {
+  grid-column: 1 / -1;
+}
+.quick-now > .quick-frequency {
+  grid-column: 1;
+}
+.quick-now > .quick-sync {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
 }
 .quick p {
   margin: 0;
@@ -1811,9 +1830,9 @@ button.stop {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-block-start: 4px;
   font-size: var(--text-caption);
   color: var(--muted);
+  white-space: nowrap;
 }
 .quick-sync::before {
   content: "";
@@ -1823,10 +1842,10 @@ button.stop {
   background: currentColor;
 }
 .quick-sync.locked {
-  color: var(--accent);
+  color: var(--success);
 }
 .quick-sync.calling {
-  color: var(--success);
+  color: var(--call);
 }
 .quick-stats {
   display: grid;
@@ -1836,7 +1855,7 @@ button.stop {
 }
 .quick-stats div {
   min-width: 0;
-  padding: 5px 8px;
+  padding: 4px 8px;
   background: var(--inset);
   border-radius: var(--radius-control);
 }
@@ -1917,7 +1936,7 @@ button.stop {
 }
 .compact .live-panel {
   flex: 1 1 0;
-  min-height: 6.5rem;
+  min-height: 6rem;
   overflow-y: auto;
   align-content: start;
   margin-block: 10px 0;
@@ -1932,13 +1951,13 @@ button.stop {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 12px;
   align-items: center;
-  padding-block-start: 10px;
+  padding-block-start: 8px;
   border-block-start: 1px solid var(--line);
 }
 #quick-constellation {
   display: block;
-  width: 128px;
-  height: 128px;
+  width: 120px;
+  height: 120px;
   background: var(--inset);
   border-radius: var(--radius-control);
 }
@@ -1947,7 +1966,7 @@ button.stop {
   gap: 1px;
   margin: 0;
   font-size: 0.75rem;
-  line-height: 1.35;
+  line-height: 1.25;
 }
 .quick-detail div {
   display: flex;
@@ -1967,7 +1986,7 @@ button.stop {
   text-overflow: ellipsis;
 }
 .quick-detail dd.locked {
-  color: var(--accent);
+  color: var(--success);
 }
 
 /* Recordings: more on request. */
@@ -1978,4 +1997,75 @@ button.stop {
 }
 .about-driver span {
   display: block;
+}
+
+/* Band map (compact view): one cell per channel at its frequency. */
+.band {
+  display: grid;
+  gap: 2px;
+}
+.band-map {
+  display: grid;
+  gap: 2px;
+  align-items: end;
+  height: 26px;
+}
+.overview-intro .band-map {
+  width: 300px;
+  max-width: 100%;
+  margin-block-start: 8px;
+}
+.band-cell {
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  cursor: pointer;
+}
+.band-cell::before {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--control-border);
+}
+.band-cell[data-state="locked"]::before {
+  background: var(--success);
+}
+.band-cell[data-state="calling"]::before {
+  height: 24px;
+  background: var(--call);
+}
+.band-cell[data-state="error"]::before {
+  background: var(--danger);
+}
+.band-cell[data-state="untargeted"]::before {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--control-border);
+}
+.band-cell[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto -2px -3px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text);
+}
+.band-cell:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.band-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-block-start: 3px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  color: var(--muted);
 }

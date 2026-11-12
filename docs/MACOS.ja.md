@@ -1,7 +1,7 @@
 # JR-CLRR For Mac（試験的）
 
-JR Cconventional-line Radio Receiver（KIRISHIKI Yudai 氏）をもとにした Apple Silicon Mac 用のアプリです。
-画面は Android 版（JR-CLRR For Android）と同じ簡略版で、音声の復号は最新（v1.5）の復号器を使います。
+JR Conventional-line Radio Receiver（KIRISHIKI Yudai 氏）をもとにした Apple Silicon Mac 用のアプリです。
+受信処理は元のアプリの **v1.8.0** と同じで、画面は Android 版（JR-CLRR For Android）と同じ簡略版です（バンドマップ付き）。
 SoapySDR と RTL-SDR 用モジュールをアプリに同梱しているので、**Homebrew は不要**です。ドングルを Mac に挿してそのまま使えます。
 
 ## 入手とインストール
@@ -25,13 +25,14 @@ SoapySDR と RTL-SDR 用モジュールをアプリに同梱しているので�
 
 ## Android 版との違い
 
-- 音声の復号は Android 版と同じく v1.5 の復号器です。
+- 受信処理（v1.8）とバンドマップは Android 版と同じです（[Android 版の説明](ANDROID.ja.md)を参照）。
 - ドライバーは SoapySDR・SoapyRTLSDR・librtlsdr・libusb をアプリに同梱しています（「バージョン情報」にも表示）。
 - ドングルは Mac に直接挿して使います（Rtl-sdr driver は不要）。ファイル・フォルダーの選択ボタンも使えます。
-- 録音の初期保存先は `~/Music/JR Cconventional-line Radio Receiver/Recordings` です。
+- 録音の初期保存先は `~/Music/JR Conventional-line Radio Receiver/Recordings` です（以前の版の `JR Cconventional-line …` を設定に保存していた場合は、そのフォルダーを使い続けます）。
 
 ## 注意
 
 - ウインドウを最小化したり完全に隠したりすると、画面の更新や音声の再生が遅れることがあります。受信中はウインドウを表示したままにしてください。
-- 近すぎて電波が強い場所では、受信設定の「ゲイン」を手動（20 dB 前後）にして「広帯域入力」がマイナスになるようにします。
+- 近すぎて電波が強い場所では、受信設定の「ゲイン」を手動（20 dB 前後）にして「広帯域入力」がマイナスになるようにします
+  （RTL-TCP サーバーに接続しているときは、ゲインが自動なら飽和したときに自動で下げます）。
 - 録音した内容や聞いた通信の内容を他人に漏らすことは電波法で禁じられています。

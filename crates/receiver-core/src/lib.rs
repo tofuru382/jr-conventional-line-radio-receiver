@@ -9,6 +9,8 @@ pub mod recording;
 pub mod rtl_tcp;
 pub mod session;
 pub mod source;
+#[cfg(feature = "synthesis")]
+pub mod synthesis;
 #[cfg(feature = "usb")]
 pub mod usb;
 pub mod voice_frame;

@@ -65,6 +65,26 @@ pub(crate) struct Hardware {
 }
 
 impl Hardware {
+    /// JR-CLRR: set a manual tuner gain without retuning or resetting the
+    /// demodulator, so a running stream continues while an automatic gain
+    /// steps down. The tuner must already be configured for manual gain.
+    pub(crate) async fn set_manual_gain<C: ControlBackend>(
+        &mut self,
+        control: &C,
+        db: f32,
+    ) -> Result<()> {
+        if !self.valid {
+            return Err(Error::ConfigurationUnknown);
+        }
+        let tuner = self.tuner.as_mut().ok_or(Error::UnsupportedTuner)?;
+        let com = Com(control);
+        let result = match com.i2c_gate(true).await {
+            Ok(()) => tuner.set_gain(&com, GainConfig::Manual(db)).await,
+            Err(e) => Err(e),
+        };
+        let close = com.i2c_gate(false).await;
+        result.and(close)
+    }
     pub(crate) fn validate_device(
         &self,
         config: &Settings,
@@ -383,6 +403,49 @@ mod tests {
             (0x0120, 0x11, &[0x10][..])
         );
         assert!(hardware.valid);
+    }
+    #[test]
+    fn manual_gain_changes_only_tuner_gain_registers() {
+        let control = FakeTransport::default();
+        let descriptor = DeviceDescriptor {
+            index: 0,
+            vid: 0x0bda,
+            pid: 0x2838,
+            serial: None,
+            manufacturer: None,
+            product: None,
+        };
+        let mut hardware = Hardware::default();
+        let settings = Settings {
+            gain: GainConfig::Manual(49.6),
+            ..Settings::default()
+        };
+        futures_lite::future::block_on(hardware.configure(&control, &settings, &descriptor))
+            .unwrap();
+        control.state.control_out_requests.lock().unwrap().clear();
+        futures_lite::future::block_on(hardware.set_manual_gain(&control, 20.0)).unwrap();
+        let writes = control.state.control_out_requests.lock().unwrap();
+        // Repeater opened first and closed last; in between only I2C writes to
+        // the tuner (index 0x610), no demodulator reset or retune.
+        assert_eq!(
+            (writes[0].value, writes[0].index, writes[0].data.as_slice()),
+            (0x0120, 0x11, &[0x18][..])
+        );
+        let last = writes.last().unwrap();
+        assert_eq!(
+            (last.value, last.index, last.data.as_slice()),
+            (0x0120, 0x11, &[0x10][..])
+        );
+        assert!(writes.len() > 2);
+        assert!(writes[1..writes.len() - 1].iter().all(|w| w.index == 0x610));
+        // No demodulator soft reset (the same register written with 0x14).
+        assert!(!writes.iter().any(|w| w.value == 0x0120 && w.data == [0x14]));
+        drop(writes);
+        let mut fresh = Hardware::default();
+        assert!(matches!(
+            futures_lite::future::block_on(fresh.set_manual_gain(&control, 20.0)),
+            Err(Error::ConfigurationUnknown)
+        ));
     }
     #[test]
     fn divider_and_signed_correction_boundaries() {

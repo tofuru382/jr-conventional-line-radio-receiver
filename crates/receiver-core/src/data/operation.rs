@@ -328,6 +328,7 @@ pub(crate) mod tests {
                     sync_matched: true,
                     marker_errors: 0,
                     received,
+                    confidence: Vec::new(),
                 });
             }
         }

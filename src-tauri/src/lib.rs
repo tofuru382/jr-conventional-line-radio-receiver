@@ -282,8 +282,6 @@ struct Platform {
     /// The simplified JR-CLRR layout (Android and macOS builds of this fork).
     simple: bool,
     name: Option<&'static str>,
-    /// Default voice decoder of the selector ("v1.3" on phones, "v1.5" on Mac).
-    voice_decoder: &'static str,
     /// Commit this app was built from (set by the CI workflows).
     build: Option<&'static str>,
 }
@@ -299,11 +297,6 @@ fn platform() -> Platform {
             Some("JR-CLRR For Mac")
         } else {
             None
-        },
-        voice_decoder: if cfg!(target_os = "android") {
-            "v1.3"
-        } else {
-            "v1.5"
         },
         build: option_env!("JR_CLRR_BUILD"),
     }
@@ -330,7 +323,7 @@ fn start_rtl_driver(app: tauri::AppHandle, port: u16) -> Result<(), String> {
     }
 }
 /// Inside "JR-CLRR For Mac.app" the SoapySDR RTL-SDR module is bundled in
-/// Contents/Resources/SoapySDR/modules0.8 (see .github/workflows/macos.yml), so
+/// Contents/Resources/SoapySDR/modules (see .github/workflows/macos.yml), so
 /// the dongle works without Homebrew. A user-set plugin path wins.
 #[cfg(target_os = "macos")]
 fn use_bundled_soapy_modules() {
@@ -342,7 +335,7 @@ fn use_bundled_soapy_modules() {
     };
     if let Some(dir) = exe
         .parent()
-        .map(|d| d.join("../Resources/SoapySDR/modules0.8"))
+        .map(|d| d.join("../Resources/SoapySDR/modules"))
         .filter(|d| d.is_dir())
     {
         std::env::set_var("SOAPY_SDR_PLUGIN_PATH", dir);

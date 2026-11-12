@@ -7,7 +7,12 @@
 //! [`offer_fd`]. A session waiting for a dongle (at start or after the dongle
 //! dropped off the bus) reports it through [`wants_device`], so the Java side
 //! knows when to look for one.
-use crate::{diag::note, source::Read, Complex32};
+use crate::{
+    diag::note,
+    rtl_tcp::{AutoGain, GAINS_TENTH_DB},
+    source::Read,
+    Complex32,
+};
 use rtlsdr_nusb::{Device, MaybeFuture, RxStream};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -23,7 +28,9 @@ use std::{
 pub struct Config {
     pub sample_rate: u32,
     pub center_hz: u32,
-    /// Manual LNA + mixer gain in dB; `None` lets the tuner choose.
+    /// Manual LNA + mixer gain in dB; `None` selects automatic gain: manual
+    /// gain stepped down from the top while the ADC clips (as RTL-TCP does in
+    /// v1.8; the tuner's own AGC clips this wideband input).
     pub gain_db: Option<f64>,
     #[serde(default)]
     pub ppm: i32,
@@ -127,6 +134,7 @@ const SETTLE: Duration = Duration::from_secs(1);
 fn open_device(
     _config: &Config,
     (_fd, _identity): (OwnedFd, Identity),
+    _auto_index: Option<u32>,
 ) -> Result<(Device, RxStream), String> {
     Err("USB: 内蔵ドライバーは Android 版でのみ使えます".into())
 }
@@ -134,10 +142,12 @@ fn open_device(
 fn open_device(
     config: &Config,
     (fd, identity): (OwnedFd, Identity),
+    auto_index: Option<u32>,
 ) -> Result<(Device, RxStream), String> {
-    let gain = config.gain_db.map_or(rtlsdr_nusb::GainConfig::Auto, |g| {
-        rtlsdr_nusb::GainConfig::Manual(g as f32)
-    });
+    let gain_db = config
+        .gain_db
+        .unwrap_or_else(|| gain_at(auto_index.unwrap_or(0)));
+    let gain = rtlsdr_nusb::GainConfig::Manual(gain_db as f32);
     let device = Device::builder()
         .frequency_hz(config.center_hz.into())
         .sample_rate_hz(config.sample_rate)
@@ -159,15 +169,41 @@ fn open_device(
         .wait()
         .map_err(|e| format!("USB: 受信を開始できません ({e})"))?;
     note(format!(
-        "ドライバー: 受信を開始しました（{} · {} S/s · {} Hz · ゲイン {}）",
+        "ドライバー: 受信を開始しました（{} · {} S/s · {} Hz · ゲイン {}{gain_db} dB）",
         describe(&device),
         config.sample_rate,
         config.center_hz,
-        config
-            .gain_db
-            .map_or("自動".to_string(), |g| format!("{g} dB"))
+        if config.gain_db.is_none() {
+            "自動 "
+        } else {
+            ""
+        },
     ));
     Ok((device, rx))
+}
+/// Gain in dB at an index of the gain table.
+fn gain_at(index: u32) -> f64 {
+    let table = &GAINS_TENTH_DB;
+    f64::from(table[(index as usize).min(table.len() - 1)]) / 10.0
+}
+/// Automatic gain for a session without a manual gain, starting at the top
+/// of the table (or where an earlier connection stepped down to).
+fn auto_gain(config: &Config, index: Option<u32>) -> Option<AutoGain> {
+    if config.gain_db.is_some() {
+        return None;
+    }
+    let mut gain = AutoGain::new(GAINS_TENTH_DB.len() as u32, config.sample_rate)?;
+    if let Some(index) = index {
+        gain.index = gain.index.min(index);
+    }
+    Some(gain)
+}
+/// The rtlsdr-nusb conversion maps ADC codes 0 and 255 to exactly ∓1.0.
+fn clipped(samples: &[rtlsdr_nusb::Complex32]) -> u64 {
+    samples
+        .iter()
+        .map(|s| u64::from(s.re.abs() >= 1.0) + u64::from(s.im.abs() >= 1.0))
+        .sum()
 }
 
 /// Tuner and V4 handling of an opened dongle, for the app's status line.
@@ -206,6 +242,8 @@ pub struct Usb {
     pub reconnects: u64,
     /// Transfer errors already noted, and when (notes at most once a second).
     noted_errors: (u64, Instant),
+    /// Automatic gain (no manual gain set); kept across reconnections.
+    auto_gain: Option<AutoGain>,
 }
 impl Usb {
     pub fn open(config: &Config, stop: &AtomicBool) -> Result<Self, String> {
@@ -234,8 +272,9 @@ impl Usb {
             std::thread::sleep(Duration::from_millis(50));
         };
         WANTED.store(false, Ordering::Relaxed);
-        let (device, rx) =
-            open_device(config, fd).inspect_err(|e| note(format!("ドライバー: {e}")))?;
+        let auto_gain = auto_gain(config, None);
+        let (device, rx) = open_device(config, fd, auto_gain.as_ref().map(|g| g.index))
+            .inspect_err(|e| note(format!("ドライバー: {e}")))?;
         Ok(Self {
             config: config.clone(),
             info: describe(&device),
@@ -250,20 +289,24 @@ impl Usb {
             failed_attempts: 0,
             reconnects: 0,
             noted_errors: (0, Instant::now()),
+            auto_gain,
         })
     }
     pub fn reconnecting(&self) -> bool {
         self.rx.is_none()
     }
-    /// For the status line: tuner, V4 handling and recovered USB errors.
+    /// For the status line: tuner, V4 handling, gain and recovered USB errors.
     pub fn info(&self) -> String {
         let errors =
             self.transfer_errors + self.rx.as_ref().map_or(0, |rx| rx.stats().transfer_errors);
-        if errors == 0 {
-            self.info.clone()
-        } else {
-            format!("{} · USB 転送エラー {errors} 回（自動回復）", self.info)
+        let mut info = self.info.clone();
+        if let Some(gain) = &self.auto_gain {
+            info += &format!(" · ゲイン 自動 {} dB", gain_at(gain.index));
         }
+        if errors > 0 {
+            info += &format!(" · USB 転送エラー {errors} 回（自動回復）");
+        }
+        info
     }
     fn lose(&mut self, cause: String) -> Result<Read, String> {
         if let Some(rx) = self.rx.take() {
@@ -317,7 +360,19 @@ impl Usb {
                         self.dropped = dropped;
                         return Ok(Read::Discontinuity);
                     }
-                    for (out, s) in output.iter_mut().zip(&self.scratch[..n]) {
+                    let scratch = &self.scratch[..n];
+                    let step = self
+                        .auto_gain
+                        .as_mut()
+                        .and_then(|g| g.observe_with(n, |start| clipped(&scratch[start..])));
+                    if let (Some(index), Some(device)) = (step, self.device.as_mut()) {
+                        let db = gain_at(index);
+                        match device.set_manual_gain_db(db as f32).wait() {
+                            Ok(()) => note(format!("ドライバー: 入力が飽和したのでゲインを {db} dB に下げました")),
+                            Err(e) => note(format!("ドライバー: ゲインを変更できません ({e})")),
+                        }
+                    }
+                    for (out, s) in output.iter_mut().zip(scratch) {
                         *out = Complex32 {
                             real: s.re,
                             imaginary: s.im,
@@ -354,7 +409,9 @@ impl Usb {
         while settled.elapsed() < SETTLE && !stop.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
         }
-        match open_device(&self.config, fd) {
+        // A new connection keeps the gain the automatic gain stepped down to.
+        let index = self.auto_gain.as_ref().map(|g| g.index);
+        match open_device(&self.config, fd, index) {
             Ok((device, rx)) => {
                 WANTED.store(false, Ordering::Relaxed);
                 self.info = describe(&device);
@@ -366,6 +423,8 @@ impl Usb {
                 self.failed_attempts = 0;
                 self.reconnects += 1;
                 self.noted_errors = (0, Instant::now());
+                // Same gain, but wait for the new stream before measuring.
+                self.auto_gain = auto_gain(&self.config, index);
                 note("ドライバー: 再接続しました");
             }
             Err(e) => {
@@ -392,6 +451,35 @@ impl Drop for Usb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_gain_starts_at_the_top_and_counts_full_scale_components() {
+        let manual = config();
+        assert!(auto_gain(&manual, None).is_none());
+        let automatic = Config {
+            gain_db: None,
+            ..config()
+        };
+        let gain = auto_gain(&automatic, None).unwrap();
+        assert_eq!(gain_at(gain.index), 49.6);
+        // A reconnection resumes no higher than where it had stepped down to.
+        assert_eq!(
+            gain_at(auto_gain(&automatic, Some(25)).unwrap().index),
+            43.9
+        );
+        let c = |re, im| rtlsdr_nusb::Complex32 { re, im };
+        let edge = (0.0 - 127.5) / 127.5;
+        assert_eq!(edge, -1.0);
+        assert_eq!(clipped(&[c(edge, 0.2), c(1.0, 1.0), c(0.99, -0.99)]), 3);
+        // Clipping after the settling time steps the gain down.
+        let mut gain = auto_gain(&automatic, None).unwrap();
+        let settle = gain.settle as usize;
+        let full = vec![c(1.0, -1.0); settle + 12_000];
+        assert_eq!(
+            gain.observe_with(full.len(), |start| clipped(&full[start..])),
+            Some(25)
+        );
+    }
 
     fn config() -> Config {
         Config {

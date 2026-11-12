@@ -38,7 +38,7 @@ payload and its context. The waveform itself is produced by the synthesis stages
 
 ```mermaid
 flowchart TD
-    A["Accepted payload and slot index"] --> B["Context models and recurrent controls"]
+    A["Accepted payload and slot index"] --> B["Context models and payload-conditioned corrections"]
     A --> C["Integer CELP excitation and gain history"]
     B --> D["Native, periodic and noise source mixture"]
     C --> D
@@ -126,9 +126,10 @@ during decoding.
 ### 4. Infer a source mixture and choose a synthesis trajectory
 
 [`source_features.rs`](src/source_features.rs) combines recent payload and physical
-features into 570 values per 20 ms half. Native waveform descriptors, controls,
-and source geometry extend this to **633 values**. A **633→256→128→40** network
-predicts bounded spectral/level corrections and source-mixture adjustments.
+features into 570 values per 20 ms half. Baseline synthesized PCM and excitation
+descriptors, level residuals, and source geometry extend this to **633 values**.
+A **633→256→128→40** network predicts bounded spectral/level corrections and
+source-mixture adjustments.
 The mixture weights are normalized and smoothed; block power is normalized again
 after mixing.
 
@@ -140,16 +141,18 @@ all received content.
 [`planner.rs`](src/planner.rs) uses the acoustic targets from
 [`plan_features.rs`](src/plan_features.rs) and [`plan_target.rs`](src/plan_target.rs).
 Those models infer block levels, spectral-band shape, periodicity, and pitch-error
-costs from a 220-element feature vector. Three current-frame candidates and nine
-next-frame trials test the effect of changing the pulse/noise balance. Explicit
+costs from a 220-element feature vector. Three current-frame candidates test the
+effect of changing the pulse/noise balance. When a following frame is available,
+three next-frame trials per current candidate add nine trials. Explicit
 source blocks are shared among trials; those blocks can therefore make different
 actions equivalent. Only the selected current state is committed.
 
 [`plan_acoustics.rs`](src/plan_acoustics.rs) measures actual trial PCM: integer-sum
 correlations at lags 20–160, Hann-windowed spectral-band levels, four block energies,
 and saturation. It also scores overlapping 80 ms windows when history is available.
-The current cost plus the best next-frame cost determines the choice. A fixed
-margin protects the default choice, which is always used at the start of a run.
+The current cost plus the best next-frame cost determines the choice; at the end
+of a run, only the current cost is used. A fixed margin protects the default choice
+from the learned voicing policy, which is always used at the start of a run.
 The original-source trial and the selected-source synthesis each keep independent
 state and one frame of lookahead.
 
@@ -157,6 +160,8 @@ state and one frame of lookahead.
 
 Selected and native PCM descriptors plus run age extend the observation to
 **679 values per half**. A **679→384→192→34** network refines spectral shape.
+This stage applies the 32 spectral outputs and retains the existing block levels;
+the network's two level outputs are not applied.
 A trial synthesizer checks whether the refinement loses periodicity that the
 selected waveform had retained; if so, the earlier controls are used for that frame.
 This check maintains its own continuous trial history.
@@ -182,12 +187,14 @@ correction.
 
 ### 6. Synthesize all received content through one path
 
-[`vocoder.rs`](src/vocoder.rs) filters the selected excitation using
-normalized, minimum-phase 128-tap responses derived from the two cepstral envelopes.
-It retains excitation history, spectral smoothing, phase, and power memory across
+[`numeric.rs`](src/numeric.rs) derives a 256-sample minimum-phase response from each
+of the two cepstral envelopes and normalizes its energy over all 256 samples.
+[`vocoder.rs`](src/vocoder.rs) uses the first 128 coefficients of each response to
+filter the selected excitation. It retains excitation history, spectral smoothing,
+phase, and power memory across
 frames. Within-block gain slopes, power normalization, the inferred gain curve,
-peak limiting, and round-to-nearest-even quantization produce PCM16. Boundary
-fades use 80 samples.
+peak limiting, and round-to-nearest-even quantization produce PCM16. Fades at
+reception gaps use 80 samples, as described below.
 
 Speech, passenger broadcast chimes, and call channel chimes use this same pipeline.
 There is no chime classifier, separate melody generator, sinusoidal chime bank,
@@ -203,13 +210,18 @@ The complete path therefore needs **seven future frames (280 ms)**. With continu
 input starting at index 0, accepting index 7 releases output index 0. Processing
 time and any playback buffer are additional to this algorithmic delay.
 
-[`stream.rs`](src/stream.rs) maintains bounded queues. At a gap, it drains the old
-run, applies boundary fades, and resets all predictor, codebook, gain, noise,
-filter, candidate, and temporal state before the next run. Missing-slot operations
-can advance buffered work. A regular input operation emits at most one output;
-`flush()` drains every accepted tail frame, including calls shorter than the
-lookahead, and is idempotent. The input queue holds eight payloads; output capacity
-is 16 frames. Memory use does not grow with the duration of a call.
+[`stream.rs`](src/stream.rs) maintains bounded queues. When the next accepted frame
+has a nonconsecutive index, it drains the old run and resets predictor, codebook,
+gain, noise, filter, candidate, and temporal state before the next run. It fades
+out the last 80 samples of the old run and fades in the first 80 samples of the new
+run. Initial startup and EOF alone do not add these fades.
+
+Missing-slot operations can advance buffered work, but retain the final control
+record until reception resumes or `flush()` is called. A regular input operation
+emits at most one output. `flush()` drains every accepted tail frame, including
+calls shorter than the lookahead, and is idempotent. The input queue holds eight
+payloads; output capacity is 16 frames. Memory use does not grow with the duration
+of a call.
 
 Missing slots produce no replacement PCM. Outputs retain their original indices,
 so the host can preserve gaps on its timeline. A new index epoch requires a fresh
@@ -250,8 +262,10 @@ Pass `Some(payload)` for an accepted frame and `None` for a rejected or nonvoice
 slot. Each `Output` contains `index` and `pcm: [i16; 320]`. A streaming caller can
 consume each output immediately instead of collecting it in a vector.
 
-The [C header](include/jr_voice.h) defines **ABI 2**. `jr_voice_process` supplies a
-payload; `jr_voice_advance` supplies a missing slot. Drain `jr_voice_read` after
+The [C header](include/jr_voice.h) defines **ABI 2**. Create a handle with
+`jr_voice_create`, reuse it for a new stream with `jr_voice_reset`, and release it
+with `jr_voice_destroy`. `jr_voice_process` supplies a payload;
+`jr_voice_advance` supplies a missing slot. Drain `jr_voice_read` after
 these calls and after `jr_voice_flush`. Each successful read writes the original
 index and exactly 640 little-endian PCM bytes. Calls on a handle require exclusive,
 serialized access.
@@ -272,8 +286,19 @@ library target is an `rlib`; the header documents the exported C entry points.
 ## Source layout and tests
 
 The signal path is coordinated by [`synthesis.rs`](src/synthesis.rs).
-Model loading and fixed inference kernels are in [`synthesis_models.rs`](src/synthesis_models.rs),
-with model data stored as `.bin` files in [`src/models/`](src/models/).
+The eight binary assets in [`src/models/`](src/models/) have these roles:
+
+| File | Role |
+|---|---|
+| `predictor.bin` | Context prediction, recurrent controls, calibration, refinement, and voicing policy |
+| `correction.bin` | Payload-conditioned gain and spectral correction |
+| `planner.bin` | Physical feature tables, acoustic target models, and measurement constants |
+| `celp_parameters.bin` | Pitch/log-gain tables, gain bias, spectral codebooks, and spectral prediction coefficients |
+| `source.bin` | Source mixture and initial spectral/level corrections |
+| `spectrum.bin` | Spectral refinement from selected and native PCM observations |
+| `gain.bin` | Linear block-gain correction |
+| `temporal.bin` | Context embedding and temporal spectral/gain correction |
+
 [`models.rs`](src/models.rs) and [`model_bindings/`](src/model_bindings/) provide
 array types, dimensions, and byte offsets for the predictor, correction, and planner
 tables. Their little-endian values are decoded at compile time; float bits and
@@ -281,9 +306,13 @@ quantized integers are preserved without alignment-dependent casts. Indices use
 32-bit unsigned values on disk, independent of the host's pointer width.
 
 The source, spectrum, gain, and temporal network files contain named float arrays
-with dimensions. They are loaded once and shared by decoder instances. CELP parameter
-tables are in `celp_parameters.bin`. All assets are embedded with `include_bytes!`;
-no external model files are needed at runtime.
+with dimensions. [`synthesis_models.rs`](src/synthesis_models.rs) loads them once on
+first use, shares them among decoder instances, and implements their inference
+kernels. [`celp/config.rs`](src/celp/config.rs) reads `celp_parameters.bin` as
+little-endian floats. All eight binary assets are embedded with `include_bytes!`;
+the integer DSP's fixed tables are also compiled from
+[`celp/fixed_core/tables/`](src/celp/fixed_core/tables/). No external model files are
+needed at runtime.
 
 The files linked in the stages above separate feature extraction, integer CELP
 state, acoustic selection, parameter correction, and synthesis.
@@ -295,6 +324,7 @@ cargo clippy -p jr_conventional_voice --all-targets --locked -- -D warnings
 
 Tests generate payloads in memory. They cover ABI validation/backpressure, seven-frame
 lookahead, future-dependency bounds, repeated gaps, short-call tails, state isolation,
-maximum indices, deterministic noise, and idempotent flushing. No captured audio or
-radio fixtures are packaged. These are contract and numerical tests; acoustic target
+maximum indices, deterministic noise, idempotent flushing, binary table reading,
+and decoding on a worker thread with a 2 MiB stack. No captured audio or radio
+fixtures are packaged. These are contract and numerical tests; acoustic target
 scores used inside the decoder are not direct measures of intelligibility.

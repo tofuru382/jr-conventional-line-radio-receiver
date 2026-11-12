@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "JR Cconventional-line Radio Receiver",
-  "version": "1.5.0",
+  "productName": "JR Conventional-line Radio Receiver",
+  "version": "1.8.0",
   "identifier": "io.jrradio.receiver",
   "build": { "frontendDist": "../ui" },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "label": "main", "title": "JR Cconventional-line Radio Receiver (JR 在来線デジタル列車無線受信アプリ)", "width": 1440, "height": 960, "minWidth": 600, "minHeight": 600 }],
+    "windows": [{ "label": "main", "title": "JR Conventional-line Radio Receiver (JR 在来線デジタル列車無線受信アプリ)", "width": 1440, "height": 960, "minWidth": 600, "minHeight": 600 }],
     "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; media-src 'self' blob:; object-src 'none'; base-uri 'self'" }
   },
   "bundle": {

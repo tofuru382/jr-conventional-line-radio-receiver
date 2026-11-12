@@ -110,6 +110,27 @@ impl<M: SampleMode> Device<M> {
         config.settings.gain = gain;
         self.update(config)
     }
+    /// JR-CLRR: change a manual tuner gain in place — no retune, no
+    /// demodulator reset — so it can step while the stream runs. Requires the
+    /// device to be configured with [`GainConfig::Manual`].
+    pub fn set_manual_gain_db(&mut self, db: f32) -> impl MaybeFuture<Output = Result<()>> + '_ {
+        let manual = matches!(self.config.settings.gain, GainConfig::Manual(_));
+        ready(if manual {
+            Ok(())
+        } else {
+            Err(crate::Error::invalid_config(
+                "gain",
+                "set_manual_gain_db needs manual gain",
+            ))
+        })
+        .and_then(move |_| {
+            self.session.set_manual_gain(db).map(move |result| {
+                result?;
+                self.config.settings.gain = GainConfig::Manual(db);
+                Ok(())
+            })
+        })
+    }
     /// Correct the sampling clock and reapply tuning with the corrected crystal frequency.
     pub fn set_correction_ppm(&mut self, ppm: i32) -> impl MaybeFuture<Output = Result<()>> + '_ {
         let mut config = self.config.clone();

@@ -2,7 +2,7 @@
 
 [English](RELEASE.md) | 日本語
 
-JR Cconventional-line Radio Receiver (JR 在来線デジタル列車無線受信アプリ)
+JR Conventional-line Radio Receiver (JR 在来線デジタル列車無線受信アプリ)
 
 ## 配布物
 
@@ -12,14 +12,14 @@ GitHub Actions の **Release** ワークフローで、GUI と CLI を含むア�
 | --- | --- | --- |
 | Linux x86_64 | Ubuntu 24.04 | `*-linux-x86_64.tar.gz` |
 | Windows x64 | Windows Server 2022 / MSVC | `*-windows-x86_64.zip` |
-| macOS Apple Silicon | macOS 14 | `*-macos-arm64.tar.gz` |
+| macOS Apple Silicon | macOS 15 | `*-macos-arm64.tar.gz` |
 | macOS Intel | macOS 15 | `*-macos-x86_64.tar.gz` |
 
 アーカイブを展開し、GUI は `jr-receiver-desktop`（Windows は `.exe`）、CLI は `jr-receiver` を起動します。
 `radio-presets.json` とその JSON Schema、実行環境の説明、音声係数の由来メタデータ、ビルド情報を同梱します。
 配布物の `README.md` は英語版、`README.ja.md` は日本語版のリリースガイドです。冒頭のリンクで切り替えられます。
 同梱 JSON は外部プリセットを編集する際のひな形です。起動時に自動適用されるファイルではありません。
-アプリの「チャンネル一覧」→「プリセットファイル」で明示的に選択できます。
+アプリの設定パネル →「プリセットファイル」で明示的に選択できます。
 
 インストーラー・AppImage・DMG・`.app` は生成しません。Windows の署名と Apple の Developer ID 署名・公証は行いません。
 macOS の実行ファイルには、ライブラリ参照先の調整後にアドホック署名を付けます。配布者の本人性を示す署名ではありません。
@@ -51,7 +51,7 @@ brew install soapysdr
 ./jr-receiver presets --list
 ```
 
-SoapySDR は同梱せず、Homebrew の `opt/soapysdr/lib/libSoapySDR.0.8.dylib` を参照します。
+SoapySDR は同梱せず、Homebrew の `opt/soapysdr/lib/libSoapySDR.<ABI>.dylib`（Homebrew の SoapySDR 0.9.0 では 0.9）を参照します。ABI は `build-info.json` に記録されます。
 Cellar 内の特定リビジョンへの参照は配布時に置換します。SoapySDR の機器モジュールも Homebrew 側で管理できます。
 
 ### Windows
@@ -93,9 +93,9 @@ Windows の通常ビルドでは `SOAPY_SDR_ROOT` に、`include/SoapySDR/Versio
 ## バイナリ生成と公開
 
 **試行:** Actions → Release → Run workflow。4環境のアーカイブを Actions artifacts として14日間保存します。
-手動実行はタグを選んだ場合も GitHub Release を公開しません。ブランチからの試行には `v1.5.0-dev-<短いコミットID>` のような名前を付けます。
+手動実行はタグを選んだ場合も GitHub Release を公開しません。ブランチからの試行には `v1.8.0-dev-<短いコミットID>` のような名前を付けます。
 
-**公開:** 上記3種類のマニフェストを同じバージョンにし、`v1.5.0` のような一致するタグを push します。
+**公開:** 上記3種類のマニフェストを同じバージョンにし、`v1.8.0` のような一致するタグを push します。
 タグ名とマニフェストのバージョンが異なる場合は失敗します。
 Release は共通 CI に合格してから4環境をビルドし、macOS / Windows でも Rust の全テストを実行します。
 各アーカイブの CLI で組み込みプリセットの読み込みを確認し、4環境すべて成功した場合だけ GitHub Release を作成します。

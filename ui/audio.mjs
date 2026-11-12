@@ -76,6 +76,42 @@ export class Leveler {
   }
 }
 
+// Keep interpolation history and fractional input position across PCM frames.
+// One input sample of delay lets each output interpolate between real adjacent
+// samples, including the last sample of one frame and the first of the next.
+// Resample here so separate Web Audio sources never restart their resampler or
+// round independent playback-rate durations at each 40 ms boundary.
+class PcmResampler {
+  constructor(outputRate) {
+    this.outputRate = outputRate;
+    this.reset();
+  }
+
+  reset() {
+    this.position = 0;
+    this.previous = undefined;
+  }
+
+  length(inputLength, rate) {
+    const step = (SAMPLE_RATE * rate) / this.outputRate;
+    return Math.max(0, Math.ceil((inputLength - this.position) / step - 1e-9));
+  }
+
+  write(pcm, rate, output) {
+    const step = (SAMPLE_RATE * rate) / this.outputRate;
+    for (let i = 0; i < output.length; i++) {
+      const position = this.position + i * step;
+      const index = Math.floor(position);
+      const fraction = position - index;
+      const left = index === 0 ? (this.previous ?? pcm[0]) : pcm[index - 1];
+      output[i] = (left + (pcm[index] - left) * fraction) / 32768;
+    }
+    this.position += output.length * step - pcm.length;
+    if (Math.abs(this.position) < 1e-9) this.position = 0;
+    this.previous = pcm.at(-1);
+  }
+}
+
 // Schedule on the audio clock. IPC arrival times may jitter; they must never
 // cancel a frame that is still playing. Reset only on an explicit stop/switch
 // or a new decoder epoch.
@@ -83,6 +119,7 @@ export class AudioPlayer {
   constructor(context, destination) {
     this.context = context;
     this.destination = destination;
+    this.resampler = new PcmResampler(context.sampleRate);
     this.sources = new Set();
     /** Set to a Leveler to even out the loudness of live audio. */
     this.leveler = null;
@@ -105,6 +142,7 @@ export class AudioPlayer {
     this.index = -1;
     this.end = undefined;
     this.rate = 1;
+    this.resampler.reset();
   }
 
   enqueue(frames, channel) {
@@ -127,7 +165,8 @@ export class AudioPlayer {
       if (!adjusted && gap === 0 && this.end > now) {
         // Gently track SDR/audio-device clock drift, rather than periodically
         // dropping/restarting audio. Smooth batch jitter and limit pitch change
-        // to 0.5%; scheduling below uses the exact resulting playback duration.
+        // to 0.5%. Apply it to the continuous resampler, never independently
+        // to Web Audio nodes whose boundaries may land between output samples.
         const correction = Math.max(
           -0.005,
           Math.min(0.005, (this.end - now - BUFFER_SECONDS) * 0.02),
@@ -141,28 +180,35 @@ export class AudioPlayer {
         // Keep any queued tail intact even when the next call has a new origin.
         at = Math.max(this.end ?? 0, now + BUFFER_SECONDS);
         this.rate = 1;
+        this.resampler.reset();
       }
-      const end = at + frame.pcm.length / SAMPLE_RATE / this.rate;
+      if (gap > 0) this.resampler.reset();
+      const sampleRate = this.context.sampleRate;
+      const startSample = Math.round(at * sampleRate);
+      const length = this.resampler.length(frame.pcm.length, this.rate);
+      const end = (startSample + length) / sampleRate;
       if (end > now + MAX_BUFFER_SECONDS) {
         // Bound exceptional catch-up bursts without stopping scheduled audio.
         // Dropped live-monitor frames must not later reappear as a timed gap.
         this.index = frame.index;
         continue;
       }
-      const buffer = this.context.createBuffer(1, frame.pcm.length, SAMPLE_RATE);
+      const buffer = this.context.createBuffer(1, length, sampleRate);
       const data = buffer.getChannelData(0);
+      // Level first (8 kHz PCM), then resample continuously to the output.
       const pcm = this.leveler ? this.leveler.process(frame.pcm) : frame.pcm;
-      for (let i = 0; i < data.length; i++) data[i] = pcm[i] / 32768;
+      this.resampler.write(pcm, this.rate, data);
       const node = this.context.createBufferSource();
       node.buffer = buffer;
-      node.playbackRate.value = this.rate;
+      // Native-rate buffers with integral sample boundaries use the engine's
+      // direct copy path. Fractional phase belongs to our continuous stream.
       node.connect(this.destination);
       this.sources.add(node);
       node.onended = () => {
         this.sources.delete(node);
         node.disconnect();
       };
-      node.start(at);
+      node.start(startSample / sampleRate);
       this.index = frame.index;
       this.end = end;
     }

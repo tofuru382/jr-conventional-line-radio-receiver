@@ -55,9 +55,13 @@ jobs:
           test -n "$app" || { echo "No .app was produced" >&2; exit 1; }
           echo "APP=$app" >> "$GITHUB_ENV"
           exe="$app/Contents/MacOS/$(ls "$app/Contents/MacOS" | head -n 1)"
-          modules="$app/Contents/Resources/SoapySDR/modules0.8"
+          # Homebrew names the module folder after the SoapySDR ABI (modules0.8,
+          # modules0.9); the app points SOAPY_SDR_PLUGIN_PATH at a fixed folder.
+          modules="$app/Contents/Resources/SoapySDR/modules"
           mkdir -p "$modules" "$app/Contents/Frameworks"
-          cp "$(brew --prefix soapyrtlsdr)/lib/SoapySDR/modules0.8/librtlsdrSupport.so" "$modules/"
+          module=$(ls "$(brew --prefix soapyrtlsdr)"/lib/SoapySDR/modules*/librtlsdrSupport.so | head -n 1)
+          test -n "$module" || { echo "::error::No SoapyRTLSDR module" >&2; exit 1; }
+          cp "$module" "$modules/"
           # Copy libSoapySDR, librtlsdr, libusb (and their dependencies) into
           # Frameworks and point the executable and the module at them.
           # stdin from /dev/null: fail instead of waiting for an interactive answer.
@@ -81,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           frameworks="$APP/Contents/Frameworks"
-          modules="$APP/Contents/Resources/SoapySDR/modules0.8"
+          modules="$APP/Contents/Resources/SoapySDR/modules"
           brew uninstall --ignore-dependencies soapyrtlsdr soapysdr librtlsdr
           cat > "$RUNNER_TEMP/check.c" <<'EOF'
           #include <stdio.h>

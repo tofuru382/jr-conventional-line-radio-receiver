@@ -16,7 +16,7 @@ use std::{
 };
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const HELP: &str = concat!(
-    "JR Cconventional-line Radio Receiver (JR 在来線デジタル列車無線受信アプリ) v",
+    "JR Conventional-line Radio Receiver (JR 在来線デジタル列車無線受信アプリ) v",
     env!("CARGO_PKG_VERSION"),
     "\n\n  jr-receiver devices\n  jr-receiver presets [PRESET|--list]\n  jr-receiver monitor-tcp IP:PORT SECONDS [RATE] [CENTER_HZ] [PRESET] [GAIN_DB]\n  jr-receiver inspect-wave INPUT.wav\n  jr-receiver decode-frames STREAM_DIR NEW_OUTPUT_DIR [common|slotted]\n  jr-receiver decode-wave INPUT.wav CENTER_HZ NEW_OUTPUT_DIR [PRESET] [SECONDS]\n\nSTREAM_DIR contains frames.bin (48 bytes/frame) and indices.txt (uint32 slot indices).\nWAV input: stereo float32 or PCM16, I left / Q right. All channels in the selected preset decode together. Default preset: east (22 channels).\nOutput directories must not exist. INCOMPLETE remains after failure.\n"
 );
@@ -77,7 +77,6 @@ fn run() -> Result<()> {
             let mut session = Session::start(Config {
                 input: Input::RtlTcp { radio },
                 channels: preset.channels,
-                voice_decoder: Default::default(),
             })?;
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(seconds) {
@@ -208,6 +207,7 @@ fn decode_frames(input: &str, out: &str, format: Format) -> Result<()> {
             bit_offset: index as u64 * 384,
             sync_matched: false,
             marker_errors: 0,
+            confidence: Vec::new(),
         };
         output.frame(&f)?;
         for a in p.frame(&f)? {

@@ -161,6 +161,10 @@ pub unsafe extern "C" fn jr_dsp_process(
 }
 
 /// Read normalized differential symbols without consuming them or advancing DSP.
+/// The source is the unsliced observation after receive filtering, timing and
+/// carrier recovery, and ISI/complex-gain removal using the current best sequence
+/// survivor's channel estimate. It is not the hard traceback output. The known
+/// pi/4 increment is restored for the four diagonal constellation references.
 /// Capacity is 0..1024; zero input power returns an empty view and zero EVM.
 ///
 /// # Safety

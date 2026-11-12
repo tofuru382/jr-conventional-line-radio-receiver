@@ -679,6 +679,7 @@ function setText(id, text) {
   if ($(id).textContent !== text) $(id).textContent = text;
 }
 function renderQuick() {
+  renderBandMap();
   if ($("quick").hidden) return;
   const s = running ? lastSnapshot : null;
   const c = channels.find((x) => x.id === selected);
@@ -724,6 +725,68 @@ function renderQuick() {
   $("quick-level").checked = $("auto-level").checked;
   if ($("quick-volume").value !== $("volume").value) $("quick-volume").value = $("volume").value;
   $("quick-routes").disabled = $("route-open").disabled;
+}
+// Band map (as upstream v1.8): every channel of the preset at its frequency,
+// sync green, call amber and taller, error red, not received outlined; the
+// one being heard is underlined. Tapping one listens to it (manual selection).
+// The full page has one beside the band range, the compact card one on top.
+const BAND_STEP_HZ = 6250;
+function renderBandMap() {
+  const sorted = [...channels].sort((a, b) => a.frequency_hz - b.frequency_hz);
+  const key = sorted.map((c) => c.id).join(",");
+  const s = running ? lastSnapshot : null;
+  const calls = new Set(s?.active_calls ?? []);
+  const rowsById = new Map(s?.channels.map((x) => [x.config.id, x]) ?? []);
+  for (const map of [$("band-map"), $("quick-band-map")]) {
+    if (map.dataset.key !== key) {
+      map.dataset.key = key;
+      map.replaceChildren();
+      if (!sorted.length) continue;
+      const low = sorted[0].frequency_hz;
+      const slots = Math.round((sorted.at(-1).frequency_hz - low) / BAND_STEP_HZ) + 1;
+      map.style.gridTemplateColumns = `repeat(${slots}, minmax(0, 1fr))`;
+      for (const c of sorted) {
+        const cell = el("button", undefined, "band-cell");
+        cell.type = "button";
+        cell.dataset.id = c.id;
+        cell.style.gridColumn = String(Math.round((c.frequency_hz - low) / BAND_STEP_HZ) + 1);
+        cell.addEventListener("click", () => select(c.id, true));
+        map.append(cell);
+      }
+    }
+    for (const cell of map.children) {
+      const id = cell.dataset.id;
+      const c = channels.find((x) => x.id === id);
+      const row = rowsById.get(id);
+      const state = !enabled.has(id)
+        ? "untargeted"
+        : row?.error
+          ? "error"
+          : calls.has(id)
+            ? "calling"
+            : row?.status.frame_locked
+              ? "locked"
+              : "idle";
+      if (cell.dataset.state !== state) cell.dataset.state = state;
+      const pressed = String(id === selected);
+      if (cell.getAttribute("aria-pressed") !== pressed) cell.setAttribute("aria-pressed", pressed);
+      const label = `${(c.frequency_hz / 1e6).toFixed(5)} MHz ${c.label} · ${
+        {
+          untargeted: "受信対象外",
+          error: "エラー",
+          calling: "通話中",
+          locked: "同期中",
+          idle: running ? "探索中" : "待機",
+        }[state]
+      }`;
+      if (cell.getAttribute("aria-label") !== label) {
+        cell.setAttribute("aria-label", label);
+        cell.title = label;
+      }
+    }
+  }
+  setText("quick-band-low", sorted.length ? (sorted[0].frequency_hz / 1e6).toFixed(5) : "");
+  setText("quick-band-high", sorted.length ? (sorted.at(-1).frequency_hz / 1e6).toFixed(5) : "");
 }
 // The compact card's controls drive the full page's ones.
 $("quick-auto").addEventListener("change", () => {
@@ -1666,7 +1729,7 @@ function applySimpleLayout(name) {
 function renderAbout() {
   const edition = platform.android ? "Android 版" : "Mac 版";
   $("about-description").textContent =
-    `KIRISHIKI Yudai 氏の JR Cconventional-line Radio Receiver をもとにした ${edition}（音声の復号は v1.5）`;
+    `KIRISHIKI Yudai 氏の JR Conventional-line Radio Receiver v1.8 をもとにした ${edition}`;
   // The dongle drivers this build ships with or works with.
   const credits = platform.android
     ? [
@@ -1792,8 +1855,6 @@ async function startReception() {
       config: {
         input,
         channels: activeChannels,
-        // The most natural-sounding decoder, on every build.
-        voice_decoder: "v15",
       },
     });
     running = true;
