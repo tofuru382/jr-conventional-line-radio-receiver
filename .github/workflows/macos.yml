@@ -21,7 +21,7 @@ jobs:
   app:
     # Apple Silicon. Produces "JR-CLRR For Mac.app" in a DMG with SoapySDR and
     # the RTL-SDR module bundled, so no Homebrew is needed on the user's Mac.
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
