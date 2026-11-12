@@ -6,7 +6,8 @@ SoapySDR と RTL-SDR 用モジュールをアプリに同梱しているので�
 
 ## 入手とインストール
 
-1. GitHub の **Actions** → **macOS app** で最新の成功した実行を開き、**Artifacts** の `jr-clrr-for-mac-arm64` をダウンロードして展開します。
+1. 「[JR-CLRR 最新ビルド](https://github.com/tofuru382/jr-conventional-line-radio-receiver/releases/tag/latest-build)」から
+   `JR-CLRR-For-Mac-arm64.dmg` をダウンロードします（GitHub へのログインは不要です。Actions の Artifacts からも入手できますが、ログインが必要です）。
 2. `JR-CLRR-For-Mac-arm64.dmg` を開き、`JR-CLRR For Mac` を「アプリケーション」フォルダーにドラッグします。
 3. 初回は Apple の正式な署名（Developer ID・公証）がないため起動が止められます。
    一度開こうとしたあと、**システム設定 → プライバシーとセキュリティ** の下にある「**このまま開く**」を押して起動してください。

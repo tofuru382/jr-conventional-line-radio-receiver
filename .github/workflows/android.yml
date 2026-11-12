@@ -128,3 +128,36 @@ jobs:
           path: dist/jr-radio-receiver-android-arm64.apk
           if-no-files-found: error
           retention-days: 30
+
+  publish:
+    # Actions artifacts download only for signed-in GitHub users (and not in
+    # the GitHub app), so android-branch builds also go to the "latest-build"
+    # pre-release, a fixed link anyone can download from a phone browser.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/android'
+    needs: apk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: jr-radio-receiver-android-arm64
+          path: dist
+      - name: Publish to the latest-build pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=latest-build
+          notes="android ブランチの最新ビルド（${GITHUB_SHA::7}）。GitHub にログインしなくてもダウンロードできます。"
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --prerelease --target "$GITHUB_SHA" \
+              --title "JR-CLRR 最新ビルド" --notes "$notes" ||
+            gh release view "$tag" >/dev/null
+          # The tag follows the newest build.
+          gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          gh release edit "$tag" --notes "$notes" >/dev/null
+          cp dist/jr-radio-receiver-android-arm64.apk dist/JR-CLRR-For-Android-arm64.apk
+          gh release upload "$tag" dist/JR-CLRR-For-Android-arm64.apk --clobber
+          echo "::notice title=Download::https://github.com/$GH_REPO/releases/download/$tag/JR-CLRR-For-Android-arm64.apk"

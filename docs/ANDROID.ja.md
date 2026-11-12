@@ -13,9 +13,13 @@ USB ドングルはアプリ内蔵のドライバーで直接動かします（�
 
 ## APK の入手とインストール
 
-1. GitHub の **Actions** → **Android APK** で最新の成功した実行を開き、
-   **Artifacts** の `jr-radio-receiver-android-arm64` をダウンロードして展開します。
-2. APK をスマホに送り、「提供元不明のアプリ」のインストールを許可して開きます。
+1. スマホのブラウザーで次のリンクを開くと、最新の APK を直接ダウンロードできます（GitHub へのログインは不要です）。
+   <https://github.com/tofuru382/jr-conventional-line-radio-receiver/releases/download/latest-build/JR-CLRR-For-Android-arm64.apk>
+   リリースのページ「[JR-CLRR 最新ビルド](https://github.com/tofuru382/jr-conventional-line-radio-receiver/releases/tag/latest-build)」からも入手できます。
+2. ダウンロードした APK を開き、「提供元不明のアプリ」のインストールを許可します。
+
+GitHub の **Actions** → **Android APK** の実行結果にある **Artifacts**（`jr-radio-receiver-android-arm64`）からも入手できますが、
+こちらは GitHub にログインしていないとダウンロードボタンが表示されません（GitHub アプリでも表示されません）。
 
 リポジトリに署名鍵のシークレット（後述）があれば、新しいビルドはアンインストールせずに上書きで更新できます。
 ない場合はビルドごとに使い捨ての鍵で署名されるため、新しいビルドを入れる前に古いアプリをアンインストールしてください（設定も消えます）。
