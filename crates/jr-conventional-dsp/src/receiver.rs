@@ -45,6 +45,15 @@ impl Dsp {
         soft.truncate(count);
         Ok(self.0.snapshot())
     }
+    /// JR-CLRR: moves the channel to `offset` Hz from the IQ centre while it
+    /// keeps receiving (for automatic frequency correction in small steps).
+    pub fn retune(&mut self, rate: f64, offset: f64) -> Result<(), String> {
+        if !offset.is_finite() || offset.abs() + 4200.0 >= rate / 2.0 {
+            return Err("Channel lies outside the IQ sample bandwidth".into());
+        }
+        self.0.retune(rate, offset);
+        Ok(())
+    }
     /// Also run the alternate detector (drift RLS tracking for fast
     /// time-varying simulcast channels) for [`Self::process_dual`].
     pub fn enable_alternate(&mut self) {

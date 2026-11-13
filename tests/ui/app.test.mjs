@@ -627,6 +627,16 @@ test("the measured input rate is shown and flagged when it differs from the sett
   app.setSnapshot({ status: { ...status(), input_rate: 240000, source_info: "R828D · RTL-SDR Blog V4" }, audio: [] });
   await app.poll();
   assert.match($("capture-info").textContent, /実測 240,000 S\/s · R828D · RTL-SDR Blog V4 · 入力/);
+  // Automatic frequency correction appears once it moved.
+  app.setSnapshot({ status: { ...status(), frequency_correction_hz: 0 }, audio: [] });
+  await app.poll();
+  assert.doesNotMatch($("capture-info").textContent, /自動補正/);
+  app.setSnapshot({ status: { ...status(), frequency_correction_hz: -232.6 }, audio: [] });
+  await app.poll();
+  assert.match($("capture-info").textContent, / · 周波数 自動補正 −233 Hz · 入力/);
+  app.setSnapshot({ status: { ...status(), frequency_correction_hz: 120 }, audio: [] });
+  await app.poll();
+  assert.match($("capture-info").textContent, / · 周波数 自動補正 \+120 Hz · 入力/);
 });
 test("no diagnosis panels: IQ capture and the connection log are gone", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });

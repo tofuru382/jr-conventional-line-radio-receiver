@@ -59,10 +59,20 @@ impl Config {
 // 8-bit ADC into clipping on this wideband multi-carrier input (measured: 6.6 %
 // of samples clipped, worse than the highest manual gain) and loses frame sync.
 // An empty gain therefore selects manual gain stepped down from the top of the
-// tuner's table while the ADC clips. It never steps up again: alternating
-// between clipping and not would cost frames on every step.
+// tuner's table while the ADC clips.
 // Light clipping must last this many 50 ms windows before the gain steps.
 const LIGHT_CLIPPING_WINDOWS: u32 = 10;
+// JR-CLRR: the gain also steps back up. A receiver on a train passes strong
+// stations and then needs the gain again for the weak ones. Alternating
+// between clipping and not would cost frames on every step, so it only rises
+// after this many windows (6 s) without a single clipped sample, only as far
+// as the largest sample seen in them leaves headroom for, and each rise that
+// ends in clipping doubles the wait (up to 64 times; a calm stretch of ten
+// waits halves it again).
+const RECOVERY_WINDOWS: u32 = 120;
+const RECOVERY_BACKOFF: u32 = 64;
+// The largest sample after a rise must stay below this share of full scale.
+const RECOVERY_PEAK: f64 = 0.8 * 255.0;
 // JR-CLRR: shared with the built-in USB driver (usb.rs), whose tuner AGC
 // clips the same way; there the gains come from [`GAINS_TENTH_DB`].
 pub(crate) struct AutoGain {
@@ -76,6 +86,15 @@ pub(crate) struct AutoGain {
     clipped: u64,
     // Consecutive windows with light clipping; a brief burst does not step.
     strikes: u32,
+    top: u32,
+    // Consecutive windows without clipping and their largest sample (0–255).
+    quiet: u32,
+    peak: u32,
+    // Clean windows a rise needs, the calm windows towards halving that, and
+    // whether the last step was a rise.
+    wait: u32,
+    calm: u32,
+    raised: bool,
 }
 /// rtl_tcp's (librtlsdr's) R820T/R828D gain table, 0.1 dB steps; rtl_tcp's
 /// gain-by-index command selects from it.
@@ -95,24 +114,35 @@ impl AutoGain {
             seen: 0,
             clipped: 0,
             strikes: 0,
+            top: index,
+            quiet: 0,
+            peak: 0,
+            wait: RECOVERY_WINDOWS,
+            calm: 0,
+            raised: false,
         })
     }
     /// Counts clipped components in `bytes` (interleaved CU8) and returns the
-    /// next gain index once a full window clipped too often.
+    /// next gain index once a full window clipped too often, or once the
+    /// input stayed clean long enough to raise the gain again.
     fn observe(&mut self, bytes: &[u8]) -> Option<u32> {
         self.observe_with(bytes.len() / 2, |start| {
-            bytes[start * 2..]
-                .iter()
-                .filter(|&&b| b == 0 || b == 255)
-                .count() as u64
+            let (mut clipped, mut peak) = (0, 0);
+            for &b in &bytes[start * 2..] {
+                let level = (i32::from(b) * 2 - 255).unsigned_abs();
+                clipped += u64::from(level == 255);
+                peak = peak.max(level);
+            }
+            (clipped, peak)
         })
     }
     /// Like [`Self::observe`] for `samples` samples of another format:
-    /// `clipped(start)` counts the clipped I/Q components from sample `start`.
+    /// `measure(start)` returns the number of clipped I/Q components from
+    /// sample `start` and the largest component (0–255, 255 = full scale).
     pub(crate) fn observe_with(
         &mut self,
         samples: usize,
-        clipped: impl FnOnce(usize) -> u64,
+        measure: impl FnOnce(usize) -> (u64, u32),
     ) -> Option<u32> {
         let mut samples = samples as u64;
         let mut start = 0;
@@ -122,22 +152,30 @@ impl AutoGain {
             samples -= skip;
             start = skip as usize;
         }
-        if samples == 0 || self.index == 0 {
+        if samples == 0 {
             return None;
         }
+        let (clipped, peak) = measure(start);
         self.seen += samples;
-        self.clipped += clipped(start);
+        self.clipped += clipped;
+        self.peak = self.peak.max(peak);
         if self.seen < self.window {
             return None;
         }
         // Clipped I/Q components per 1000 samples.
         let rate = self.clipped * 1000 / self.seen;
+        let clean = self.clipped == 0;
         self.seen = 0;
         self.clipped = 0;
+        if !clean {
+            self.quiet = 0;
+            self.peak = 0;
+            self.calm = 0;
+        }
         let step = match rate {
             0 => {
                 self.strikes = 0;
-                return None;
+                return if clean { self.recover() } else { None };
             }
             1..=9 => {
                 self.strikes += 1;
@@ -150,9 +188,55 @@ impl AutoGain {
             _ => 3,
         };
         self.strikes = 0;
+        if self.index == 0 {
+            return None;
+        }
+        if self.raised {
+            self.raised = false;
+            self.wait = (self.wait * 2).min(RECOVERY_WINDOWS * RECOVERY_BACKOFF);
+        }
         self.index = self.index.saturating_sub(step);
         self.holdoff = self.settle;
         Some(self.index)
+    }
+    /// A clean window: raises the gain (up to three steps) once enough of
+    /// them passed and the largest sample leaves headroom for it.
+    fn recover(&mut self) -> Option<u32> {
+        self.calm += 1;
+        if self.calm >= self.wait.saturating_mul(10) {
+            self.calm = 0;
+            self.wait = (self.wait / 2).max(RECOVERY_WINDOWS);
+        }
+        self.quiet += 1;
+        if self.quiet < self.wait {
+            return None;
+        }
+        let peak = f64::from(self.peak.max(1));
+        self.quiet = 0;
+        self.peak = 0;
+        let mut index = self.index;
+        while index < self.top
+            && index < self.index + 3
+            && peak * 10f64.powf(self.rise_db(index + 1) / 20.0) <= RECOVERY_PEAK
+        {
+            index += 1;
+        }
+        if index == self.index {
+            return None;
+        }
+        self.index = index;
+        self.holdoff = self.settle;
+        self.raised = true;
+        Some(index)
+    }
+    /// Gain added by going from the current index to `index`: from the
+    /// R820T/R828D table, or a cautious 3 dB a step for another tuner's.
+    fn rise_db(&self, index: u32) -> f64 {
+        if self.top as usize == GAINS_TENTH_DB.len() - 1 {
+            f64::from(GAINS_TENTH_DB[index as usize] - GAINS_TENTH_DB[self.index as usize]) / 10.0
+        } else {
+            3.0 * f64::from(index - self.index)
+        }
     }
 }
 
@@ -494,7 +578,8 @@ mod tests {
         }
         assert_eq!(gain.observe(&clean), None);
         assert_eq!(gain.observe(&light), None);
-        // A clean signal never raises the gain; the lowest index stays put.
+        // A short clean stretch does not raise the gain; the lowest index
+        // stays put.
         for _ in 0..100 {
             assert_eq!(gain.observe(&clean), None);
         }
@@ -503,6 +588,65 @@ mod tests {
         gain.holdoff = 0;
         assert_eq!(gain.observe(&heavy), None);
         assert!(AutoGain::new(0, 240000).is_none());
+    }
+    #[test]
+    fn automatic_gain_rises_again_only_with_headroom_and_backs_off_after_clipping() {
+        // 50 ms windows of 12000 samples; levels are |2 * byte - 255| of 255.
+        let window = |byte: u8| vec![byte; 24000];
+        let run = |gain: &mut AutoGain, bytes: &[u8], windows: u32| {
+            (0..windows).find_map(|_| {
+                gain.holdoff = 0;
+                gain.observe(bytes)
+            })
+        };
+        let mut gain = AutoGain::new(29, 240000).unwrap();
+        gain.index = 20;
+        // 37.2 dB with samples up to 25 % of full scale: 6 s later the gain
+        // rises three steps (to 42.1 dB, predicting 43 %), never earlier.
+        let quiet = window(159);
+        assert_eq!(run(&mut gain, &quiet, RECOVERY_WINDOWS - 1), None);
+        assert_eq!(gain.observe(&quiet), Some(23));
+        assert_eq!(gain.holdoff, gain.settle);
+        // Samples up to 75 % leave room for 0.5 dB (index 24 to 25) only, and
+        // none at 85 %.
+        gain.index = 24;
+        assert_eq!(run(&mut gain, &window(223), RECOVERY_WINDOWS), Some(25));
+        assert_eq!(run(&mut gain, &window(236), RECOVERY_WINDOWS * 3), None);
+        // One clipped sample restarts the wait.
+        let mut spike = quiet.clone();
+        spike[0] = 255;
+        assert_eq!(run(&mut gain, &quiet, RECOVERY_WINDOWS - 1), None);
+        assert_eq!(gain.observe(&spike), None);
+        assert_eq!(run(&mut gain, &quiet, RECOVERY_WINDOWS - 1), None);
+        assert_eq!(gain.observe(&quiet), Some(28));
+        // At the top there is nothing to raise.
+        assert_eq!(run(&mut gain, &quiet, RECOVERY_WINDOWS * 2), None);
+        // A rise that ends in clipping doubles the wait before the next one.
+        let mut heavy = quiet.clone();
+        heavy[..1000].fill(255);
+        gain.index = 20;
+        assert_eq!(run(&mut gain, &quiet, RECOVERY_WINDOWS), Some(23));
+        assert_eq!(run(&mut gain, &heavy, 1), Some(20));
+        assert_eq!(run(&mut gain, &quiet, RECOVERY_WINDOWS * 2 - 1), None);
+        assert_eq!(gain.observe(&quiet), Some(23));
+        assert_eq!(run(&mut gain, &heavy, 1), Some(20));
+        assert_eq!(run(&mut gain, &quiet, RECOVERY_WINDOWS * 4 - 1), None);
+        assert_eq!(gain.observe(&quiet), Some(23));
+        // Clipping that did not follow a rise does not lengthen the wait, and
+        // a long calm stretch shortens it again.
+        assert_eq!(run(&mut gain, &heavy, 1), Some(20));
+        assert_eq!(run(&mut gain, &heavy, 1), Some(17));
+        assert_eq!(gain.wait, RECOVERY_WINDOWS * 8);
+        gain.index = 28;
+        assert_eq!(run(&mut gain, &quiet, RECOVERY_WINDOWS * 80), None);
+        assert_eq!(gain.wait, RECOVERY_WINDOWS * 4);
+        // Another tuner's table is unknown: 3 dB a step is assumed.
+        let mut other = AutoGain::new(14, 240000).unwrap();
+        other.index = 5;
+        assert_eq!(run(&mut other, &window(190), RECOVERY_WINDOWS), Some(6));
+        // The lowest index rises too.
+        other.index = 0;
+        assert_eq!(run(&mut other, &quiet, RECOVERY_WINDOWS), Some(3));
     }
     #[test]
     fn empty_gain_selects_the_top_manual_gain_index() {

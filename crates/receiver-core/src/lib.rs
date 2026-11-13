@@ -1,3 +1,4 @@
+pub mod afc;
 mod coding;
 pub mod data;
 pub mod diag;

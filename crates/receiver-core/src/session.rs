@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, TrySendError},
         Arc, Mutex,
     },
@@ -121,6 +121,10 @@ pub struct Overview {
     /// What the input reports about the receiver (built-in driver: tuner and
     /// RTL-SDR Blog V4 handling).
     pub source_info: Option<String>,
+    /// Automatic frequency correction applied to every channel (Hz; 0 until
+    /// the synchronised channels show a common carrier error).
+    #[serde(default)]
+    pub frequency_correction_hz: f64,
 }
 struct Shared {
     state: String,
@@ -135,6 +139,7 @@ struct Shared {
     iq_request: Option<(std::path::PathBuf, u64)>,
     iq_status: Option<String>,
     source_info: Option<String>,
+    frequency_correction: f64,
 }
 pub struct Session {
     stop: Arc<AtomicBool>,
@@ -288,6 +293,7 @@ impl Session {
             iq_request: None,
             iq_status: None,
             source_info: None,
+            frequency_correction: 0.0,
         }));
         let channels: Vec<_> = config
             .channels
@@ -442,6 +448,7 @@ impl Session {
                 input_rate: s.input_rate,
                 iq_capture: s.iq_status.clone(),
                 source_info: s.source_info.clone(),
+                frequency_correction_hz: s.frequency_correction,
             },
             audio,
         )
@@ -641,6 +648,9 @@ fn run(
         .collect::<Result<Vec<_>, _>>()?;
     let mut senders = Vec::new();
     let mut handles = Vec::new();
+    // Automatic frequency correction (f64 bits, Hz), set by this thread from
+    // the synchronised channels and applied by every worker.
+    let tuning = Arc::new(AtomicU64::new(0f64.to_bits()));
     for (channel_index, (mut pipe, ch)) in pipelines
         .into_iter()
         .zip(channels.iter().cloned())
@@ -650,6 +660,7 @@ fn run(
         let cancel = stop.clone();
         let recording = recorder.clone();
         let monitor = monitor.clone();
+        let tuning = tuning.clone();
         let h = thread::spawn(move || {
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
@@ -658,6 +669,7 @@ fn run(
                     let mut audio_origin_us = 0;
                     let channel_id = pipe.config.id.clone();
                     let mut last = Instant::now();
+                    let mut tuned = 0.0;
                     loop {
                         if cancel.load(Ordering::Relaxed) {
                             break;
@@ -676,6 +688,13 @@ fn run(
                             ch.lock().unwrap().audio.clear();
                         }
                         expected = block.sequence + 1;
+                        let correction = f64::from_bits(tuning.load(Ordering::Relaxed));
+                        if correction != tuned {
+                            // A channel at the very edge of the IQ bandwidth
+                            // stays where it is.
+                            let _ = pipe.retune(correction);
+                            tuned = correction;
+                        }
                         let mut epoch = pipe.status.epoch;
                         let audio = pipe.process_observed(&block.iq, |event| {
                             let time =
@@ -758,6 +777,8 @@ fn run(
     let start = Instant::now();
     let mut window = (Instant::now(), 0u64);
     let mut iq_capture: Option<IqWriter> = None;
+    let mut afc = crate::afc::Afc::default();
+    let mut afc_due = rate as u64;
     let mut buf = vec![Complex32::default(); block_samples(rate)];
     let result = (|| -> Result<(), String> {
         while !stop.load(Ordering::Relaxed) {
@@ -803,6 +824,22 @@ fn run(
                     }
                     samples += n as u64;
                     window.1 += n as u64;
+                    if samples >= afc_due {
+                        // Once a second of IQ.
+                        afc_due = samples + rate as u64;
+                        let mut errors: Vec<f64> = channels
+                            .iter()
+                            .filter_map(|c| {
+                                let c = c.lock().unwrap();
+                                let s = &c.status.status;
+                                (s.frame_locked && s.carrier_locked).then_some(s.frequency_error_hz)
+                            })
+                            .collect();
+                        if let Some(correction) = afc.update(&mut errors) {
+                            tuning.store(correction.to_bits(), Ordering::Relaxed);
+                            shared.lock().unwrap().frequency_correction = correction;
+                        }
+                    }
                     let elapsed = window.0.elapsed();
                     if elapsed >= Duration::from_secs(3) {
                         let mut s = shared.lock().unwrap();
@@ -1072,6 +1109,7 @@ mod tests {
                 iq_request: None,
                 iq_status: None,
                 source_info: None,
+                frequency_correction: 0.0,
             })),
             channels: configs
                 .iter()

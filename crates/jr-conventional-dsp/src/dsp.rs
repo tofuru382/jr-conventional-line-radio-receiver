@@ -463,6 +463,15 @@ impl Demodulator {
         }
     }
 
+    /// JR-CLRR: moves the mixer to `offset` Hz without resetting anything.
+    /// The oscillator keeps its phase, so the carrier loops only see the
+    /// frequency step and follow a small one without losing lock.
+    pub fn retune(&mut self, rate: f64, offset: f64) {
+        let angle = -2.0 * PI * offset / rate;
+        self.step_real = angle.cos();
+        self.step_imaginary = angle.sin();
+    }
+
     /// Also run the alternate (drift RLS) detector; see [`Self::process_dual`].
     pub fn enable_alternate(&mut self) {
         if self.symbols.alternate.is_none() {
@@ -625,5 +634,64 @@ mod tests {
         assert!(points
             .iter()
             .any(|p| (p.real * p.real + p.imaginary * p.imaginary - 1.0).abs() > 0.02));
+    }
+
+    #[test]
+    fn retuning_by_the_measured_offset_centres_the_carrier_without_losing_lock() {
+        // pi/4-DQPSK 90 Hz above the mixer, as in the test above but longer
+        // and without the reflection.
+        let taps = root_raised_cosine(81, 4.0, 4.0);
+        let symbols = 16000;
+        let mut shaped = vec![Complex32::default(); symbols * 4 + taps.len()];
+        let mut rng = 0x8123_4567_u32;
+        for i in 0..symbols {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            let angle = (rng >> 30) as f64 * PI / 2.0 + PI / 4.0 + i as f64 * PI / 4.0;
+            for (j, &tap) in taps.iter().enumerate() {
+                shaped[i * 4 + j].real += angle.cos() as f32 * tap;
+                shaped[i * 4 + j].imaginary += angle.sin() as f32 * tap;
+            }
+        }
+        let input: Vec<_> = shaped
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let phase = 2.0 * PI * 90.0 * i as f64 / 19200.0;
+                Complex32 {
+                    real: s.real * phase.cos() as f32 - s.imaginary * phase.sin() as f32,
+                    imaginary: s.real * phase.sin() as f32 + s.imaginary * phase.cos() as f32,
+                }
+            })
+            .collect();
+        let mut receiver = Demodulator::new(19200.0, 0.0, 0);
+        let mut output = [0; 1024];
+        let (first, rest) = input.split_at(input.len() / 2);
+        for chunk in first.chunks(509) {
+            receiver.process(chunk, &mut output);
+        }
+        let measured = receiver.snapshot();
+        assert!(measured.carrier_locked != 0);
+        assert!(
+            (measured.frequency_offset_hz - 90.0).abs() < 5.0,
+            "{}",
+            measured.frequency_offset_hz
+        );
+        // Walk the mixer there 10 Hz at a time, as the session does.
+        let before = receiver.snapshot().locked_symbols;
+        let mut processed = 0;
+        for (step, chunk) in rest.chunks(768).enumerate() {
+            receiver.retune(19200.0, (10.0 * (step + 1) as f64).min(90.0));
+            processed += receiver.process(chunk, &mut output) as i64;
+        }
+        let centred = receiver.snapshot();
+        assert!(centred.carrier_locked != 0);
+        assert!(
+            centred.frequency_offset_hz.abs() < 5.0,
+            "{}",
+            centred.frequency_offset_hz
+        );
+        assert_eq!(centred.locked_symbols - before, processed);
     }
 }

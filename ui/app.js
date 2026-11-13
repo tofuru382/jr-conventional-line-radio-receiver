@@ -1975,6 +1975,11 @@ function inputLevel(s) {
   const level = s.channels?.find((c) => c.status.iq_samples)?.status.input_dbfs;
   return Number.isFinite(level) ? ` · 入力 ${level.toFixed(1)} dBFS` : "";
 }
+// Automatic frequency correction, once the synchronised channels moved it.
+function frequencyCorrection(s) {
+  const hz = Math.round(s.frequency_correction_hz ?? 0);
+  return hz ? ` · 周波数 自動補正 ${hz > 0 ? "+" : "−"}${Math.abs(hz)} Hz` : "";
+}
 // Samples per second actually arriving; far from the setting means the
 // dongle is not running at the requested rate (or input is being lost).
 function measuredRate(s) {
@@ -2103,7 +2108,7 @@ async function poll() {
         $("state").classList.toggle("active", s.running);
         if (s.error) fail(s.error);
         $("capture-info").textContent = s.sample_rate
-          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}${measuredRate(s)}${s.source_info ? ` · ${s.source_info}` : ""}${inputLevel(s)}`
+          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}${measuredRate(s)}${s.source_info ? ` · ${s.source_info}` : ""}${frequencyCorrection(s)}${inputLevel(s)}`
           : s.running
             ? "接続中"
             : "未接続";

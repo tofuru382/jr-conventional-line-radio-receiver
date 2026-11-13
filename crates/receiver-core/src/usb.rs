@@ -30,7 +30,8 @@ pub struct Config {
     pub center_hz: u32,
     /// Manual LNA + mixer gain in dB; `None` selects automatic gain: manual
     /// gain stepped down from the top while the ADC clips (as RTL-TCP does in
-    /// v1.8; the tuner's own AGC clips this wideband input).
+    /// v1.8; the tuner's own AGC clips this wideband input) and back up once
+    /// the input has headroom again.
     pub gain_db: Option<f64>,
     #[serde(default)]
     pub ppm: i32,
@@ -198,12 +199,17 @@ fn auto_gain(config: &Config, index: Option<u32>) -> Option<AutoGain> {
     }
     Some(gain)
 }
-/// The rtlsdr-nusb conversion maps ADC codes 0 and 255 to exactly ∓1.0.
-fn clipped(samples: &[rtlsdr_nusb::Complex32]) -> u64 {
-    samples
-        .iter()
-        .map(|s| u64::from(s.re.abs() >= 1.0) + u64::from(s.im.abs() >= 1.0))
-        .sum()
+/// Clipped I/Q components and the largest component (0–255) for the
+/// automatic gain. The rtlsdr-nusb conversion maps ADC codes 0 and 255 to
+/// exactly ∓1.0.
+fn clipped(samples: &[rtlsdr_nusb::Complex32]) -> (u64, u32) {
+    let (mut clipped, mut peak) = (0, 0f32);
+    for s in samples {
+        let (re, im) = (s.re.abs(), s.im.abs());
+        clipped += u64::from(re >= 1.0) + u64::from(im >= 1.0);
+        peak = peak.max(re).max(im);
+    }
+    (clipped, (peak.min(1.0) * 255.0).round() as u32)
 }
 
 /// Tuner and V4 handling of an opened dongle, for the app's status line.
@@ -361,6 +367,7 @@ impl Usb {
                         return Ok(Read::Discontinuity);
                     }
                     let scratch = &self.scratch[..n];
+                    let before = self.auto_gain.as_ref().map(|g| g.index);
                     let step = self
                         .auto_gain
                         .as_mut()
@@ -368,7 +375,12 @@ impl Usb {
                     if let (Some(index), Some(device)) = (step, self.device.as_mut()) {
                         let db = gain_at(index);
                         match device.set_manual_gain_db(db as f32).wait() {
-                            Ok(()) => note(format!("ドライバー: 入力が飽和したのでゲインを {db} dB に下げました")),
+                            Ok(()) if Some(index) > before => note(format!(
+                                "ドライバー: 入力に余裕があるのでゲインを {db} dB に上げました"
+                            )),
+                            Ok(()) => note(format!(
+                                "ドライバー: 入力が飽和したのでゲインを {db} dB に下げました"
+                            )),
                             Err(e) => note(format!("ドライバー: ゲインを変更できません ({e})")),
                         }
                     }
@@ -470,7 +482,11 @@ mod tests {
         let c = |re, im| rtlsdr_nusb::Complex32 { re, im };
         let edge = (0.0 - 127.5) / 127.5;
         assert_eq!(edge, -1.0);
-        assert_eq!(clipped(&[c(edge, 0.2), c(1.0, 1.0), c(0.99, -0.99)]), 3);
+        assert_eq!(
+            clipped(&[c(edge, 0.2), c(1.0, 1.0), c(0.99, -0.99)]),
+            (3, 255)
+        );
+        assert_eq!(clipped(&[c(0.1, -0.5), c(0.25, 0.0)]), (0, 128));
         // Clipping after the settling time steps the gain down.
         let mut gain = auto_gain(&automatic, None).unwrap();
         let settle = gain.settle as usize;

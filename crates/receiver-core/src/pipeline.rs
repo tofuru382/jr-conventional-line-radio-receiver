@@ -62,6 +62,8 @@ pub struct Pipeline {
     pub config: ChannelConfig,
     rate: f64,
     center: f64,
+    // JR-CLRR: automatic frequency correction (Hz) added to the mixer.
+    tuning: f64,
     dsp: Dsp,
     sync: Synchronizer,
     alternate_sync: Synchronizer,
@@ -93,6 +95,7 @@ impl Pipeline {
             config,
             rate,
             center,
+            tuning: 0.0,
             dibits: [Vec::new(), Vec::new()],
             soft: [Vec::new(), Vec::new()],
             origin: None,
@@ -114,8 +117,19 @@ impl Pipeline {
         dsp.enable_alternate();
         Ok(dsp)
     }
+    /// JR-CLRR: shifts the channel by `tuning` Hz (the session's automatic
+    /// frequency correction) while it keeps receiving.
+    pub fn retune(&mut self, tuning: f64) -> Result<(), String> {
+        self.dsp
+            .retune(self.rate, self.config.frequency_hz - self.center + tuning)?;
+        self.tuning = tuning;
+        Ok(())
+    }
     pub fn discontinuity(&mut self) -> Result<(), String> {
-        self.dsp = Self::demodulator(self.rate, self.config.frequency_hz - self.center)?;
+        self.dsp = Self::demodulator(
+            self.rate,
+            self.config.frequency_hz - self.center + self.tuning,
+        )?;
         self.sync = Synchronizer::default();
         self.alternate_sync = Synchronizer::default();
         self.merger.clear();
