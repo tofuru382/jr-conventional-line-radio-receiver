@@ -64,13 +64,15 @@ impl Config {
 const LIGHT_CLIPPING_WINDOWS: u32 = 10;
 // JR-CLRR: the gain also steps back up. A receiver on a train passes strong
 // stations and then needs the gain again for the weak ones. Alternating
-// between clipping and not would cost frames on every step, so it only rises
-// after this many windows (6 s) without a single clipped sample, only as far
-// as the largest sample seen in them leaves headroom for, and each rise that
-// ends in clipping doubles the wait (up to 64 times; a calm stretch of ten
-// waits halves it again).
-const RECOVERY_WINDOWS: u32 = 120;
-const RECOVERY_BACKOFF: u32 = 64;
+// between clipping and not would cost frames on every step, and every change
+// is I2C traffic to a dongle that is streaming (dongles that stopped
+// answering became more frequent near stations when rises came after 6 s).
+// So it only rises after this many windows (20 s) without a single clipped
+// sample, only as far as the largest sample seen in them leaves headroom
+// for, and each rise that ends in clipping doubles the wait (up to 16 times,
+// about 5 minutes; a calm stretch of ten waits halves it again).
+const RECOVERY_WINDOWS: u32 = 400;
+const RECOVERY_BACKOFF: u32 = 16;
 // The largest sample after a rise must stay below this share of full scale.
 const RECOVERY_PEAK: f64 = 0.8 * 255.0;
 // JR-CLRR: shared with the built-in USB driver (usb.rs), whose tuner AGC

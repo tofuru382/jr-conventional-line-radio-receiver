@@ -87,13 +87,30 @@ impl NusbTransport {
     /// `manufacturer`/`product` come from the OS when it already read them
     /// (Android's UsbDevice); reading string descriptors over a wrapped
     /// descriptor is not reliable everywhere, and they decide V4 handling.
+    /// With `reset`, the device gets a USB port reset first (as unplugging
+    /// and plugging it back would, without the power cycle). That revives a
+    /// dongle stuck after a stall and drops interface claims a lost
+    /// connection may still hold.
     pub(crate) fn open_fd(
         fd: std::os::fd::OwnedFd,
         manufacturer: Option<String>,
         product: Option<String>,
+        reset: bool,
     ) -> impl MaybeFuture<Output = Result<(Self, crate::DeviceDescriptor)>> {
         nusb::Device::from_fd(fd)
             .map_err(|e| Error::from(e).at("opening USB device from a file descriptor"))
+            .and_then(move |device| {
+                if reset {
+                    Either::left(
+                        device
+                            .reset()
+                            .map_err(|e| Error::from(e).at("resetting the USB device"))
+                            .map_ok(move |()| device),
+                    )
+                } else {
+                    Either::right(ready(Ok(device)))
+                }
+            })
             .and_then(move |device| {
                 let d = device.device_descriptor();
                 let descriptor = crate::DeviceDescriptor {

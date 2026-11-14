@@ -136,14 +136,19 @@ fn open_device(
     _config: &Config,
     (_fd, _identity): (OwnedFd, Identity),
     _auto_index: Option<u32>,
+    _reset: bool,
 ) -> Result<(Device, RxStream), String> {
     Err("USB: 内蔵ドライバーは Android 版でのみ使えます".into())
 }
 #[cfg(any(target_os = "linux", target_os = "android"))]
+/// With `reset`, the dongle gets a USB port reset first: a reconnection
+/// without one could not revive a dongle that stopped answering without
+/// leaving the bus (only unplugging it helped).
 fn open_device(
     config: &Config,
     (fd, identity): (OwnedFd, Identity),
     auto_index: Option<u32>,
+    reset: bool,
 ) -> Result<(Device, RxStream), String> {
     let gain_db = config
         .gain_db
@@ -159,10 +164,16 @@ fn open_device(
         Identity::Other => (Some(String::new()), Some(String::new())),
         Identity::Unknown => (None, None),
     };
-    let device = device
-        .open_fd_with_strings(fd, manufacturer, product)
-        .wait()
-        .map_err(|e| format!("USB: ドングルを初期化できません ({e})"))?;
+    let device = if reset {
+        device
+            .open_fd_with_strings_after_reset(fd, manufacturer, product)
+            .wait()
+    } else {
+        device
+            .open_fd_with_strings(fd, manufacturer, product)
+            .wait()
+    }
+    .map_err(|e| format!("USB: ドングルを初期化できません ({e})"))?;
     let mut rx = device
         .rx_stream()
         .map_err(|e| format!("USB: 受信を開始できません ({e})"))?;
@@ -245,6 +256,8 @@ pub struct Usb {
     lost_at: Option<Instant>,
     cause: String,
     pub failed_attempts: u32,
+    /// Why the last reconnection attempt failed (shown while reconnecting).
+    last_failure: Option<String>,
     pub reconnects: u64,
     /// Transfer errors already noted, and when (notes at most once a second).
     noted_errors: (u64, Instant),
@@ -279,7 +292,7 @@ impl Usb {
         };
         WANTED.store(false, Ordering::Relaxed);
         let auto_gain = auto_gain(config, None);
-        let (device, rx) = open_device(config, fd, auto_gain.as_ref().map(|g| g.index))
+        let (device, rx) = open_device(config, fd, auto_gain.as_ref().map(|g| g.index), false)
             .inspect_err(|e| note(format!("ドライバー: {e}")))?;
         Ok(Self {
             config: config.clone(),
@@ -293,6 +306,7 @@ impl Usb {
             lost_at: None,
             cause: String::new(),
             failed_attempts: 0,
+            last_failure: None,
             reconnects: 0,
             noted_errors: (0, Instant::now()),
             auto_gain,
@@ -308,6 +322,12 @@ impl Usb {
         let mut info = self.info.clone();
         if let Some(gain) = &self.auto_gain {
             info += &format!(" · ゲイン 自動 {} dB", gain_at(gain.index));
+        }
+        if self.rx.is_none() {
+            info += &format!(" · 再接続中: {}", self.cause);
+            if let Some(failure) = &self.last_failure {
+                info += &format!("（再接続 {} 回失敗: {failure}）", self.failed_attempts);
+            }
         }
         if errors > 0 {
             info += &format!(" · USB 転送エラー {errors} 回（自動回復）");
@@ -330,6 +350,7 @@ impl Usb {
         self.lost_at = Some(Instant::now());
         self.cause = cause;
         self.failed_attempts = 0;
+        self.last_failure = None;
         // A descriptor of the old connection must not be reused.
         take_offered();
         WANTED.store(true, Ordering::Relaxed);
@@ -423,7 +444,9 @@ impl Usb {
         }
         // A new connection keeps the gain the automatic gain stepped down to.
         let index = self.auto_gain.as_ref().map(|g| g.index);
-        match open_device(&self.config, fd, index) {
+        // Reset the dongle as a replug would: it may have stopped answering
+        // while still attached, or the lost connection may hold its claim.
+        match open_device(&self.config, fd, index, true) {
             Ok((device, rx)) => {
                 WANTED.store(false, Ordering::Relaxed);
                 self.info = describe(&device);
@@ -433,6 +456,7 @@ impl Usb {
                 self.last_data = Instant::now();
                 self.lost_at = None;
                 self.failed_attempts = 0;
+                self.last_failure = None;
                 self.reconnects += 1;
                 self.noted_errors = (0, Instant::now());
                 // Same gain, but wait for the new stream before measuring.
@@ -441,7 +465,8 @@ impl Usb {
             }
             Err(e) => {
                 note(format!("ドライバー: 再接続に失敗しました: {e}"));
-                self.failed_attempts += 1
+                self.failed_attempts += 1;
+                self.last_failure = Some(e);
             }
         }
         Ok(Read::Timeout)

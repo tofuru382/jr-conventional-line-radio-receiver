@@ -270,8 +270,30 @@ impl<M: SampleMode> DeviceBuilder<M> {
         manufacturer: Option<String>,
         product: Option<String>,
     ) -> impl MaybeFuture<Output = Result<Device<M>>> {
+        self.open_fd_inner(fd, manufacturer, product, false)
+    }
+    /// JR-CLRR: [`DeviceBuilder::open_fd_with_strings`] after a USB port
+    /// reset, to reconnect to a dongle that stopped responding without being
+    /// unplugged.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn open_fd_with_strings_after_reset(
+        self,
+        fd: std::os::fd::OwnedFd,
+        manufacturer: Option<String>,
+        product: Option<String>,
+    ) -> impl MaybeFuture<Output = Result<Device<M>>> {
+        self.open_fd_inner(fd, manufacturer, product, true)
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn open_fd_inner(
+        self,
+        fd: std::os::fd::OwnedFd,
+        manufacturer: Option<String>,
+        product: Option<String>,
+        reset: bool,
+    ) -> impl MaybeFuture<Output = Result<Device<M>>> {
         ready(self.config.build()).and_then(move |config| {
-            NusbTransport::open_fd(fd, manufacturer, product).and_then(
+            NusbTransport::open_fd(fd, manufacturer, product, reset).and_then(
                 move |(control, descriptor)| {
                     Session::initialize(control, descriptor, config.settings.clone()).map_ok(
                         move |(session, applied)| Device {
