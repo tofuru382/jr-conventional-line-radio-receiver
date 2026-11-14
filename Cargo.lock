@@ -1918,6 +1918,7 @@ dependencies = [
 name = "jr-receiver-desktop"
 version = "1.8.0"
 dependencies = [
+ "jni",
  "libc",
  "ndk",
  "objc2",

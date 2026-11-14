@@ -151,6 +151,7 @@ async function playRecording(session, file, target = browserPlayer) {
     recordingUrl = URL.createObjectURL(blob);
     const player = $(target.player);
     player.src = recordingUrl;
+    player.dataset.path = file.path;
     player.hidden = false;
     $(target.now).textContent = `再生中：${fileTime(session, file)} · ${recordingLabel(file)}`;
     $(target.now).hidden = false;
@@ -196,9 +197,96 @@ function recordingButton(session, file, withTime, target = browserPlayer) {
   const button = el("button", text, "recording-play");
   button.type = "button";
   button.addEventListener("click", () => playRecording(session, file, target));
-  return button;
+  const row = el("div", undefined, "recording-item");
+  row.append(button, recordingMenu(session, file, text.slice(2)));
+  return row;
+}
+// "⋮" beside a recording: delete it (after a confirmation in the menu).
+let openRecordingMenu = null;
+function closeRecordingMenu() {
+  if (!openRecordingMenu) return;
+  const { toggle, menu } = openRecordingMenu;
+  openRecordingMenu = null;
+  menu.remove();
+  toggle.setAttribute("aria-expanded", "false");
+}
+function recordingMenu(session, file, name) {
+  const toggle = el("button", "⋮", "recording-more-actions");
+  toggle.type = "button";
+  toggle.setAttribute("aria-label", `この録音の操作（${name}）`);
+  toggle.setAttribute("aria-haspopup", "true");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const wasOpen = openRecordingMenu?.toggle === toggle;
+    closeRecordingMenu();
+    if (wasOpen) return;
+    const menu = el("div", undefined, "recording-menu");
+    menu.addEventListener("click", (e) => e.stopPropagation());
+    const remove = el("button", "削除", "recording-delete");
+    remove.type = "button";
+    remove.addEventListener("click", () => {
+      const question = el("p", "この録音を削除しますか？元に戻せません。", "recording-menu-question");
+      const confirm = el("button", "削除する", "recording-delete-confirm");
+      confirm.type = "button";
+      const cancel = el("button", "やめる", "recording-delete-cancel");
+      cancel.type = "button";
+      cancel.addEventListener("click", () => {
+        closeRecordingMenu();
+        toggle.focus();
+      });
+      confirm.addEventListener("click", () => void deleteRecording(session, file, confirm));
+      menu.replaceChildren(question, confirm, cancel);
+      confirm.focus();
+    });
+    menu.append(remove);
+    toggle.after(menu);
+    toggle.setAttribute("aria-expanded", "true");
+    openRecordingMenu = { toggle, menu };
+    remove.focus();
+  });
+  return toggle;
+}
+document.addEventListener("click", closeRecordingMenu);
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !openRecordingMenu) return;
+  const { toggle } = openRecordingMenu;
+  closeRecordingMenu();
+  toggle.focus();
+});
+async function deleteRecording(session, file, button) {
+  button.disabled = true;
+  try {
+    await invoke("delete_recording", {
+      path: file.path,
+      directory: $("record-directory").value.trim() || null,
+    });
+  } catch (e) {
+    closeRecordingMenu();
+    $("recordings-status").textContent = friendlyError(e);
+    return;
+  }
+  closeRecordingMenu();
+  const player = $("recordings-player");
+  if (player.dataset.path === file.path) {
+    player.pause?.();
+    player.removeAttribute("src");
+    delete player.dataset.path;
+    player.hidden = true;
+    $("recordings-now").hidden = true;
+  }
+  session.files = session.files.filter((f) => f !== file);
+  recordingSessions = recordingSessions.filter((s) => s.files.length);
+  updateRecordingsCount();
+  $("recordings-status").textContent = recordingSessions.length ? "削除しました" : "録音はまだありません";
+  renderRecordings();
+}
+function updateRecordingsCount() {
+  const total = recordingSessions.reduce((n, s) => n + s.files.length, 0);
+  $("recordings-count").textContent = `${recordingSessions.length} 回の保存 · ${total} 件`;
 }
 function renderRecordings() {
+  closeRecordingMenu();
   const list = $("recordings-list");
   list.replaceChildren();
   const order = $("recordings-sort").value;
@@ -260,8 +348,7 @@ async function refreshRecordings() {
       (await invoke("list_recordings", {
         directory: $("record-directory").value.trim() || null,
       })) ?? [];
-    const total = recordingSessions.reduce((n, s) => n + s.files.length, 0);
-    $("recordings-count").textContent = `${recordingSessions.length} 回の保存 · ${total} 件`;
+    updateRecordingsCount();
     $("recordings-status").textContent = recordingSessions.length ? "" : "録音はまだありません";
     renderRecordings();
   } catch (e) {
@@ -731,9 +818,27 @@ function renderQuick() {
 // one being heard is underlined. Tapping one listens to it (manual selection).
 // The full page has one beside the band range, the compact card one on top.
 const BAND_STEP_HZ = 6250;
+// Android: the notification draws the same band map; it gets the layout
+// (every channel, and which are received) from here when it changes.
+let notificationBand = "";
+function sendNotificationBand(sorted) {
+  if (!platform.android) return;
+  const layout = JSON.stringify({
+    channels: sorted.map((c) => ({ id: c.id, hz: c.frequency_hz, label: c.label })),
+    enabled: sorted.filter((c) => enabled.has(c.id)).map((c) => c.id),
+  });
+  if (layout === notificationBand || !window.JrAndroid?.setBandLayout) return;
+  try {
+    window.JrAndroid.setBandLayout(layout);
+    notificationBand = layout;
+  } catch {
+    // The bridge only exists in the Android app.
+  }
+}
 function renderBandMap() {
   const sorted = [...channels].sort((a, b) => a.frequency_hz - b.frequency_hz);
   const key = sorted.map((c) => c.id).join(",");
+  sendNotificationBand(sorted);
   const s = running ? lastSnapshot : null;
   const calls = new Set(s?.active_calls ?? []);
   const rowsById = new Map(s?.channels.map((x) => [x.config.id, x]) ?? []);

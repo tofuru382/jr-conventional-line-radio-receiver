@@ -1619,11 +1619,50 @@ body:has(#route-dialog[open]) { overflow: hidden; }
   cursor: pointer;
   padding-block: 6px;
 }
+.recording-item {
+  position: relative;
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  margin-block-start: 6px;
+}
 .recording-play {
   display: block;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   text-align: start;
-  margin-block-start: 6px;
+}
+.recording-more-actions {
+  flex: none;
+  min-width: 44px;
+  padding-inline: 0;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+.recording-menu {
+  position: absolute;
+  inset-inline-end: 0;
+  inset-block-start: calc(100% + 4px);
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  max-width: min(100%, 20rem);
+  padding: 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.45);
+}
+.recording-menu-question {
+  flex-basis: 100%;
+  margin: 0;
+}
+.recording-delete,
+.recording-delete-confirm {
+  color: var(--danger);
 }
 
 /* Calls in progress and the latest recordings, on the main page. */

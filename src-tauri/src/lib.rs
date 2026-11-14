@@ -1,3 +1,4 @@
+mod band;
 #[cfg(target_os = "macos")]
 mod icon;
 mod native_audio;
@@ -195,6 +196,19 @@ async fn read_recording(
     .await
     .map_err(|e| e.to_string())?
 }
+/// Deletes one recorded call from the recordings browser.
+#[tauri::command]
+async fn delete_recording(
+    path: String,
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        recordings::delete(&recording_roots(&app, directory), &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[tauri::command]
 fn set_native_monitor(
     settings: native_audio::Settings,
@@ -348,15 +362,20 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "android")]
     let builder = builder.plugin(tauri_plugin_opener::init());
+    let receiver = Receiver::default();
+    let monitor = native_audio::NativeMonitor::default();
+    // The notification's band map reads the same receiver and player.
+    #[cfg(target_os = "android")]
+    band::register(receiver.clone(), monitor.clone());
     builder
         .setup(|_app| {
             #[cfg(target_os = "macos")]
             icon::set_dock_icon()?;
             Ok(())
         })
-        .manage(Receiver::default())
+        .manage(receiver)
         .manage(PreferencesStore::default())
-        .manage(native_audio::NativeMonitor::default())
+        .manage(monitor)
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             platform,
@@ -368,6 +387,7 @@ pub fn run() {
             connection_log,
             list_recordings,
             read_recording,
+            delete_recording,
             devices,
             load_preferences,
             save_preferences,

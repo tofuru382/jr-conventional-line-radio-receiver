@@ -29,3 +29,8 @@
 -keep class io.jrradio.receiver.UsbDongle {
     native <methods>;
 }
+
+# The notification's band map state, implemented in Rust (src-tauri/src/band.rs).
+-keep class io.jrradio.receiver.NativeBand {
+    native <methods>;
+}

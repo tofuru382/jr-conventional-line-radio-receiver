@@ -101,8 +101,8 @@ pub fn list(roots: &[PathBuf]) -> Vec<RecordingSession> {
     sessions
 }
 
-/// Reads a WAV only from a `recording-*` folder directly inside a known root.
-pub fn read(roots: &[PathBuf], path: &str) -> Result<Vec<u8>, String> {
+/// A WAV in a `recording-*` folder directly inside a known root, or None.
+fn recording_file(roots: &[PathBuf], path: &str) -> Result<Option<PathBuf>, String> {
     let file = Path::new(path)
         .canonicalize()
         .map_err(|e| format!("録音ファイルが見つかりません。{e}"))?;
@@ -110,17 +110,38 @@ pub fn read(roots: &[PathBuf], path: &str) -> Result<Vec<u8>, String> {
     let allowed = file
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("wav"))
+        && file.is_file()
         && session
             .and_then(Path::parent)
             .is_some_and(|root| roots.iter().any(|r| r == root));
-    if !allowed {
+    Ok(allowed.then_some(file))
+}
+
+/// Reads a WAV only from a `recording-*` folder directly inside a known root.
+pub fn read(roots: &[PathBuf], path: &str) -> Result<Vec<u8>, String> {
+    let Some(file) = recording_file(roots, path)? else {
         return Err("この場所のファイルは再生できません。".into());
-    }
+    };
     let meta = std::fs::metadata(&file).map_err(|e| e.to_string())?;
     if meta.len() > MAX_WAV_BYTES {
         return Err("録音ファイルが大きすぎます。".into());
     }
     std::fs::read(&file).map_err(|e| format!("録音ファイルを読み込めませんでした。{e}"))
+}
+
+/// Deletes one recorded call (a WAV of a `recording-*` folder of a known
+/// root). The session's other files (data, other calls) stay.
+pub fn delete(roots: &[PathBuf], path: &str) -> Result<(), String> {
+    let Some(file) = recording_file(roots, path)? else {
+        return Err("この場所のファイルは削除できません。".into());
+    };
+    std::fs::remove_file(&file).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            "この録音は削除できませんでした（アプリを入れ直す前の録音など、このアプリで作ったものでないファイルは、ファイル管理アプリで削除してください）。".into()
+        } else {
+            format!("録音を削除できませんでした。{e}")
+        }
+    })
 }
 
 #[cfg(test)]
@@ -194,5 +215,18 @@ mod tests {
             &new.join("../../recording-x/a.wav").to_string_lossy()
         )
         .is_err());
+        // Deleting: only those WAVs, and the session keeps its other files.
+        assert!(delete(&roots, &new.join("session.json").to_string_lossy()).is_err());
+        assert!(delete(&roots, &outside.join("a.wav").to_string_lossy()).is_err());
+        assert!(outside.join("a.wav").exists() && new.join("session.json").exists());
+        delete(&roots, &sessions[0].files[0].path).unwrap();
+        assert!(delete(&roots, &sessions[0].files[0].path).is_err());
+        let after = list(&roots);
+        assert_eq!(after[0].files.len(), 1);
+        assert_eq!(after[0].files[0].name, "352543750Hz-000002.wav");
+        // Without any call left the session is no longer listed.
+        delete(&roots, &sessions[1].files[0].path).unwrap();
+        assert_eq!(list(&roots).len(), 1);
+        assert!(old.exists());
     }
 }

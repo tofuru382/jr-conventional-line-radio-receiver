@@ -1,8 +1,8 @@
 name: macOS app
 
+# Built only on request (Actions → macOS app → Run workflow): new work is
+# Android-only for now, so pushes no longer build the Mac app.
 on:
-  push:
-    branches: ["**"]
   workflow_dispatch:
 
 permissions:

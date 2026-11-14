@@ -54,6 +54,11 @@ pub struct NativeMonitor {
 }
 
 impl NativeMonitor {
+    /// What the page asked to play (the notification's band map marks it).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn settings(&self) -> Settings {
+        self.settings.lock().map(|s| s.clone()).unwrap_or_default()
+    }
     pub fn update(&self, settings: Settings, receiver: &crate::Receiver) -> Result<(), String> {
         *self.settings.lock().map_err(|e| e.to_string())? = settings;
         self.start(receiver)

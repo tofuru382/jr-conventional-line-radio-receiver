@@ -99,6 +99,12 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun requestUsb(): String = UsbDongle.request(this@MainActivity)
 
+    /** The notification's band map layout (see [NativeBand.layout]). */
+    @JavascriptInterface
+    fun setBandLayout(json: String) {
+      NativeBand.layout = json
+    }
+
     /** Android-side connection notes, one "<unix ms>\t<text>" per line. */
     @JavascriptInterface fun usbLog(): String = UsbDongle.notes()
   }

@@ -237,6 +237,10 @@ async function setup(
             if (command === "platform") return structuredClone(platformInfo);
             if (command === "list_recordings") return structuredClone(recordings);
             if (command === "read_recording") return new ArrayBuffer(8);
+            if (command === "delete_recording") {
+              if (w.__failDelete) throw new Error(w.__failDelete);
+              return null;
+            }
             if (command === "capture_iq") return "/sdcard/Download/JR-CLRR/Recordings/iq-1-352603125Hz-240000.wav";
             if (command === "native_audio_status")
               return { underruns: 2, buffer_ms: 1000, rate: 48000 };
@@ -409,6 +413,20 @@ test("Android plays live audio through Web Audio and holds the background servic
   assert.equal(app.$("native-output"), null);
   await app.click("start");
   assert.deepEqual(service, [true, false]);
+});
+test("Android sends the band layout to the notification once per change", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const layouts = [];
+  app.w.JrAndroid = { setReceiving() {}, setBandLayout: (json) => layouts.push(JSON.parse(json)) };
+  await app.click("start");
+  await app.poll();
+  await app.poll();
+  assert.equal(layouts.length, 1);
+  assert.equal(layouts[0].channels.length, 22);
+  assert.deepEqual(Object.keys(layouts[0].channels[0]), ["id", "hz", "label"]);
+  assert.equal(layouts[0].channels[0].hz, 352537500);
+  assert.ok(layouts[0].channels.every((c, i, all) => i === 0 || all[i - 1].hz < c.hz));
+  assert.equal(layouts[0].enabled.length, 22);
 });
 test("Android layout has the route picker but no search, only the detailed list, a top mute toggle and its own name", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -750,6 +768,40 @@ test("Android lists saved recordings newest first, by channel or by session, and
   assert.equal(app.calls.filter((c) => c.command === "read_recording").at(-1).args.path, recordings[0].files[0].path);
   assert.equal($("recordings-player").hidden, false);
   assert.equal($("recordings-player").getAttribute("src") ?? $("recordings-player").src, "blob:recording");
+  // "⋮" → 削除 → 削除する deletes that call; the player stops if it was playing.
+  const menuButton = () => $("recordings-list").querySelector(".recording-more-actions");
+  menuButton().click();
+  assert.equal(menuButton().getAttribute("aria-expanded"), "true");
+  // Escape and a click elsewhere close it.
+  app.w.document.dispatchEvent(new app.w.KeyboardEvent("keydown", { key: "Escape" }));
+  assert.equal($("recordings-list").querySelector(".recording-menu"), null);
+  menuButton().click();
+  app.w.document.body.click();
+  assert.equal($("recordings-list").querySelector(".recording-menu"), null);
+  menuButton().click();
+  $("recordings-list").querySelector(".recording-delete").click();
+  assert.match($("recordings-list").querySelector(".recording-menu").textContent, /削除しますか/);
+  $("recordings-list").querySelector(".recording-delete-cancel").click();
+  assert.equal(app.calls.some((c) => c.command === "delete_recording"), false);
+  menuButton().click();
+  $("recordings-list").querySelector(".recording-delete").click();
+  $("recordings-list").querySelector(".recording-delete-confirm").click();
+  await tick();
+  await tick();
+  assert.equal(app.calls.filter((c) => c.command === "delete_recording").at(-1).args.path, recordings[0].files[0].path);
+  assert.equal($("recordings-player").hidden, true);
+  assert.equal($("recordings-count").textContent, "1 回の保存 · 2 件");
+  assert.equal($("recordings-status").textContent, "削除しました");
+  assert.equal($("recordings-list").querySelectorAll(".recording-play").length, 2);
+  // A failure is reported and the list stays.
+  app.w.__failDelete = "この録音は削除できませんでした";
+  menuButton().click();
+  $("recordings-list").querySelector(".recording-delete").click();
+  $("recordings-list").querySelector(".recording-delete-confirm").click();
+  await tick();
+  await tick();
+  assert.match($("recordings-status").textContent, /削除できませんでした/);
+  assert.equal($("recordings-list").querySelectorAll(".recording-play").length, 2);
 });
 test("desktop hides the recordings browser", async (t) => {
   const { $ } = await setup(t, { platformInfo: { android: false, soapy: true } });
