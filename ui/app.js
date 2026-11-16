@@ -531,10 +531,111 @@ document.addEventListener("click", (event) => {
   target.focus({ preventScroll: true });
 });
 function fail(error) {
-  const text = friendlyError(error);
+  const diagnosis = usbDiagnosis(String(error?.message ?? error ?? ""));
+  const text = friendlyError(error) + (diagnosis ? `\n診断：${diagnosis}` : "");
   if ($("error").textContent !== text) $("error").textContent = text;
   $("error").hidden = false;
 }
+// Android, built-in driver: when the dongle is lost, say what the driver and
+// the phone saw, so a report tells a cut USB link (power, contact) from a
+// dongle that stopped answering, and whether a gain change preceded it. The
+// last one is kept for the version dialog.
+const usbDiagnosisKey = "jr-clrr.usb-diagnosis";
+let diagnosed = { raw: "", text: "" };
+function usbDiagnosis(raw) {
+  if (!platform.android || !raw.startsWith("USB: ")) return "";
+  if (diagnosed.raw === raw) return diagnosed.text;
+  const bracket = (pattern) => raw.match(pattern)?.[1];
+  let phone = "";
+  try {
+    phone = window.JrAndroid?.usbDiagnosis?.() ?? "";
+  } catch {
+    // The bridge only exists in the Android app.
+  }
+  const text = [
+    /5 秒間データが届きません/.test(raw)
+      ? "データが止まった"
+      : /通信が続けて失敗/.test(raw)
+        ? "USB の通信エラー"
+        : null,
+    bracket(/［(ゲイン変更の[^］]*)］/),
+    bracket(/［(再接続[^］]*)］/)?.slice(0, 120),
+    phone,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  diagnosed = { raw, text };
+  if (text) {
+    try {
+      localStorage.setItem(
+        usbDiagnosisKey,
+        `${new Date().toLocaleString("ja-JP", { hour12: false })}\n${text}`,
+      );
+    } catch {
+      // Storage may be unavailable; the error still shows the diagnosis.
+    }
+    showLastUsbDiagnosis();
+  }
+  return text;
+}
+function showLastUsbDiagnosis() {
+  let last = null;
+  try {
+    last = localStorage.getItem(usbDiagnosisKey);
+  } catch {
+    // Nothing to show.
+  }
+  if (!last) return;
+  $("about-lost").textContent = last;
+  $("about-lost").hidden = $("about-lost-title").hidden = false;
+}
+// The connection log (driver and Android notes, oldest first) for a report.
+async function connectionLogText() {
+  const notes = (await invoke("connection_log")).map(([ms, text]) => [ms, text]);
+  let android = "";
+  try {
+    android = window.JrAndroid?.usbLog?.() ?? "";
+  } catch {
+    // The bridge only exists in the Android app.
+  }
+  for (const line of android.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab > 0) notes.push([Number(line.slice(0, tab)), line.slice(tab + 1)]);
+  }
+  notes.sort((a, b) => a[0] - b[0]);
+  const time = (ms) => new Date(ms).toLocaleTimeString("ja-JP", { hour12: false });
+  return [
+    `${$("about-product").textContent.trim()} ${document.querySelector(".about-metadata dd").textContent}`,
+    $("about-lost").hidden ? null : `前回の切断: ${$("about-lost").textContent.replace("\n", " ")}`,
+    ...notes.map(([ms, text]) => `${time(ms)} ${text}`),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+$("about-copy-log").addEventListener("click", async () => {
+  const button = $("about-copy-log");
+  const log = $("about-log");
+  try {
+    log.value = await connectionLogText();
+  } catch (e) {
+    log.value = `接続の記録を読めませんでした。${e?.message ?? e}`;
+  }
+  // Shown as well, in case the clipboard is not available.
+  log.hidden = false;
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(log.value);
+    copied = true;
+  } catch {
+    log.select();
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      copied = false;
+    }
+  }
+  button.textContent = copied ? "コピーしました" : "上の記録を選択してコピーしてください";
+});
 function clearError() {
   $("error").hidden = true;
   $("field-error").hidden = true;
@@ -1824,6 +1925,10 @@ function applySimpleLayout(name) {
   document.querySelector(".topbar .eyebrow").textContent =
     "JR 在来線デジタル列車無線受信";
   $("about-product").textContent = name;
+  if (platform.android) {
+    $("about-copy-log").hidden = false;
+    showLastUsbDiagnosis();
+  }
   if (platform.build) {
     const version = document.querySelector(".about-metadata dd");
     version.textContent = `${version.textContent} · ビルド ${platform.build.slice(0, 7)}`;

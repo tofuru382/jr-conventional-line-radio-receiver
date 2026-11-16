@@ -105,6 +105,9 @@ class MainActivity : TauriActivity() {
       NativeBand.layout = json
     }
 
+    /** What the phone saw of the dongle, for a lost-dongle error's diagnosis. */
+    @JavascriptInterface fun usbDiagnosis(): String = UsbDongle.diagnosis(this@MainActivity)
+
     /** Android-side connection notes, one "<unix ms>\t<text>" per line. */
     @JavascriptInterface fun usbLog(): String = UsbDongle.notes()
   }

@@ -1022,9 +1022,24 @@ body:has(#about-dialog[open]) {
 }
 .about-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: end;
 }
+.about-lost {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.about-log {
+  width: 100%;
+  margin-block-end: 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.6875rem;
+}
 .error {
+  /* A lost-dongle error carries its diagnosis on a second line. */
+  white-space: pre-line;
+  overflow-wrap: anywhere;
   margin-block-start: 20px;
   padding: 16px 20px;
   background: var(--danger-bg);

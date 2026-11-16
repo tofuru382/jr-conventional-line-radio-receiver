@@ -263,6 +263,9 @@ pub struct Usb {
     noted_errors: (u64, Instant),
     /// Automatic gain (no manual gain set); kept across reconnections.
     auto_gain: Option<AutoGain>,
+    /// When the gain was last written to the tuner: a connection lost right
+    /// after it points at that write, not at the cable or the power.
+    gain_changed: Option<Instant>,
 }
 impl Usb {
     pub fn open(config: &Config, stop: &AtomicBool) -> Result<Self, String> {
@@ -309,6 +312,7 @@ impl Usb {
             last_failure: None,
             reconnects: 0,
             noted_errors: (0, Instant::now()),
+            gain_changed: None,
             auto_gain,
         })
     }
@@ -334,7 +338,14 @@ impl Usb {
         }
         info
     }
-    fn lose(&mut self, cause: String) -> Result<Read, String> {
+    fn lose(&mut self, mut cause: String) -> Result<Read, String> {
+        // For the diagnosis shown with the error (ui/app.js reads these).
+        match self.gain_changed.take().map(|t| t.elapsed()) {
+            Some(t) if t < Duration::from_secs(10) => {
+                cause += &format!("［ゲイン変更の {:.1} 秒後］", t.as_secs_f64())
+            }
+            _ => cause += "［ゲイン変更の直後ではない］",
+        }
         if let Some(rx) = self.rx.take() {
             let stats = rx.stats();
             self.transfer_errors += stats.transfer_errors;
@@ -395,6 +406,7 @@ impl Usb {
                         .and_then(|g| g.observe_with(n, |start| clipped(&scratch[start..])));
                     if let (Some(index), Some(device)) = (step, self.device.as_mut()) {
                         let db = gain_at(index);
+                        self.gain_changed = Some(Instant::now());
                         match device.set_manual_gain_db(db as f32).wait() {
                             Ok(()) if Some(index) > before => note(format!(
                                 "ドライバー: 入力に余裕があるのでゲインを {db} dB に上げました"
@@ -426,9 +438,16 @@ impl Usb {
                 limit.as_secs()
             ));
             return Err(format!(
-                "{}（{} 秒間待ちましたが、ドングルが戻りませんでした。挿し直してから受信を開始してください）",
+                "{}（{} 秒間待ちましたが、ドングルが戻りませんでした。挿し直してから受信を開始してください）{}",
                 self.cause,
-                limit.as_secs()
+                limit.as_secs(),
+                match &self.last_failure {
+                    Some(failure) => format!(
+                        "［再接続 {} 回失敗: {failure}］",
+                        self.failed_attempts
+                    ),
+                    None => "［再接続できる機器なし］".into(),
+                }
             ));
         }
         if stop.load(Ordering::Relaxed) {
@@ -444,9 +463,12 @@ impl Usb {
         }
         // A new connection keeps the gain the automatic gain stepped down to.
         let index = self.auto_gain.as_ref().map(|g| g.index);
-        // Reset the dongle as a replug would: it may have stopped answering
-        // while still attached, or the lost connection may hold its claim.
-        match open_device(&self.config, fd, index, true) {
+        // Reopen it plainly first. If that fails, reset the dongle as a replug
+        // would: it may have stopped answering while still attached, or the
+        // lost connection may hold its claim. A reset the dongle does not
+        // survive takes it off the bus, and a phone may refuse the reset, so
+        // it is neither the first resort nor the only one: attempts alternate.
+        match open_device(&self.config, fd, index, self.failed_attempts % 2 == 1) {
             Ok((device, rx)) => {
                 WANTED.store(false, Ordering::Relaxed);
                 self.info = describe(&device);

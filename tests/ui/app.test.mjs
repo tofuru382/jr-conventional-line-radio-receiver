@@ -557,6 +557,60 @@ test("a failed session's error does not come back after switching input or start
   assert.match($("error").textContent, /ドングルが見つかりません/);
   assert.doesNotMatch($("error").textContent, /RTL-TCP/);
 });
+test("a lost dongle's error carries a diagnosis, kept for the version dialog with the log", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.equal($("about-copy-log").hidden, false);
+  assert.equal($("about-lost").hidden, true);
+  let asked = 0;
+  app.w.JrAndroid = {
+    setReceiving() {},
+    requestUsb: () => "ok",
+    usbDiagnosis: () => (asked++, "スマホが USB の切断を検出（63 秒前） · 今は USB 機器なし · 電池 41.5℃ 48%"),
+    usbLog: () => "1500\tAndroid: USB 機器が外れました（0bda:2838）· 電池 41.5℃ 48%",
+  };
+  await app.click("start");
+  const lost =
+    "USB: ドングルから 5 秒間データが届きません［ゲイン変更の 0.4 秒後］（60 秒間待ちましたが、ドングルが戻りませんでした。挿し直してから受信を開始してください）［再接続 3 回失敗: USB: ドングルを初期化できません (control transfer timed out)］";
+  app.setSnapshot({ status: { ...status(), running: false, state: "failed", error: lost }, audio: [] });
+  await app.poll();
+  await app.poll();
+  const [message, diagnosis] = $("error").textContent.split("\n");
+  assert.equal(message, "ドングルが外れました。挿し直してから受信を開始してください。");
+  assert.equal(
+    diagnosis,
+    "診断：データが止まった · ゲイン変更の 0.4 秒後 · 再接続 3 回失敗: USB: ドングルを初期化できません (control transfer timed out) · スマホが USB の切断を検出（63 秒前） · 今は USB 機器なし · 電池 41.5℃ 48%",
+  );
+  // The phone is asked once per error, not on every poll.
+  assert.equal(asked, 1);
+  assert.equal($("about-lost").hidden, false);
+  assert.match($("about-lost").textContent, /\nデータが止まった · /);
+  assert.match(app.w.localStorage.getItem("jr-clrr.usb-diagnosis"), /ゲイン変更の 0\.4 秒後/);
+  // The log: driver and Android notes in time order, shown and copied.
+  let copied = null;
+  Object.defineProperty(app.w.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text) => void (copied = text) },
+  });
+  $("about-copy-log").click();
+  await tick();
+  await tick();
+  await tick();
+  assert.equal($("about-log").hidden, false);
+  assert.equal(copied, $("about-log").value);
+  const lines = copied.split("\n");
+  assert.match(lines[0], /^JR-CLRR For Android v1\.8\.0/);
+  assert.match(lines[1], /^前回の切断: .*ゲイン変更の 0\.4 秒後/);
+  assert.ok(lines.some((l) => /Android: USB 機器が外れました/.test(l)));
+  assert.equal($("about-copy-log").textContent, "コピーしました");
+  // Other errors and other platforms get no diagnosis.
+  app.setSnapshot({
+    status: { ...status(), running: false, state: "failed", error: "RTL-TCP: 127.0.0.1:1234 に接続できません" },
+    audio: [],
+  });
+  await app.poll();
+  assert.doesNotMatch($("error").textContent, /診断/);
+});
 test("the version dialog names the build", async (t) => {
   const app = await setup(t, {
     platformInfo: { android: true, soapy: false, simple: true, name: "JR-CLRR For Android", build: "6ee67ce0123456789abcdef" },

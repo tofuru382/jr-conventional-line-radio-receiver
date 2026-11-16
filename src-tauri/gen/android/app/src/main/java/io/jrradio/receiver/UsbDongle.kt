@@ -8,7 +8,9 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
+import android.os.BatteryManager
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 
@@ -41,6 +43,42 @@ object UsbDongle {
     }
   }
 
+  /** When Android last reported a USB device detached (elapsedRealtime), or 0. */
+  @Volatile private var detachedAt = 0L
+
+  /** "電池 38.5℃ 62%": heat or a low battery can make a phone cut USB power. */
+  private fun battery(context: Context): String {
+    val status =
+      context.applicationContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        ?: return "電池 不明"
+    val temperature = status.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)
+    val level = status.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+    val scale = status.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+    val degrees = if (temperature == Int.MIN_VALUE) "?" else "%.1f".format(java.util.Locale.ROOT, temperature / 10.0)
+    val percent = if (level < 0 || scale <= 0) "?" else (level * 100 / scale).toString()
+    return "電池 ${degrees}℃ ${percent}%"
+  }
+
+  /**
+   * What the phone saw, for the diagnosis shown with a lost-dongle error:
+   * whether Android itself reported the USB device detached (power or
+   * contact; nothing an app can undo) or the dongle is still attached (it
+   * stopped answering), and the battery state.
+   */
+  fun diagnosis(context: Context): String {
+    val attached = manager(context).deviceList.values
+    val now =
+      when {
+        attached.any { it.vendorId == VENDOR && it.productId in PRODUCTS } -> "今はドングルあり"
+        attached.isEmpty() -> "今は USB 機器なし"
+        else -> "今はドングルなし（ほかの USB 機器 ${attached.size} 台）"
+      }
+    val detached =
+      if (detachedAt == 0L) "スマホは USB の切断を検出していない"
+      else "スマホが USB の切断を検出（${(SystemClock.elapsedRealtime() - detachedAt) / 1000} 秒前）"
+    return "$detached · $now · ${battery(context)}"
+  }
+
   /** One note per line: "<unix ms>\t<text>". */
   fun notes(): String = synchronized(notes) { notes.joinToString("\n") }
 
@@ -71,8 +109,10 @@ object UsbDongle {
         override fun onReceive(context: Context, intent: Intent) {
           @Suppress("DEPRECATION")
           val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
-          val what = if (intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED) "外れました" else "つながりました"
-          note("Android: USB 機器が$what（${device?.let { describe(it) } ?: "不明"}）")
+          val detached = intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED
+          if (detached) detachedAt = SystemClock.elapsedRealtime()
+          val what = if (detached) "外れました" else "つながりました"
+          note("Android: USB 機器が$what（${device?.let { describe(it) } ?: "不明"}）· ${battery(context)}")
         }
       },
       filter,
@@ -125,6 +165,8 @@ object UsbDongle {
     }
     if (usb.hasPermission(device)) {
       val result = if (open(context, device)) "ok" else "busy"
+      // An earlier detach is history once the dongle is open again.
+      if (result == "ok") detachedAt = 0L
       note("Android: ドングルを開きました（${describe(device)}）→ $result")
       return result
     }

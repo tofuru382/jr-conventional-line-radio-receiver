@@ -672,8 +672,19 @@
         </dd>
         <dt id="about-driver-title" hidden>ドライバー</dt>
         <dd id="about-driver" class="about-driver" hidden></dd>
+        <dt id="about-lost-title" hidden>前回の切断</dt>
+        <dd id="about-lost" class="about-lost" hidden></dd>
       </dl>
+      <textarea
+        id="about-log"
+        class="about-log"
+        aria-label="接続の記録"
+        rows="6"
+        readonly
+        hidden
+      ></textarea>
       <div class="about-actions">
+        <button id="about-copy-log" type="button" hidden>接続の記録をコピー</button>
         <button id="about-close" type="button" autofocus>閉じる</button>
       </div>
     </dialog>
