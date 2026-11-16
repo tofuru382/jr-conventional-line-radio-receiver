@@ -1972,6 +1972,37 @@ function adoptMacDefaults() {
     void persistPreferences();
   }
 }
+// Android, built-in driver: a dongle the phone no longer sees (it cut the
+// USB power, or the plug lost contact) only returns once it is replugged.
+// The session keeps waiting; say so once it has been gone for 5 seconds.
+const usbWaitNotice = "ドングルが USB から外れています。挿し直すと自動で受信を再開します。";
+const usbWait = { since: 0, checked: 0, absent: false, shown: false };
+function renderUsbWait(s) {
+  const waiting = s.reconnecting && platform.android && $("input-kind").value === "usb";
+  if (waiting && Date.now() - usbWait.checked >= 1000) {
+    usbWait.checked = Date.now();
+    try {
+      usbWait.absent = window.JrAndroid?.usbAttached?.() === false;
+    } catch {
+      usbWait.absent = false;
+    }
+  }
+  if (!waiting || !usbWait.absent) {
+    usbWait.since = 0;
+    usbWait.absent = false;
+    if (usbWait.shown) {
+      usbWait.shown = false;
+      // Not an error that replaced the notice meanwhile.
+      if ($("error").textContent === usbWaitNotice) clearError();
+    }
+    return;
+  }
+  usbWait.since ||= Date.now();
+  if (!usbWait.shown && Date.now() - usbWait.since >= 5000) {
+    usbWait.shown = true;
+    fail(usbWaitNotice);
+  }
+}
 // What the phone saw when the built-in driver asked for the dongle.
 function usbProblem(answer) {
   if (answer === "none")
@@ -2303,6 +2334,7 @@ async function poll() {
           else resetAudio();
           syncNativeMonitor();
         }
+        renderUsbWait(s);
         const stateLabel = s.reconnecting
           ? "再接続中"
           : ({

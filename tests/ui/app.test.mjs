@@ -611,6 +611,46 @@ test("a lost dongle's error carries a diagnosis, kept for the version dialog wit
   await app.poll();
   assert.doesNotMatch($("error").textContent, /診断/);
 });
+test("Android says to replug a dongle that left USB, until it is back", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  let attached = false;
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "ok", usbAttached: () => attached };
+  await app.change("input-kind", "usb");
+  await app.click("start");
+  let now = 1_000_000;
+  t.mock.method(app.w.Date, "now", () => now);
+  const reconnecting = { status: { ...status(), reconnecting: true }, audio: [] };
+  app.setSnapshot(reconnecting);
+  await app.poll();
+  // A bounce of a few seconds says nothing.
+  now += 4000;
+  await app.poll();
+  assert.equal($("error").hidden, true);
+  now += 1500;
+  await app.poll();
+  assert.equal($("error").textContent, "ドングルが USB から外れています。挿し直すと自動で受信を再開します。");
+  assert.equal($("error").hidden, false);
+  // Replugged: the notice goes away, also before reception is back.
+  attached = true;
+  now += 1500;
+  await app.poll();
+  assert.equal($("error").hidden, true);
+  // An error that replaced the notice stays.
+  attached = false;
+  now += 1500;
+  await app.poll();
+  now += 6000;
+  await app.poll();
+  assert.equal($("error").hidden, false);
+  app.setSnapshot({
+    status: { ...status(), running: false, state: "failed", error: "USB: 受信を開始できません" },
+    audio: [],
+  });
+  await app.poll();
+  assert.match($("error").textContent, /^ドングルの受信を開始できません/);
+  assert.equal($("error").hidden, false);
+});
 test("the version dialog names the build", async (t) => {
   const app = await setup(t, {
     platformInfo: { android: true, soapy: false, simple: true, name: "JR-CLRR For Android", build: "6ee67ce0123456789abcdef" },

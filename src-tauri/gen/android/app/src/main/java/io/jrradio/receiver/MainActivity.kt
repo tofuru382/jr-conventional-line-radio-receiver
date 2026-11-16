@@ -105,6 +105,9 @@ class MainActivity : TauriActivity() {
       NativeBand.layout = json
     }
 
+    /** Whether the phone sees the dongle on USB right now. */
+    @JavascriptInterface fun usbAttached(): Boolean = UsbDongle.find(this@MainActivity) != null
+
     /** What the phone saw of the dongle, for a lost-dongle error's diagnosis. */
     @JavascriptInterface fun usbDiagnosis(): String = UsbDongle.diagnosis(this@MainActivity)
 

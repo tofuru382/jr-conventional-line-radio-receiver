@@ -40,8 +40,11 @@ pub struct Config {
     #[serde(default = "default_reconnect_seconds")]
     pub reconnect_seconds: u32,
 }
+/// Ten minutes: a dongle the phone stopped powering only returns once it is
+/// replugged, and a person needs longer than a minute to notice and do that.
+/// Reception then resumes by itself (the session can be stopped meanwhile).
 fn default_reconnect_seconds() -> u32 {
-    60
+    600
 }
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
@@ -433,14 +436,16 @@ impl Usb {
         let limit = Duration::from_secs(self.config.reconnect_seconds.into());
         if self.lost_at.is_some_and(|t| t.elapsed() >= limit) {
             WANTED.store(false, Ordering::Relaxed);
+            let waited = match limit.as_secs() {
+                s if s >= 120 => format!("{} 分", s / 60),
+                s => format!("{s} 秒"),
+            };
             note(format!(
-                "ドライバー: {} 秒待ってもドングルが戻りませんでした",
-                limit.as_secs()
+                "ドライバー: {waited}待ってもドングルが戻りませんでした"
             ));
             return Err(format!(
-                "{}（{} 秒間待ちましたが、ドングルが戻りませんでした。挿し直してから受信を開始してください）{}",
+                "{}（{waited}間待ちましたが、ドングルが戻りませんでした。挿し直してから受信を開始してください）{}",
                 self.cause,
-                limit.as_secs(),
                 match &self.last_failure {
                     Some(failure) => format!(
                         "［再接続 {} 回失敗: {failure}］",
