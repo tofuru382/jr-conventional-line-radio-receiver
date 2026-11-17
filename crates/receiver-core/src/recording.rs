@@ -83,6 +83,10 @@ pub struct RecordingStatus {
     pub data_messages: u64,
     pub options: OutputOptions,
     pub error: Option<String>,
+    /// The last problem with one call's WAV that did not stop the saving
+    /// (the other calls are still saved).
+    #[serde(default)]
+    pub warning: Option<String>,
     /// Nothing was saved (no call, no selected JSONL rows): the session
     /// folder was removed instead of being kept empty.
     pub discarded: bool,
@@ -100,6 +104,7 @@ impl Default for RecordingStatus {
             data_messages: 0,
             options: OutputOptions::default(),
             error: None,
+            warning: None,
             discarded: false,
         }
     }
@@ -170,6 +175,7 @@ impl Recorder {
                     s.pcm_samples = writer.pcm_samples;
                     s.raw_frames = writer.raw_frames;
                     s.data_messages = writer.data_messages;
+                    s.warning.clone_from(&writer.warning);
                     if let Err(e) = written { error = Some(e); break; }
                 }
                 let previous = state.lock().unwrap().error.clone();
@@ -177,9 +183,10 @@ impl Recorder {
             }));
             let mut s = state.lock().unwrap();
             match result {
-                Ok((files, samples, error, discarded)) => {
+                Ok((files, samples, error, discarded, warning)) => {
                     s.files = files;
                     s.pcm_samples = samples;
+                    s.warning = warning;
                     s.error = error.or(s.error.take());
                     s.discarded = discarded && s.error.is_none();
                 }
@@ -257,6 +264,9 @@ impl Drop for Recorder {
 struct Clip {
     wave: PcmWave,
     name: String,
+    /// When the file was last seen in the folder (it can be deleted from the
+    /// recordings list while it is being written).
+    checked: std::time::Instant,
     epoch: u64,
     first_index: u32,
     last_index: u32,
@@ -284,6 +294,7 @@ struct Writer {
     raw_frames: u64,
     data_messages: u64,
     last_flush: std::time::Instant,
+    warning: Option<String>,
 }
 fn create_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let mut file = OpenOptions::new()
@@ -464,6 +475,7 @@ impl Writer {
             files: 0,
             pcm_samples: 0,
             segment_samples: SEGMENT_SAMPLES,
+            warning: None,
         })
     }
     fn event(&mut self, event: Event) -> Result<(), String> {
@@ -527,19 +539,34 @@ impl Writer {
         serde_json::to_writer(&mut *file, value).map_err(|e| e.to_string())?;
         file.write_all(b"\n").map_err(|e| e.to_string())
     }
-    /// Finalizes the track's WAV. Returns the samples of a clip deleted for
-    /// being shorter than `min_samples` (0 when kept).
+    /// Finalizes the track's WAV. Returns the samples of a clip that is no
+    /// longer saved: deleted for being shorter than `min_samples`, or deleted
+    /// from the recordings list while it was being written (0 when kept).
+    /// A WAV that cannot be finalized stays (its header may be stale) and is
+    /// reported in `warning`: one call must not end the saving of the others.
     fn close(
         track: &mut Track,
         index: &mut File,
         directory: &Path,
         min_samples: u64,
+        warning: &mut Option<String>,
     ) -> Result<u64, String> {
         if let Some(clip) = track.clip.take() {
             let samples = clip.wave.samples();
-            clip.wave
-                .finish()
-                .map_err(|e| format!("{} の WAV を確定できません：{e}", clip.name))?;
+            if !directory.join(&clip.name).exists() {
+                // Deleted while it was being written: nothing to finalize.
+                drop(clip.wave);
+                return Ok(samples);
+            }
+            if let Err(e) = clip.wave.finish() {
+                if !directory.join(&clip.name).exists() {
+                    return Ok(samples);
+                }
+                *warning = Some(format!(
+                    "{} の WAV を確定できませんでした（ほかの通話の保存は続けます）：{e}",
+                    clip.name
+                ));
+            }
             if samples < min_samples {
                 fs::remove_file(directory.join(&clip.name))
                     .map_err(|e| format!("{} を削除できません：{e}", clip.name))?;
@@ -558,10 +585,16 @@ impl Writer {
     fn close_track(&mut self, id: &str) -> Result<(), String> {
         let min = u64::from(self.options.min_clip_ms) * 8;
         let track = self.tracks.get_mut(id).unwrap();
-        let dropped = Self::close(track, &mut self.index, &self.directory, min)?;
+        let dropped = Self::close(
+            track,
+            &mut self.index,
+            &self.directory,
+            min,
+            &mut self.warning,
+        )?;
         if dropped > 0 {
             self.files -= 1;
-            self.pcm_samples -= dropped;
+            self.pcm_samples = self.pcm_samples.saturating_sub(dropped);
         }
         Ok(())
     }
@@ -597,7 +630,45 @@ impl Writer {
             let id = audio.channel.clone();
             self.close_track(&id)?;
         }
+        if let Err(e) = self.write_audio(audio, gap) {
+            // The WAV was deleted from the recordings list while it was being
+            // written: the call continues in a new file.
+            let track = self.tracks.get_mut(&audio.channel).unwrap();
+            let vanished = track
+                .clip
+                .as_ref()
+                .is_some_and(|c| !self.directory.join(&c.name).exists());
+            if !vanished {
+                return Err(e);
+            }
+            let clip = track.clip.take().unwrap();
+            self.files -= 1;
+            self.pcm_samples = self.pcm_samples.saturating_sub(clip.wave.samples());
+            self.write_audio(audio, 0)?;
+        }
         let track = self.tracks.get_mut(&audio.channel).unwrap();
+        track.last = Some((audio.epoch, audio.index));
+        track.last_at = Some(std::time::Instant::now());
+        Ok(())
+    }
+    /// Appends a frame (after `gap` samples of silence) to the track's WAV,
+    /// opening a new one when none is open.
+    fn write_audio(&mut self, audio: &Audio, gap: u64) -> Result<(), String> {
+        let track = self.tracks.get_mut(&audio.channel).unwrap();
+        if let Some(clip) = &mut track.clip {
+            if clip.checked.elapsed() >= std::time::Duration::from_secs(1) {
+                if self.directory.join(&clip.name).exists() {
+                    clip.checked = std::time::Instant::now();
+                } else {
+                    // Deleted while it was being written (on Linux the writes
+                    // would go on into the unlinked file): the call continues
+                    // in a new one.
+                    let clip = track.clip.take().unwrap();
+                    self.files -= 1;
+                    self.pcm_samples = self.pcm_samples.saturating_sub(clip.wave.samples());
+                }
+            }
+        }
         if track.clip.is_none() {
             track.number += 1;
             // Only validated integer frequency, a sanitized label and our own
@@ -623,6 +694,7 @@ impl Writer {
             track.clip = Some(Clip {
                 wave,
                 name,
+                checked: std::time::Instant::now(),
                 epoch: audio.epoch,
                 first_index: audio.index,
                 last_index: audio.index,
@@ -642,12 +714,13 @@ impl Writer {
         })?;
         clip.samples += 320;
         clip.last_index = audio.index;
-        track.last = Some((audio.epoch, audio.index));
-        track.last_at = Some(std::time::Instant::now());
         self.pcm_samples += 320;
         Ok(())
     }
-    fn finish(mut self, mut error: Option<String>) -> (u64, u64, Option<String>, bool) {
+    fn finish(
+        mut self,
+        mut error: Option<String>,
+    ) -> (u64, u64, Option<String>, bool, Option<String>) {
         let ids: Vec<String> = self.tracks.keys().cloned().collect();
         for id in ids {
             if let Err(e) = self.close_track(&id) {
@@ -671,14 +744,14 @@ impl Writer {
                 error = Some(e.to_string());
             }
         }
-        let (files, samples) = (self.files, self.pcm_samples);
+        let (files, samples, warning) = (self.files, self.pcm_samples, self.warning.take());
         let empty =
             error.is_none() && files == 0 && self.raw_frames == 0 && self.data_messages == 0;
         let directory = self.directory.clone();
         // Close every handle first (Windows cannot remove open files).
         drop(self);
         let discarded = empty && remove_empty_session(&directory);
-        (files, samples, error, discarded)
+        (files, samples, error, discarded, warning)
     }
 }
 
@@ -780,6 +853,62 @@ mod tests {
             read_pcm(&dir.join("352543750Hz-000001.wav")),
             vec![-240; 320]
         );
+    }
+    #[test]
+    fn a_wav_deleted_while_it_is_written_does_not_stop_the_saving() {
+        let temp = Temp::new();
+        let channels = presets("east")[..2].to_vec();
+        let r = Recorder::default();
+        let dir = PathBuf::from(r.start(&temp.0, &channels).unwrap().directory.unwrap());
+        let first = dir.join("352537500Hz-000001.wav");
+        r.push(&pcm(&channels[0], 0, 0, 7));
+        r.push(&pcm(&channels[1], 0, 0, 9));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while r.snapshot().pcm_samples < 640 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Deleted from the recordings list during the call.
+        fs::remove_file(&first).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        r.push(&pcm(&channels[0], 0, 1, 8));
+        // The other channel's call, still open, also continues.
+        r.push(&pcm(&channels[1], 0, 1, 10));
+        let s = r.stop();
+        assert_eq!(s.state, "completed", "{:?}", s.error);
+        assert_eq!(s.error, None);
+        assert_eq!(s.warning, None);
+        assert_eq!(s.files, 2);
+        assert_eq!(s.pcm_samples, 960);
+        assert!(!first.exists());
+        assert_eq!(read_pcm(&dir.join("352537500Hz-000002.wav")), vec![8; 320]);
+        assert_eq!(
+            read_pcm(&dir.join("352543750Hz-000001.wav")),
+            [vec![9; 320], vec![10; 320]].concat()
+        );
+        let index = fs::read_to_string(dir.join("files.jsonl")).unwrap();
+        assert!(!index.contains("352537500Hz-000001.wav"));
+        assert_eq!(index.lines().count(), 2);
+    }
+    #[test]
+    fn a_wav_deleted_just_before_it_closes_is_simply_gone() {
+        let temp = Temp::new();
+        let channels = presets("east")[..1].to_vec();
+        let r = Recorder::default();
+        let dir = PathBuf::from(r.start(&temp.0, &channels).unwrap().directory.unwrap());
+        r.push(&pcm(&channels[0], 0, 0, 7));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while r.snapshot().pcm_samples < 320 {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        fs::remove_file(dir.join("352537500Hz-000001.wav")).unwrap();
+        let s = r.stop();
+        assert_eq!(
+            (s.state.as_str(), s.error, s.warning),
+            ("completed", None, None)
+        );
+        assert_eq!((s.files, s.pcm_samples), (0, 0));
     }
     #[test]
     fn channel_labels_go_into_wav_names_safely() {
@@ -884,7 +1013,7 @@ mod tests {
         for (index, value) in [(0, 1), (1, 2), (2, 3), (10000, 4)] {
             w.audio(&pcm(&channels[0], 0, index, value)).unwrap();
         }
-        let (files, samples, error, _) = w.finish(None);
+        let (files, samples, error, _, _) = w.finish(None);
         assert!(error.is_none());
         assert_eq!((files, samples), (3, 1280));
         assert_eq!(
@@ -1136,7 +1265,7 @@ mod tests {
         let mut unwritable = BufWriter::new(File::open(dir.join("session.json")).unwrap());
         unwritable.write_all(b"pending row\n").unwrap();
         writer.raw = Some(unwritable);
-        let (_, _, error, _) = writer.finish(None);
+        let (_, _, error, _, _) = writer.finish(None);
         assert!(error.is_some());
         assert!(dir.join("INCOMPLETE").exists());
     }

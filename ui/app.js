@@ -1124,11 +1124,13 @@ function renderRecording() {
       `${active ? "保存フォルダー" : "保存したフォルダー"}：${s.directory}`;
     $("recording-output").hidden = false;
   }
-  const error = recordingActionError || s.error;
+  // A problem with one call's WAV does not stop the saving; it shows the
+  // same way, without opening the settings.
+  const error = recordingActionError || s.error || s.warning;
   const message = error ? friendlyError(error) : "";
   if ($("recording-error").textContent !== message) {
     $("recording-error").textContent = message;
-    if (error) $("recording-settings").open = true;
+    if (error && error !== s.warning) $("recording-settings").open = true;
   }
   $("recording-error").hidden = !error;
 }
@@ -2006,7 +2008,7 @@ function renderUsbWait(s) {
 // What the phone saw when the built-in driver asked for the dongle.
 function usbProblem(answer) {
   if (answer === "none")
-    return "ドングルが見つかりません。挿し直して、OTG がオンか確認してください。";
+    return "ドングルが見つかりません。ドングルを挿し直してください（受信中に外れたあとは、挿し直すまでスマホが認識しません）。";
   if (typeof answer === "string" && answer.startsWith("other:"))
     return "ドングルが見つかりません。ハブとドングルの差し込みを確認してください。";
   if (answer === "busy")

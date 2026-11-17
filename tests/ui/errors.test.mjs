@@ -18,6 +18,12 @@ test("known receiver errors become one short sentence", () => {
     "ドングルを初期化できません。挿し直してください。",
   );
   assert.equal(
+    friendlyError(
+      "352537500Hz-000003.wav の WAV を確定できませんでした（ほかの通話の保存は続けます）：No such file or directory (os error 2)",
+    ),
+    "1 件の録音を最後まで保存できませんでした（ほかの通話の保存は続けます）。",
+  );
+  assert.equal(
     friendlyError("Channel worker panicked; restart reception"),
     "内部エラーで受信が止まりました。受信を開始し直してください。",
   );

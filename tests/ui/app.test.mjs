@@ -515,7 +515,7 @@ test("Android built-in driver asks for the dongle before starting", async (t) =>
   await app.click("start");
   assert.equal(asked.length, 1);
   assert.equal(app.calls.some((c) => c.command === "start"), false);
-  assert.equal($("error").textContent, "ドングルが見つかりません。挿し直して、OTG がオンか確認してください。");
+  assert.equal($("error").textContent, "ドングルが見つかりません。ドングルを挿し直してください（受信中に外れたあとは、挿し直すまでスマホが認識しません）。");
   // Only a hub is visible, or the dongle is there but cannot be opened.
   answer = "other:1";
   await app.click("start");
