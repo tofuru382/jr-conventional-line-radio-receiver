@@ -75,9 +75,13 @@ jobs:
         run: |
           log="$RUNNER_TEMP/build.log"
           [ -f "$log" ] || exit 0
-          emit() { python3 -c 'import sys; t=sys.stdin.read()[-60000:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
-          grep -nE "error(\[E[0-9]+\])?:|^error|FAILURE|What went wrong|Exception|failed|not found|cannot find" "$log" | grep -v "Compiling\|Downloaded" | head -n 80 | emit "Error lines"
-          tail -n 120 "$log" | emit "Build log tail"
+          # Annotations keep about 4 KB: strip colours, cut very long lines
+          # (tauri prints its whole environment) and keep the end.
+          emit() { python3 -c 'import re,sys; t=re.sub(r"\x1b\[[0-9;]*m","",sys.stdin.read()); t="\n".join(l[:300] for l in t.splitlines())[-3900:]; print("::error title=" + sys.argv[1] + "::" + t.replace("%","%25").replace("\r","").replace("\n","%0A"))' "$1"; }
+          # Gradle's own explanation first (Kotlin errors start with "e: ").
+          grep -nE "^e: |What went wrong" -A12 "$log" | grep -v "^--$" | head -n 60 | emit "Gradle error"
+          grep -nE "error(\[E[0-9]+\])?:|^error|FAILURE|Exception|failed|not found|cannot find" "$log" | grep -v "Compiling\|Downloaded\|failed to build APK" | head -n 40 | emit "Error lines"
+          tail -n 60 "$log" | grep -v "failed to build APK" | emit "Build log tail"
 
       # Release builds are unsigned. Sign with a stable key when the repository
       # has one (secrets below), otherwise with a throwaway key: such APKs install

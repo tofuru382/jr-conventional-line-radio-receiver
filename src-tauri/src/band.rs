@@ -66,7 +66,7 @@ mod jni_entry {
     use jni::{objects::JClass, sys::jstring, JNIEnv};
     #[no_mangle]
     pub extern "system" fn Java_io_jrradio_receiver_NativeBand_state<'local>(
-        mut env: JNIEnv<'local>,
+        env: JNIEnv<'local>,
         _class: JClass<'local>,
     ) -> jstring {
         let text = super::SOURCES
