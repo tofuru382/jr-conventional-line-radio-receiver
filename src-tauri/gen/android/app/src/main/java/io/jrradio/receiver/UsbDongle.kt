@@ -28,9 +28,25 @@ object UsbDongle {
   private val PRODUCTS = setOf(0x2832, 0x2838)
 
   private var connection: UsbDeviceConnection? = null
-  private var asking = false
   private var receiverRegistered = false
   private var watching = false
+
+  // The USB permission dialog. Android answers through [ACTION_PERMISSION],
+  // but not always: a dialog that disappears without an answer (the dongle
+  // dropped off USB while it was shown, or the phone never showed it) left
+  // the app waiting for good, asking nothing until it was restarted. So an
+  // unanswered request is repeated after ASK_AGAIN_MS, at once for another
+  // device instance, and after 3 s when the person presses start again.
+  private const val ASK_AGAIN_MS = 15000L
+  private const val ASK_AGAIN_USER_MS = 3000L
+  // After "deny", the waiting session does not pop the dialog up again at
+  // once (it would every second); pressing start asks again.
+  private const val DENIED_PAUSE_MS = 10000L
+  private var asking = false
+  private var askedAt = 0L
+  private var askedFor = -1
+  private var deniedAt = 0L
+  private var waitNoted = 0L
 
   /** Android-side notes for the app's connection log (ui/app.js merges them). */
   private val notes = ArrayDeque<String>()
@@ -80,9 +96,10 @@ object UsbDongle {
   // and after a few such bounces some phones turn the USB port off until the
   // dongle is replugged. So a dongle that just appeared is opened only once
   // it has stayed attached for a while: 2.5 s, doubled for every further
-  // detach in the last minute (at most 20 s).
+  // detach in the last minute (at most 10 s; 20 s kept it out of use too
+  // long on a plug that bounces often).
   private const val SETTLE_MS = 2500L
-  private const val SETTLE_MAX_MS = 20000L
+  private const val SETTLE_MAX_MS = 10000L
   private const val BOUNCE_WINDOW_MS = 60000L
   @Volatile private var attachedAt = 0L
   private val detaches = ArrayDeque<Long>()
@@ -220,10 +237,11 @@ object UsbDongle {
    * (permission dialog shown; handed over once granted), "none" (no USB device
    * at all), "other:N" (N USB devices, none an RTL-SDR, e.g. only a hub),
    * "settling" (it just appeared; asked again until it stayed attached) or
-   * "busy" (the dongle is there but could not be opened).
+   * "busy" (the dongle is there but could not be opened). [user]: the
+   * person pressed start (the page asks), not the waiting session.
    */
   @Synchronized
-  fun request(context: Context): String {
+  fun request(context: Context, user: Boolean = false): String {
     val usb = manager(context)
     val attached = usb.deviceList.values
     val device = attached.firstOrNull { it.vendorId == VENDOR && it.productId in PRODUCTS }
@@ -255,14 +273,29 @@ object UsbDongle {
       note("Android: ドングルを開きました（${describe(device)}）→ $result")
       return result
     }
-    note("Android: USB の使用許可を求めます（${describe(device)}）")
-    if (!asking) {
+    val now = SystemClock.elapsedRealtime()
+    if (user) deniedAt = 0L
+    val unanswered =
+      asking &&
+        (askedFor != device.deviceId || now - askedAt >= (if (user) ASK_AGAIN_USER_MS else ASK_AGAIN_MS))
+    if (!asking && deniedAt != 0L && now - deniedAt < DENIED_PAUSE_MS) return "asking"
+    if (!asking || unanswered) {
+      note(
+        if (unanswered) "Android: USB の使用許可の確認に答えがないので、もう一度確認します（${describe(device)}）"
+        else "Android: USB の使用許可を求めます（${describe(device)}）"
+      )
       asking = true
+      askedAt = now
+      askedFor = device.deviceId
       registerPermissionReceiver(context.applicationContext)
       val flags =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
       val intent = Intent(ACTION_PERMISSION).setPackage(context.packageName)
       usb.requestPermission(device, PendingIntent.getBroadcast(context, 0, intent, flags))
+    } else if (now - waitNoted >= 10000) {
+      // Asked every second while a session waits: a note every 10 s.
+      waitNoted = now
+      note("Android: USB の使用許可の答えを待っています（${(now - askedAt) / 1000} 秒）")
     }
     return "asking"
   }
@@ -314,11 +347,16 @@ object UsbDongle {
       context,
       object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-          synchronized(this@UsbDongle) { asking = false }
           val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+          synchronized(this@UsbDongle) {
+            asking = false
+            deniedAt = if (granted) 0L else SystemClock.elapsedRealtime()
+          }
           note("Android: USB の使用許可: ${if (granted) "許可" else "拒否"}")
           val device = find(context)
-          if (granted && device != null) open(context, device)
+          // Only for a session that waits: a descriptor handed over after
+          // reception stopped would be stale by the next start.
+          if (granted && device != null && sessionWantsDevice()) open(context, device)
         }
       },
       IntentFilter(ACTION_PERMISSION),

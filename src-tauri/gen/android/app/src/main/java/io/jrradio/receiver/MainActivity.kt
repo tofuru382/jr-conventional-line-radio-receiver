@@ -116,7 +116,7 @@ class MainActivity : TauriActivity() {
      * (see [UsbDongle.request]).
      */
     @JavascriptInterface
-    fun requestUsb(): String = UsbDongle.request(this@MainActivity)
+    fun requestUsb(): String = UsbDongle.request(this@MainActivity, user = true)
 
     /** The notification's band map layout (see [NativeBand.layout]). */
     @JavascriptInterface

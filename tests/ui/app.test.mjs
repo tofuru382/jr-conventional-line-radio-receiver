@@ -514,26 +514,43 @@ test("Android built-in driver asks for the dongle before starting", async (t) =>
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
   const asked = [];
-  let answer = "none";
+  let answer = "busy";
   app.w.JrAndroid = { setReceiving() {}, requestUsb: () => (asked.push(1), answer) };
+  // The dongle is there but cannot be opened (another app has it).
   await app.click("start");
   assert.equal(asked.length, 1);
   assert.equal(app.calls.some((c) => c.command === "start"), false);
-  assert.equal($("error").textContent, "ドングルが見つかりません。ドングルを挿し直してください（受信中に外れたあとは、挿し直すまでスマホが認識しません）。");
-  // Only a hub is visible, or the dongle is there but cannot be opened.
-  answer = "other:1";
-  await app.click("start");
-  assert.match($("error").textContent, /ハブとドングルの差し込み/);
-  answer = "busy";
-  await app.click("start");
   assert.match($("error").textContent, /ドングルを開けません/);
-  assert.equal(app.calls.some((c) => c.command === "start"), false);
   answer = "asking";
   await app.click("start");
   const start = app.calls.find((c) => c.command === "start");
   assert.equal(start.args.config.input.kind, "usb");
   assert.equal(start.args.config.input.radio.sample_rate, 240000);
   assert.ok(!("host" in start.args.config.input.radio));
+});
+test("Android starts without the dongle and waits for it to be plugged in", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  let attached = false;
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "none", usbAttached: () => attached };
+  await app.change("input-kind", "usb");
+  await app.click("start");
+  // Not found (or bounced off USB just then): the session starts and waits.
+  assert.equal(app.calls.some((c) => c.command === "start"), true);
+  let now = 1_000_000;
+  t.mock.method(app.w.Date, "now", () => now);
+  app.setSnapshot({ status: { ...status(), state: "starting" }, audio: [] });
+  await app.poll();
+  assert.equal($("error").textContent, "ドングルが見つかりません。30 秒以内に挿すと受信を始めます。");
+  assert.equal($("state").textContent, "準備中");
+  // Plugged in: the notice goes, and reception starts.
+  attached = true;
+  now += 1500;
+  await app.poll();
+  assert.equal($("error").hidden, true);
+  app.setSnapshot({ status: status(), audio: [] });
+  await app.poll();
+  assert.equal($("error").hidden, true);
 });
 test("a failed session's error does not come back after switching input or starting again", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -555,10 +572,10 @@ test("a failed session's error does not come back after switching input or start
   assert.equal(app.calls.filter((c) => c.command === "snapshot").length, polled);
   assert.equal($("error").hidden, true);
   // A USB start that fails shows its own reason, not the old one.
-  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "none" };
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "busy" };
   await app.click("start");
   await app.poll();
-  assert.match($("error").textContent, /ドングルが見つかりません/);
+  assert.match($("error").textContent, /ドングルを開けません/);
   assert.doesNotMatch($("error").textContent, /RTL-TCP/);
 });
 test("a lost dongle's error carries a diagnosis, kept for the version dialog with the log", async (t) => {

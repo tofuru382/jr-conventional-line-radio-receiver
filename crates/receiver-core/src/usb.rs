@@ -132,6 +132,12 @@ const STALL: Duration = Duration::from_secs(5);
 /// A dongle that just came back on USB is left alone this long before it is
 /// initialised (it dropped off during initialisation 15 ms after returning).
 const SETTLE: Duration = Duration::from_secs(1);
+fn settle(stop: &AtomicBool) {
+    let settled = Instant::now();
+    while settled.elapsed() < SETTLE && !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
 /// Opening from a descriptor needs Linux usbfs (Android is Linux).
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -272,35 +278,97 @@ pub struct Usb {
 }
 impl Usb {
     pub fn open(config: &Config, stop: &AtomicBool) -> Result<Self, String> {
+        Self::open_within(config, stop, OPEN_WAIT)
+    }
+    /// Waits up to `wait` for the Java side to hand over the dongle, and
+    /// keeps trying within that time when initialising it fails: a dongle
+    /// whose plug is losing contact can drop off in the middle, and a
+    /// descriptor can be stale (its dongle left USB since). Attempts
+    /// alternate between a plain open and one after a USB reset, as
+    /// reconnections do.
+    fn open_within(config: &Config, stop: &AtomicBool, wait: Duration) -> Result<Self, String> {
         config.validate()?;
-        // A descriptor offered before this session is stale (or is the one
-        // the Java side just opened for us); prefer a fresh one when it comes.
+        // The Java side opens the dongle just before the session starts, so
+        // an offered descriptor is taken; one that turns out stale only
+        // costs an attempt.
         WANTED.store(true, Ordering::Relaxed);
         note("ドライバー: ドングルを待っています");
         let started = Instant::now();
-        let fd = loop {
+        let auto_gain = auto_gain(config, None);
+        let mut failures = 0u32;
+        let mut last_failure: Option<String> = None;
+        loop {
             if stop.load(Ordering::Relaxed) {
                 WANTED.store(false, Ordering::Relaxed);
                 return Err("USB: 接続を中止しました".into());
             }
             if let Some(fd) = take_offered() {
-                break fd;
-            }
-            if started.elapsed() >= OPEN_WAIT {
+                // Not asked for again while this one is being initialised.
                 WANTED.store(false, Ordering::Relaxed);
-                note("ドライバー: 30 秒待ってもドングルを受け取れませんでした");
-                return Err(
-                    "USB: 30 秒待ちましたが、ドングルを使えませんでした。挿さっているか、USB の使用を許可したかを確認してください"
-                        .into(),
-                );
+                if failures > 0 {
+                    settle(stop);
+                }
+                let index = auto_gain.as_ref().map(|g| g.index);
+                match open_device(config, fd, index, failures % 2 == 1) {
+                    Ok((device, rx)) => return Ok(Self::connected(config, device, rx, auto_gain)),
+                    Err(e) => {
+                        failures += 1;
+                        note(format!(
+                            "ドライバー: {e}（{failures} 回目の失敗。ドングルをもう一度受け取って試します）"
+                        ));
+                        last_failure = Some(e);
+                        WANTED.store(true, Ordering::Relaxed);
+                    }
+                }
+                continue;
+            }
+            if started.elapsed() >= wait {
+                WANTED.store(false, Ordering::Relaxed);
+                let seconds = wait.as_secs();
+                note(format!(
+                    "ドライバー: {seconds} 秒待ってもドングルを使えませんでした"
+                ));
+                return Err(match last_failure {
+                    Some(e) => format!(
+                        "{e}（{seconds} 秒間に {failures} 回試しましたが初期化できませんでした。ドングルの差し込みとケーブルを確認してください）"
+                    ),
+                    None => format!(
+                        "USB: {seconds} 秒待ちましたが、ドングルを使えませんでした。挿さっているか、USB の使用を許可したかを確認してください"
+                    ),
+                });
             }
             std::thread::sleep(Duration::from_millis(50));
-        };
-        WANTED.store(false, Ordering::Relaxed);
-        let auto_gain = auto_gain(config, None);
-        let (device, rx) = open_device(config, fd, auto_gain.as_ref().map(|g| g.index), false)
-            .inspect_err(|e| note(format!("ドライバー: {e}")))?;
-        Ok(Self {
+        }
+    }
+    /// A session whose connection was lost (no device), for tests.
+    #[cfg(test)]
+    fn connected_for_test(config: &Config) -> Self {
+        Self {
+            config: config.clone(),
+            info: String::new(),
+            transfer_errors: 0,
+            device: None,
+            rx: None,
+            scratch: Vec::new(),
+            dropped: 0,
+            last_data: Instant::now(),
+            lost_at: None,
+            cause: String::new(),
+            failed_attempts: 0,
+            last_failure: None,
+            reconnects: 0,
+            noted_errors: (0, Instant::now()),
+            gain_changed: None,
+            auto_gain: None,
+        }
+    }
+    fn connected(
+        config: &Config,
+        device: Device,
+        rx: RxStream,
+        auto_gain: Option<AutoGain>,
+    ) -> Self {
+        Self {
             config: config.clone(),
             info: describe(&device),
             transfer_errors: 0,
@@ -317,7 +385,7 @@ impl Usb {
             noted_errors: (0, Instant::now()),
             gain_changed: None,
             auto_gain,
-        })
+        }
     }
     pub fn reconnecting(&self) -> bool {
         self.rx.is_none()
@@ -462,10 +530,10 @@ impl Usb {
             std::thread::sleep(RETRY_EVERY);
             return Ok(Read::Timeout);
         };
-        let settled = Instant::now();
-        while settled.elapsed() < SETTLE && !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        // Not asked for again while this one is being initialised (the Java
+        // side would open it again every second meanwhile).
+        WANTED.store(false, Ordering::Relaxed);
+        settle(stop);
         // A new connection keeps the gain the automatic gain stepped down to.
         let index = self.auto_gain.as_ref().map(|g| g.index);
         // Reopen it plainly first. If that fails, reset the dongle as a replug
@@ -494,6 +562,7 @@ impl Usb {
                 note(format!("ドライバー: 再接続に失敗しました: {e}"));
                 self.failed_attempts += 1;
                 self.last_failure = Some(e);
+                WANTED.store(true, Ordering::Relaxed);
             }
         }
         Ok(Read::Timeout)
@@ -502,6 +571,9 @@ impl Usb {
 impl Drop for Usb {
     fn drop(&mut self) {
         WANTED.store(false, Ordering::Relaxed);
+        // A descriptor offered meanwhile must not be taken by the next
+        // session: its dongle may have left USB by then.
+        take_offered();
         note("ドライバー: ドングルを閉じます");
         if let Some(rx) = self.rx.take() {
             let _ = rx.close().wait();
@@ -592,8 +664,15 @@ mod tests {
         .is_err());
     }
 
+    /// The offered descriptor and the wish for one are process-wide.
+    static GLOBALS: Mutex<()> = Mutex::new(());
+    fn globals() -> std::sync::MutexGuard<'static, ()> {
+        GLOBALS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn open_waits_for_a_device_and_can_be_cancelled() {
+        let _globals = globals();
         let stop = AtomicBool::new(true);
         let error = Usb::open(&config(), &stop).err().unwrap();
         assert!(error.contains("中止"), "{error}");
@@ -601,7 +680,55 @@ mod tests {
     }
 
     #[test]
+    fn open_waits_for_another_descriptor_after_a_failed_initialisation() {
+        let _globals = globals();
+        use std::os::fd::AsRawFd;
+        // Not a USB device: initialising from it fails as a stale one would.
+        let file = std::fs::File::open("/dev/null").unwrap();
+        offer_fd(file.as_raw_fd(), Identity::BlogV4);
+        let stop = AtomicBool::new(false);
+        let watcher = std::thread::scope(|scope| {
+            let waiting = scope.spawn(|| {
+                // After the failure the session asks for the dongle again.
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_secs(2) {
+                    if OFFERED.lock().unwrap().is_none() && wants_device() {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                false
+            });
+            let error = Usb::open_within(&config(), &stop, Duration::from_millis(1500))
+                .err()
+                .unwrap();
+            (waiting.join().unwrap(), error)
+        });
+        let (asked_again, error) = watcher;
+        assert!(asked_again, "the session did not ask for the dongle again");
+        assert!(
+            error.starts_with("USB: ドングルを初期化できません"),
+            "{error}"
+        );
+        assert!(error.contains("1 回試しましたが"), "{error}");
+        assert!(!wants_device());
+    }
+
+    #[test]
+    fn a_descriptor_left_over_from_a_session_is_not_kept() {
+        let _globals = globals();
+        let file = std::fs::File::open("/dev/null").unwrap();
+        use std::os::fd::AsRawFd;
+        let usb = Usb::connected_for_test(&config());
+        // The Java side answers late, after reception stopped.
+        offer_fd(file.as_raw_fd(), Identity::BlogV4);
+        drop(usb);
+        assert!(take_offered().is_none());
+    }
+
+    #[test]
     fn offered_descriptors_are_duplicated_and_taken_once() {
+        let _globals = globals();
         let file = std::fs::File::open("/dev/null").unwrap();
         use std::os::fd::AsRawFd;
         offer_fd(file.as_raw_fd(), Identity::BlogV4);

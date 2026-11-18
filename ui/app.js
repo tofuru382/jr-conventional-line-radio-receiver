@@ -2057,10 +2057,14 @@ function adoptMacDefaults() {
 // Android, built-in driver: a dongle the phone no longer sees (it cut the
 // USB power, or the plug lost contact) only returns once it is replugged.
 // The session keeps waiting; say so once it has been gone for 5 seconds.
+// A start waits 30 s for the dongle to be plugged in; that is said at once.
 const usbWaitNotice = "ドングルが USB から外れています。挿し直すと自動で受信を再開します。";
-const usbWait = { since: 0, checked: 0, absent: false, shown: false };
+const usbStartNotice = "ドングルが見つかりません。30 秒以内に挿すと受信を始めます。";
+const usbWait = { since: 0, checked: 0, absent: false, shown: "" };
 function renderUsbWait(s) {
-  const waiting = s.reconnecting && platform.android && $("input-kind").value === "usb";
+  const usb = platform.android && $("input-kind").value === "usb";
+  const starting = usb && s.running && s.state === "starting";
+  const waiting = usb && (s.reconnecting || starting);
   if (waiting && Date.now() - usbWait.checked >= 1000) {
     usbWait.checked = Date.now();
     try {
@@ -2073,24 +2077,24 @@ function renderUsbWait(s) {
     usbWait.since = 0;
     usbWait.absent = false;
     if (usbWait.shown) {
-      usbWait.shown = false;
       // Not an error that replaced the notice meanwhile.
-      if ($("error").textContent === usbWaitNotice) clearError();
+      if ($("error").textContent === usbWait.shown) clearError();
+      usbWait.shown = "";
     }
     return;
   }
   usbWait.since ||= Date.now();
-  if (!usbWait.shown && Date.now() - usbWait.since >= 5000) {
-    usbWait.shown = true;
-    fail(usbWaitNotice);
+  const notice = starting ? usbStartNotice : usbWaitNotice;
+  const due = Date.now() - usbWait.since >= (starting ? 0 : 5000);
+  if (due && usbWait.shown !== notice && (!usbWait.shown || $("error").textContent === usbWait.shown)) {
+    usbWait.shown = notice;
+    fail(notice);
   }
 }
-// What the phone saw when the built-in driver asked for the dongle.
+// What the phone saw when the built-in driver asked for the dongle. A dongle
+// that is not there yet (or bounced off USB just then) is waited for: the
+// session takes it once it is plugged in.
 function usbProblem(answer) {
-  if (answer === "none")
-    return "ドングルが見つかりません。ドングルを挿し直してください（受信中に外れたあとは、挿し直すまでスマホが認識しません）。";
-  if (typeof answer === "string" && answer.startsWith("other:"))
-    return "ドングルが見つかりません。ハブとドングルの差し込みを確認してください。";
   if (answer === "busy")
     return "ドングルを開けません。Rtl-sdr driver を閉じるか、挿し直してください。";
   return null;
