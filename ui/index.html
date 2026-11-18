@@ -34,9 +34,8 @@
           ><button id="mode-full" type="button" aria-pressed="true">詳細</button>
         </div>
       </div>
-      <div class="session">
-        <span id="state" class="badge" role="status">停止中</span
-        ><button id="start" class="primary" disabled>受信を開始</button
+      <div class="session" role="toolbar" aria-label="受信">
+        <button id="start" class="primary" disabled>受信を開始</button
         ><button id="save-toggle" type="button" aria-pressed="false" disabled>
           保存オフ
         </button>
@@ -63,6 +62,7 @@
       </div>
       <section id="quick" class="card quick" aria-label="受信の概要" hidden>
         <div class="band">
+          <p class="pane-title" aria-hidden="true">受信帯域</p>
           <div id="quick-band-map" class="band-map" role="group" aria-label="受信帯域の波（押すとその波を聴きます）"></div>
           <div class="band-scale" aria-hidden="true">
             <span id="quick-band-low"></span><span id="quick-band-high"></span>
@@ -76,24 +76,6 @@
           <p id="quick-lines" class="quick-lines"></p>
           <p id="quick-sync" class="quick-sync">待機</p>
         </div>
-        <dl class="quick-stats">
-          <div>
-            <dt>同期</dt>
-            <dd id="quick-locked">—</dd>
-          </div>
-          <div>
-            <dt>音声</dt>
-            <dd id="quick-voice">—</dd>
-          </div>
-          <div>
-            <dt>処理欠落</dt>
-            <dd id="quick-drops">—</dd>
-          </div>
-          <div>
-            <dt>録音</dt>
-            <dd id="quick-recording">—</dd>
-          </div>
-        </dl>
         <div class="quick-controls">
           <label class="check-label" for="quick-auto"
             ><input id="quick-auto" type="checkbox" checked />自動選択</label
@@ -657,6 +639,28 @@
         <span id="runtime-note" hidden></span>
       </footer>
     </main>
+    <!-- Status bar: reception state, and the compact view's counts. -->
+    <div class="statusbar">
+      <span id="state" class="badge" role="status">停止中</span>
+      <dl class="quick-stats">
+        <div>
+          <dt>同期</dt>
+          <dd id="quick-locked">—</dd>
+        </div>
+        <div>
+          <dt>音声</dt>
+          <dd id="quick-voice">—</dd>
+        </div>
+        <div>
+          <dt>処理欠落</dt>
+          <dd id="quick-drops">—</dd>
+        </div>
+        <div>
+          <dt>録音</dt>
+          <dd id="quick-recording">—</dd>
+        </div>
+      </dl>
+    </div>
     <dialog
       id="about-dialog"
       aria-labelledby="about-title"

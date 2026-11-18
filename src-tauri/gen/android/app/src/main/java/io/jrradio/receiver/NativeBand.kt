@@ -133,9 +133,9 @@ object NativeBand {
       context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
         Configuration.UI_MODE_NIGHT_YES
     return if (night) {
-      Palette(0xff72dfc1.toInt(), 0xffffbe5c.toInt(), 0xffffb7ab.toInt(), 0xff71869a.toInt(), 0xffe6edf3.toInt())
+      Palette(0xff6ccb5f.toInt(), 0xfffce100.toInt(), 0xffff99a4.toInt(), 0xff5d5d5d.toInt(), 0xff60cdff.toInt())
     } else {
-      Palette(0xff168a66.toInt(), 0xffc27800.toInt(), 0xffc9372c.toInt(), 0xff8b98a5.toInt(), 0xff1f2933.toInt())
+      Palette(0xff107c10.toInt(), 0xff9d5d00.toInt(), 0xffc42b1c.toInt(), 0xff8a8a8a.toInt(), 0xff0078d7.toInt())
     }
   }
 
@@ -152,7 +152,7 @@ object NativeBand {
     val underline = 3 * density
     val area = height - underline - density
     val cell = (width - gap * (content.slots - 1)) / content.slots
-    val radius = 2 * density
+    val radius = 0f
     for ((slot, state, heard) in content.cells) {
       val left = slot * (cell + gap)
       val right = left + cell

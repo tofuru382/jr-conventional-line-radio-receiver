@@ -443,7 +443,9 @@ test("Android layout has the route picker but no search, only the detailed list,
   assert.equal(app.w.document.title, "JR-CLRR For Android");
   assert.equal(app.w.document.querySelector(".topbar h1").textContent, "JR-CLRR For Android");
   const mute = $("mute-toggle");
-  assert.equal(mute.parentElement, $("state").parentElement);
+  // In the toolbar, between start/stop and saving.
+  assert.equal(mute.previousElementSibling, $("start"));
+  assert.equal(mute.nextElementSibling, $("save-toggle"));
   assert.equal($("listen").closest(".listening-control").hidden, true);
   $("listen").checked = true; // the harness starts muted without a change event
   await app.click("start");

@@ -1,61 +1,53 @@
-/* A professional radio's front panel: a moulded graphite body with printed
-   legends, a reflective LCD for the frequency, LEDs for state (green sync,
-   amber call, red error/recording) and hardware keys. The LCD is the one
-   bold element; everything around it stays plain. */
-@font-face {
-  font-family: "DSEG7";
-  src: url("fonts/DSEG7Classic-Bold.woff2") format("woff2");
-  font-weight: 700;
-  font-display: block;
-}
+/* A plain Windows desktop application in dark mode: system font, flat
+   greys, square controls with 1px borders, flat toolbar buttons with small
+   icons, a status bar, and one highlight blue for selection. */
 :root {
   color-scheme: dark;
-  --graphite-950: #1c1d1a;
-  --graphite-900: #242521;
-  --graphite-850: #2c2d28;
-  --graphite-800: #363731;
-  --graphite-700: #46473f;
-  --graphite-500: #888a7c;
-  --legend-300: #bdbcae;
-  --legend-100: #ecebe2;
-  --bezel: #10110e;
-  --lcd: #b4bd99;
-  --lcd-light: #c9d1ae;
-  --lcd-ink: #1b2113;
-  --olive-900: #343a2a;
-  --led-green: #74d874;
-  --led-green-off: #213021;
-  --led-amber: #ffb43a;
-  --led-red: #ff8a78;
-  --led-red-off: #3c221d;
-  --led-off: #3d3e37;
-  --bg: var(--graphite-950);
-  --surface: var(--graphite-900);
-  --inset: #151613;
-  --surface-raised: var(--graphite-850);
-  --control: var(--graphite-800);
-  --line: var(--graphite-700);
-  --control-border: var(--graphite-500);
-  --text: var(--legend-100);
-  --muted: var(--legend-300);
-  --accent: var(--lcd-light);
-  --on-accent: var(--lcd-ink);
-  --selected: var(--olive-900);
-  --success: var(--led-green);
-  --success-bg: var(--led-green-off);
-  --danger: var(--led-red);
-  --danger-bg: var(--led-red-off);
-  --focus: var(--lcd-light);
-  --plot-grid: var(--graphite-500);
-  --plot-signal: var(--lcd-light);
-  --call: var(--led-amber);
-  --radius: 4px;
-  --radius-control: 3px;
+  --gray-950: #191919;
+  --gray-925: #202020;
+  --gray-900: #2b2b2b;
+  --gray-875: #303030;
+  --gray-850: #333333;
+  --gray-750: #3c3c3c;
+  --gray-650: #555555;
+  --gray-500: #8a8a8a;
+  --gray-350: #a8a8a8;
+  --win-blue: #0078d7;
+  --win-blue-light: #60cdff;
+  --win-blue-dark: #0f3c63;
+  --win-green: #6ccb5f;
+  --win-green-bg: #393d1b;
+  --win-yellow: #fce100;
+  --win-red: #ff99a4;
+  --win-red-bg: #442726;
+  --win-red-icon: #e81123;
+  --bg: var(--gray-925);
+  --surface: var(--gray-900);
+  --inset: var(--gray-950);
+  --surface-raised: var(--gray-875);
+  --control: var(--gray-850);
+  --line: var(--gray-750);
+  --control-border: var(--gray-500);
+  --text: #ffffff;
+  --muted: var(--gray-350);
+  --accent: var(--win-blue-light);
+  --on-accent: #000000;
+  --selected: var(--win-blue-dark);
+  --success: var(--win-green);
+  --success-bg: var(--win-green-bg);
+  --danger: var(--win-red);
+  --danger-bg: var(--win-red-bg);
+  --focus: #ffffff;
+  --plot-grid: #6e6e6e;
+  --plot-signal: var(--win-blue-light);
+  --call: var(--win-yellow);
+  --radius: 0;
+  --radius-control: 0;
   --text-caption: 0.8125rem;
   --text-body: 0.875rem;
   --text-heading: 1.125rem;
-  --text-title: 1.375rem;
-  font-family: "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
+  --text-title: 1.125rem;
+  font-family: "Segoe UI", "Yu Gothic UI", "Meiryo UI", "Noto Sans JP", system-ui, sans-serif;
   font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -94,7 +86,7 @@ button:disabled {
   opacity: 0.5;
   cursor: default;
 }
-:is(button, input, select, summary, a, [tabindex]):focus-visible {
+:is(input, select, summary, a, [tabindex]:not(button)):focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 3px;
 }
@@ -722,7 +714,7 @@ tr.selected {
   padding: 0 22px 22px;
 }
 .frequency-heading > p:first-child {
-  font-family: "DSEG7", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 2rem;
   font-variant-numeric: tabular-nums;
   line-height: 1.3;
@@ -1881,7 +1873,7 @@ button.stop {
   margin: 0;
 }
 .quick-frequency {
-  font-family: "DSEG7", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 1.625rem;
   line-height: 1.15;
   font-weight: 650;
@@ -2165,316 +2157,483 @@ button.stop {
   color: var(--muted);
 }
 
-/* ===================================================================
-   Front panel. Later rules on purpose: they restyle the shared parts
-   above (keys, panels, lamps) into the radio's hardware vocabulary.
-   =================================================================== */
 
-/* Keys: a moulded key with a little travel, legends in the panel's ink. */
+/* ===================================================================
+   Windows, dark. Later rules on purpose: they restyle the shared parts
+   above as a plain desktop application (toolbar, panes, list views,
+   status bar). Square corners, 1px borders, no shadows except menus
+   and dialogs, flat colours.
+   =================================================================== */
+body {
+  font-size: 0.875rem;
+}
 button {
-  border: 1px solid var(--control-border);
-  border-block-end: 3px solid var(--bezel);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--gray-650);
+  border-radius: 0;
   background: var(--control);
-  font-weight: 600;
+  color: var(--text);
+  font-weight: 400;
+}
+button:hover:not(:disabled) {
+  background: #3d3d3d;
+  border-color: var(--gray-500);
 }
 button:active:not(:disabled) {
-  translate: 0 1px;
-  border-block-end-width: 2px;
+  background: #4a4a4a;
+}
+button:disabled {
+  opacity: 1;
+  color: #6d6d6d;
+  border-color: var(--line);
+  background: var(--surface);
 }
 button.primary {
   background: var(--control);
   color: var(--text);
-  border-color: var(--control-border);
-  border-block-end-color: var(--bezel);
+  border: 2px solid var(--win-blue);
+  font-weight: 400;
+}
+:is(input, select, summary, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+/* Buttons show the classic dotted focus rectangle inside the border. */
+button:focus-visible {
+  outline: 1px dotted var(--focus);
+  outline-offset: -5px;
+}
+input,
+select {
+  border-radius: 0;
+}
+input[type="checkbox"],
+input[type="range"] {
+  accent-color: var(--win-blue);
+}
+.card {
+  border-radius: 0;
+}
+.calling {
+  color: var(--call);
 }
 
-/* LEDs on the keys and the state window: off, or lit with a short glow. */
-#start,
-#save-toggle,
-.mute-toggle,
-#state {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
+/* Title bar: small icon, the window title, the view as toggle buttons. */
+.topbar {
+  background: var(--bg);
+  padding: 6px 12px 0;
+  gap: 4px 16px;
+  flex-wrap: wrap;
 }
-#start::before,
-#save-toggle::before,
-.mute-toggle::before,
-#state::before {
-  /* An LED. */
-  content: "";
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--led-off);
-  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.35);
+.topbar .brand-icon {
+  width: 20px;
+  flex-basis: 20px;
 }
-button.stop,
-.mute-toggle[aria-pressed="true"],
-#save-toggle[aria-pressed="true"],
-#save-toggle.saving {
-  color: var(--text);
-  background: var(--control);
-  border-color: var(--control-border);
-  border-block-end-color: var(--bezel);
+.topbar h1 {
+  font-size: 0.875rem;
+  font-weight: 400;
 }
-#start.stop::before,
-.mute-toggle:not([aria-pressed="true"])::before,
-#state.active::before {
-  background: var(--led-green);
-  box-shadow: 0 0 6px rgb(116 216 116 / 0.7);
+.simple .brand .eyebrow {
+  display: none;
 }
-#save-toggle[aria-pressed="true"]::before {
-  background: #8a4136;
-}
-#save-toggle.saving::before {
-  background: var(--led-red);
-  box-shadow: 0 0 6px rgb(255 138 120 / 0.75);
-}
-.badge {
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-control);
-  color: var(--muted);
-}
-.badge.active {
-  background: transparent;
-  color: var(--text);
-}
-
-/* The view switch: two keys side by side; the chosen one is lit. */
 .mode-switch {
   border: 0;
+  border-radius: 0;
   gap: 2px;
-  overflow: visible;
 }
 .mode-switch button,
 .mode-switch button + button {
-  border: 1px solid var(--control-border);
-  border-block-end: 3px solid var(--bezel);
-  border-radius: var(--radius-control);
+  min-height: 30px;
+  padding: 0 12px;
+  background: transparent;
+  border: 1px solid transparent;
 }
 .mode-switch button[aria-pressed="true"] {
   background: var(--selected);
-  color: var(--accent);
+  border-color: var(--win-blue);
+  color: var(--text);
+  font-weight: 400;
 }
 
-/* Panels: flat moulded sections, separated by a line, no floating cards. */
-.card {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+/* Toolbar: flat buttons with a 16px icon; a pressed toggle is outlined. */
+.session {
+  gap: 2px;
+  padding-block: 4px;
 }
-.topbar {
-  background: var(--surface);
+.android .session {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
 }
-
-/* The LCD: reflective glass in a dark bezel, 7-segment digits with the
-   unlit segments faintly visible, annunciators printed in ink. */
-.quick-now,
-.frequency-heading {
-  position: relative;
-  background: var(--lcd);
-  color: var(--lcd-ink);
-  border: 3px solid var(--bezel);
-  border-radius: var(--radius);
-  box-shadow: inset 0 2px 3px rgb(0 0 0 / 0.28);
+/* On a wide screen the toolbar keeps its buttons at their own width. */
+@media (min-width: 640px) {
+  .android .session {
+    display: flex;
+    width: auto;
+  }
+  .android .session > * {
+    width: auto;
+  }
 }
-.quick-now {
-  padding: 6px 12px 7px;
-}
-.quick-now :is(p, small, .quick-lines),
-.frequency-heading :is(p, small, .unit, #selected-label) {
-  color: var(--lcd-ink);
-}
-.quick-frequency,
-.frequency-heading > p:first-child {
-  position: relative;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  line-height: 1.2;
+.session button,
+.session button.primary,
+.session button.stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  font-weight: 400;
   white-space: nowrap;
 }
-.quick-frequency {
-  font-size: 1.75rem;
+.session button:disabled {
+  color: #6d6d6d;
 }
-.quick-frequency bdi,
-.frequency-heading > p:first-child bdi {
-  position: relative;
-  font-family: "DSEG7", ui-monospace, monospace;
+.session button:disabled::before {
+  opacity: 0.4;
 }
-.quick-frequency bdi::before,
-.frequency-heading > p:first-child bdi::before {
-  content: "888.88888";
-  position: absolute;
-  inset-inline-start: 0;
-  color: rgb(27 33 19 / 0.09);
-  pointer-events: none;
+.session button::before {
+  content: "";
+  flex: none;
+  width: 16px;
+  height: 16px;
+  background-position: center;
+  background-size: 16px 16px;
+  background-repeat: no-repeat;
 }
-.quick-frequency small,
-.frequency-heading > p:first-child .unit {
-  font-family: inherit;
-  font-size: 0.8125rem;
-  font-weight: 700;
-  letter-spacing: 0;
-  margin-inline-start: 4px;
+#start::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 2.5v11l9-5.5z' fill='%236ccb5f'/%3E%3C/svg%3E");
 }
-.quick-frequency small {
-  font-family: "Noto Sans JP", system-ui, sans-serif;
+#start.stop::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3' y='3' width='10' height='10' fill='%23e81123'/%3E%3C/svg%3E");
 }
-.quick-channel {
-  font-weight: 700;
+.mute-toggle::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.5 5.5h3l4-3.5v12l-4-3.5h-3z' fill='%23d6d6d6'/%3E%3Cpath d='M10.5 5.2a3.5 3.5 0 0 1 0 5.6M12.3 3.2a6.2 6.2 0 0 1 0 9.6' fill='none' stroke='%23d6d6d6' stroke-width='1.3'/%3E%3C/svg%3E");
 }
-.quick-lines {
-  font-size: 0.75rem;
-  line-height: 1.4;
+.mute-toggle[aria-pressed="true"]::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.5 5.5h3l4-3.5v12l-4-3.5h-3z' fill='%23d6d6d6'/%3E%3Cpath d='M10.5 5.5l4.5 5M15 5.5l-4.5 5' stroke='%23ff99a4' stroke-width='1.5'/%3E%3C/svg%3E");
 }
-/* Annunciator: "通話中" reversed out of the ink, "同期中" boxed. */
-.quick-sync {
-  padding: 1px 6px;
-  border: 1px solid transparent;
-  border-radius: 2px;
-  font-weight: 700;
-  color: rgb(27 33 19 / 0.45);
+#save-toggle::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5' fill='none' stroke='%238a8a8a' stroke-width='1.5'/%3E%3C/svg%3E");
 }
-.quick-sync::before {
-  display: none;
+#save-toggle[aria-pressed="true"]::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5' fill='%237a2a2f' stroke='%23e81123' stroke-width='1.5'/%3E%3C/svg%3E");
 }
-.quick-sync.locked {
-  color: var(--lcd-ink);
-  border-color: var(--lcd-ink);
+#save-toggle.saving::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5.5' fill='%23e81123'/%3E%3C/svg%3E");
 }
-.quick-sync.calling {
-  color: var(--lcd);
-  background: var(--lcd-ink);
-  border-color: var(--lcd-ink);
+#save-toggle[aria-pressed="true"],
+#save-toggle.saving {
+  background: var(--selected);
+  border-color: var(--win-blue);
+  color: var(--text);
+}
+.mute-toggle[aria-pressed="true"] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
 }
 
-/* LED bar graph of the band: one LED per channel at its frequency. */
+/* Status bar: state first, then the compact view's counts, in segments. */
+.statusbar {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  padding-inline: 2px;
+  background: var(--bg);
+  border-block-start: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+html:not(.compact) .statusbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+}
+.statusbar #state {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: inherit;
+}
+.statusbar #state::before {
+  display: none;
+}
+.statusbar #state.active {
+  color: var(--success);
+}
+.statusbar .quick-stats {
+  display: flex;
+  margin: 0;
+  gap: 0;
+  border: 0;
+}
+html:not(.compact) .statusbar .quick-stats {
+  display: none;
+}
+.statusbar .quick-stats div {
+  display: flex;
+  gap: 4px;
+  padding: 0 8px;
+  background: transparent;
+  border-radius: 0;
+  border-inline-start: 1px solid var(--line);
+}
+.statusbar .quick-stats :is(dt, dd) {
+  margin: 0;
+  font-size: inherit;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.statusbar .quick-stats dd {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.statusbar .quick-stats dd.active {
+  color: var(--success);
+}
+.compact .statusbar {
+  flex: none;
+}
+
+/* Panes: a white-on-grey window's panes, in dark: header strip, body. */
+.pane-title,
+.live-block h2,
+.live-heading h2 {
+  margin: 0;
+  padding: 0 8px;
+  line-height: 22px;
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.quick {
+  padding: 0;
+  gap: 0;
+}
 .band {
-  padding: 6px 8px 3px;
-  background: var(--bezel);
-  border-radius: var(--radius);
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+}
+.band .pane-title {
+  background: var(--surface-raised);
+  border-block-end: 1px solid var(--line);
+}
+.band-map,
+.overview-intro .band-map {
+  height: 30px;
+  padding: 3px 4px 5px;
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: 0;
+}
+.band .band-map {
+  margin: 8px 8px 0;
+}
+.band-scale {
+  padding: 2px 8px 0;
+  color: var(--muted);
 }
 .band-cell::before {
-  background: var(--led-off);
-  border-radius: 1px;
+  height: 10px;
+  border-radius: 0;
+  background: #4a4a4a;
+  box-shadow: none;
 }
 .band-cell[data-state="locked"]::before {
-  background: var(--led-green);
-  box-shadow: 0 0 5px rgb(116 216 116 / 0.55);
+  background: var(--win-green);
 }
 .band-cell[data-state="calling"]::before {
-  background: var(--led-amber);
-  box-shadow: 0 0 6px rgb(255 180 58 / 0.6);
+  height: 20px;
+  background: var(--win-yellow);
 }
 .band-cell[data-state="error"]::before {
-  background: var(--led-red);
+  background: var(--win-red);
 }
 .band-cell[data-state="untargeted"]::before {
   background: none;
-  box-shadow: inset 0 0 0 1px var(--led-off);
+  box-shadow: inset 0 0 0 1px #4a4a4a;
 }
 .band-cell[aria-pressed="true"]::after {
-  background: var(--lcd-light);
-  border-radius: 1px;
-}
-.overview-intro .band-map {
-  padding: 6px 8px 4px;
-  background: var(--bezel);
-  border-radius: var(--radius);
-  height: auto;
-  min-height: 34px;
+  inset: auto -1px -4px;
+  height: 3px;
+  border-radius: 0;
+  background: var(--win-blue-light);
 }
 
-/* Meters: figures in a row, divided by panel lines rather than boxes. */
-.quick-stats {
-  gap: 0;
+/* What is heard: figures in the system font, the state as coloured text. */
+.quick-now {
+  padding: 6px 8px 8px;
+}
+.quick-frequency {
+  font-size: 1.625rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.quick-frequency small {
+  font-weight: 400;
+}
+.quick-channel {
+  font-weight: 600;
+}
+.quick-lines {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.quick-sync {
+  font-size: 0.8125rem;
+}
+.quick-sync::before {
+  border-radius: 0;
+  width: 8px;
+  height: 8px;
+}
+.quick-sync.locked {
+  color: var(--success);
+}
+.quick-sync.calling {
+  color: var(--call);
+}
+/* The settings strip of a pane, as in an editor's toolbar. */
+.quick-controls {
+  padding: 4px 8px;
+  background: #262626;
   border-block: 1px solid var(--line);
 }
-.quick-stats div {
-  background: transparent;
-  border-radius: 0;
-  padding: 4px 8px;
-}
-.quick-stats div + div {
-  border-inline-start: 1px solid var(--line);
-}
-.quick-stats dd,
-.totals dd,
-.quick-detail dd {
-  font-variant-numeric: tabular-nums;
+.quick-scope {
+  padding: 8px;
+  border-block-start: 0;
 }
 #quick-constellation,
 .monitor canvas {
+  background: var(--inset);
   border: 1px solid var(--line);
-  border-radius: 2px;
+  border-radius: 0;
+}
+.quick-detail div {
+  border-block-end: 1px solid var(--surface-raised);
+}
+.quick-detail dd {
+  font-variant-numeric: tabular-nums;
 }
 
-/* Calls in progress: a list of lines with an amber call LED. */
+/* List view: calls in rows, the one heard selected. */
+.live-panel,
+.compact .live-panel {
+  padding: 0;
+  gap: 0;
+}
+.live-heading,
+.live-block > h2 {
+  background: var(--surface-raised);
+  border-block-end: 1px solid var(--line);
+}
 .live-calls {
   gap: 0;
 }
 .live-call {
-  border: 0;
-  border-block-end: 1px solid var(--line);
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-block-end-color: var(--surface-raised);
   border-radius: 0;
   background: transparent;
-  padding: 9px 4px;
   font-weight: 400;
 }
-.live-call:active:not(:disabled) {
-  translate: none;
+.live-call:hover:not(:disabled) {
+  background: #2f3a45;
+  border-color: transparent;
+  border-block-end-color: var(--surface-raised);
 }
-.live-call[aria-pressed="true"] {
+.live-call[aria-pressed="true"],
+.live-call[aria-pressed="true"]:hover:not(:disabled) {
   background: var(--selected);
+  border-color: var(--win-blue);
 }
 .live-call .lamp {
   width: 8px;
   height: 8px;
-  background: var(--led-amber);
-  box-shadow: 0 0 6px rgb(255 180 58 / 0.7);
+  border-radius: 0;
+  background: var(--call);
+  box-shadow: none;
+  animation: none;
 }
 .live-call .call-tags span {
-  border-radius: 2px;
+  border-radius: 0;
 }
 .live-call .tag-rec {
-  color: var(--led-red);
+  color: var(--win-red);
 }
 .live-call .tag-play {
-  color: var(--on-accent);
-  background: var(--accent);
-  border-color: var(--accent);
+  color: #ffffff;
+  background: var(--win-blue);
+  border-color: var(--win-blue);
+}
+.live-panel .empty,
+.live-block > p {
+  padding: 8px;
 }
 
-/* Notices (background reception) sit on the panel like a printed label. */
+/* Dialogs: a window with a shadow. */
+#about-dialog,
+#route-dialog {
+  border: 1px solid var(--gray-650);
+  border-radius: 0;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+}
+.recording-menu {
+  border-radius: 0;
+  border-color: var(--gray-650);
+  background: var(--surface-raised);
+  box-shadow: 2px 2px 6px rgb(0 0 0 / 0.5);
+}
+
+/* An info bar (caution), as Windows shows above a window's content. */
 .notice {
-  margin-block: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--led-amber);
-  border-radius: var(--radius);
-  background: var(--surface);
+  margin-block: 8px;
+  padding: 8px 12px;
   display: grid;
-  gap: 8px;
+  gap: 6px;
+  background: #433519;
+  border: 1px solid #6b5a1f;
 }
 .notice h2 {
   font-size: var(--text-body);
-  font-weight: 700;
+  font-weight: 600;
 }
 .notice p {
   font-size: var(--text-caption);
-  color: var(--muted);
 }
 .notice-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
-/* A call is amber wherever it shows: LED, band, channel list. */
-.calling {
-  color: var(--call);
+/* Headings at window size, figures plain, labels as simple framed text. */
+.card:not(.live-panel) h2 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+.section-title {
+  padding: 12px 14px;
+}
+.totals dd {
+  font-size: 1.375rem;
+  font-weight: 400;
+}
+.badge {
+  border-radius: 0;
+  background: transparent;
+  border: 1px solid var(--line);
+  padding: 2px 8px;
 }

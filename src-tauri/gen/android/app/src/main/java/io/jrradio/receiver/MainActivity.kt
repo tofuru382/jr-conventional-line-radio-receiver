@@ -22,7 +22,7 @@ import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
   // Matches --bg in ui/style.css so the inset areas blend with the page.
-  private val background = Color.parseColor("#0d141b")
+  private val background = Color.parseColor("#202020")
 
   // While receiving, Back sends the app to the background instead of closing
   // the window (which would stop reception).

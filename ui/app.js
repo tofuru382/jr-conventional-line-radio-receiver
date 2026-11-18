@@ -1994,7 +1994,7 @@ function applySimpleLayout(name) {
     $("listen").dispatchEvent(new Event("change"));
     renderMute();
   });
-  $("state").after(mute);
+  $("start").after(mute);
   $("listen").closest(".listening-control").hidden = true;
   renderMute();
   // Name.
