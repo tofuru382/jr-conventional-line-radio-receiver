@@ -43,9 +43,9 @@
   --text-body: 0.875rem;
   --text-heading: 1.125rem;
   --text-title: 1.125rem;
-  /* The monitor's fixed-pitch Gothic: MS Gothic on Windows, Noto Sans Mono
-     CJK on Linux, the monospace face (with Noto Sans CJK) on Android. */
-  font-family: "MS Gothic", "Noto Sans Mono CJK JP", "Osaka-Mono", monospace;
+  /* The monitor's lettering: a thin, square, fixed-pitch Gothic. M PLUS 1
+     Code ships with the app (ui/fonts), so every phone shows the same face. */
+  font-family: "M PLUS 1 Code Variable", "M PLUS 1 Code", "Noto Sans Mono CJK JP", monospace;
   font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -2162,7 +2162,7 @@ button.stop {
    =================================================================== */
 body {
   font-size: 0.875rem;
-  font-weight: 400;
+  font-weight: 300;
 }
 /* Bevelled keys: light top-left edge, dark bottom-right edge. */
 button,
@@ -2172,8 +2172,8 @@ button.stop {
   color: #ffffff;
   border: 0;
   border-radius: var(--radius-control);
-  font-weight: 400;
-  letter-spacing: 0.04em;
+  font-weight: 300;
+  letter-spacing: 0.08em;
   box-shadow:
     inset 2px 2px 0 var(--key-hi),
     inset 3px 3px 0 var(--key-hi2),
@@ -2221,7 +2221,8 @@ select {
   border: 1px solid var(--control-border);
   border-radius: 0;
 }
-/* Check boxes as the monitor's square lamps: lit pale green when on. */
+/* Check boxes: an empty black square, and when on a raised key in the
+   keys' blue with a white tick. */
 input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
@@ -2231,15 +2232,68 @@ input[type="checkbox"] {
   border: 2px solid var(--control-border);
   background: var(--display);
   border-radius: 0;
-  display: inline-grid;
-  place-content: center;
 }
 input[type="checkbox"]:checked {
-  background: var(--title-green);
-  box-shadow: inset 0 0 0 3px var(--display);
+  border-color: var(--key-hi);
+  background: var(--key)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.2 8.4l3.1 3.1 6.5-6.6' fill='none' stroke='%23fff' stroke-width='2'/%3E%3C/svg%3E")
+    center / 16px no-repeat;
+  box-shadow: inset -2px -2px 0 var(--key-lo);
 }
+input[type="checkbox"]:disabled {
+  border-color: #6a7676;
+  background-color: #3e4c4c;
+}
+/* The volume: a black groove filled in the keys' blue up to the value
+   (--fill, kept by ui/app.js), with a bevelled blue key as the handle. */
 input[type="range"] {
-  accent-color: var(--title-green);
+  appearance: none;
+  -webkit-appearance: none;
+  min-height: 32px;
+  background: transparent;
+  border: 0;
+  --fill: 70%;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 12px;
+  border: 1px solid var(--control-border);
+  background: linear-gradient(to right, var(--key) var(--fill), var(--display) var(--fill));
+}
+input[type="range"]::-moz-range-track {
+  height: 10px;
+  border: 1px solid var(--control-border);
+  background: var(--display);
+}
+input[type="range"]::-moz-range-progress {
+  height: 10px;
+  background: var(--key);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 28px;
+  margin-top: -9px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--key);
+  box-shadow:
+    inset 2px 2px 0 var(--key-hi),
+    inset -2px -2px 0 var(--key-lo),
+    1px 1px 0 #2f3a3a;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 28px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--key);
+  box-shadow:
+    inset 2px 2px 0 var(--key-hi),
+    inset -2px -2px 0 var(--key-lo);
+}
+input[type="range"]:disabled::-webkit-slider-thumb {
+  background: #3e4c4c;
 }
 .card {
   background: var(--display);
@@ -2318,7 +2372,10 @@ input[type="range"] {
 }
 .session button {
   min-height: 48px;
+  padding-inline: 4px;
   font-size: 0.9375rem;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 .compact .topbar,
 .topbar {
@@ -2649,4 +2706,50 @@ html:not(.compact) .statusbar .quick-stats {
   color: var(--title-green);
   font-weight: 300;
   letter-spacing: 0.1em;
+}
+
+/* Nothing is bold on the monitor: emphasis is a regular weight against the
+   light body text. */
+h1,
+h2,
+h3,
+h4,
+strong,
+b,
+th,
+dt,
+legend {
+  font-weight: 400;
+}
+/* A dialog is a screen of its own: its name in the screen-title green. */
+dialog h2 {
+  color: var(--title-green);
+  font-weight: 300;
+  letter-spacing: 0.08em;
+}
+.eyebrow,
+.totals dd,
+.source-heading,
+th,
+.stats dd,
+.about-product,
+.operation-times dd,
+.operation-table tbody th,
+.live-call .call-name bdi,
+.live-call .call-tags,
+.quick-stats dd,
+.route-option strong,
+.route-selection-count,
+#route-frequencies bdi {
+  font-weight: 400;
+}
+.frequency-unit,
+.about-log {
+  font-family: inherit;
+}
+.quick-frequency {
+  font-weight: 200;
+}
+.mode-switch button[aria-pressed="true"] {
+  font-weight: 400;
 }

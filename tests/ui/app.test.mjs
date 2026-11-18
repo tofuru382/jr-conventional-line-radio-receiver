@@ -711,11 +711,20 @@ test("Android shows when the phone killed the last run", async (t) => {
 test("the title bar shows the time and the screen's name", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
-  assert.match($("clock").textContent, /^\d{2}時\d{2}分\d{2}秒$/);
+  assert.match($("clock").textContent, /^[０-９]{2}時[０-９]{2}分[０-９]{2}秒$/);
   assert.match($("clock").dateTime, /^\d{2}:\d{2}:\d{2}$/);
   assert.equal($("screen-title").textContent, "受信状況");
   $("mode-full").click();
   assert.equal($("screen-title").textContent, "詳細表示");
+});
+test("volume sliders fill their groove up to the value", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $, w } = app;
+  assert.equal($("quick-volume").style.getPropertyValue("--fill"), "70%");
+  $("quick-volume").value = "40";
+  $("quick-volume").dispatchEvent(new w.Event("input", { bubbles: true }));
+  assert.equal($("quick-volume").style.getPropertyValue("--fill"), "40%");
+  assert.equal($("volume").style.getPropertyValue("--fill"), "40%");
 });
 test("the version dialog names the build", async (t) => {
   const app = await setup(t, {
@@ -2550,4 +2559,5 @@ test("the version dialog credits the dongle drivers", async (t) => {
   assert.match($("about-driver").textContent, /rtlsdr-nusb（bastibl、Apache-2\.0）/);
   assert.match($("about-driver").textContent, /librtlsdr/);
   assert.match($("about-driver").textContent, /Rtl-sdr driver/);
+  assert.match($("about-font").textContent, /M PLUS 1 Code（M\+ FONTS Project、SIL OFL 1\.1）/);
 });

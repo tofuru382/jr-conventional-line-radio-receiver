@@ -995,6 +995,7 @@ function renderQuick() {
   $("quick-level").checked = $("auto-level").checked;
   if ($("quick-volume").value !== $("volume").value) $("quick-volume").value = $("volume").value;
   $("quick-routes").disabled = $("route-open").disabled;
+  paintRanges();
 }
 // Band map (as upstream v1.8): every channel of the preset at its frequency,
 // sync green, call amber and taller, error red, not received outlined; the
@@ -2094,16 +2095,38 @@ function usbProblem(answer) {
     return "ドングルを開けません。Rtl-sdr driver を閉じるか、挿し直してください。";
   return null;
 }
-// The time in the title bar, as "18時57分06秒" (as on a train's monitor).
+// The time in the title bar in full-width digits, "１８時５７分０６秒", as a
+// train's monitor shows it.
+const fullWidth = (text) => text.replace(/[0-9]/g, (d) => String.fromCharCode(d.charCodeAt(0) + 0xfee0));
 function tickClock() {
   const now = new Date();
   const two = (n) => String(n).padStart(2, "0");
-  const text = `${two(now.getHours())}時${two(now.getMinutes())}分${two(now.getSeconds())}秒`;
+  const text = fullWidth(`${two(now.getHours())}時${two(now.getMinutes())}分${two(now.getSeconds())}秒`);
   if ($("clock").textContent !== text) $("clock").textContent = text;
   $("clock").dateTime = `${two(now.getHours())}:${two(now.getMinutes())}:${two(now.getSeconds())}`;
 }
 tickClock();
 setInterval(tickClock, 1000);
+// Sliders fill their groove up to the value in the keys' blue (style.css
+// reads --fill). Values set from code fire no event, so the quick panel's
+// refresh repaints them too.
+function paintRange(input) {
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 100);
+  const share = max > min ? (Number(input.value) - min) / (max - min) : 0;
+  input.style.setProperty("--fill", `${Math.round(share * 1000) / 10}%`);
+}
+function paintRanges() {
+  document.querySelectorAll('input[type="range"]').forEach(paintRange);
+}
+document.addEventListener(
+  "input",
+  (event) => {
+    if (event.target.matches?.('input[type="range"]')) paintRange(event.target);
+  },
+  true,
+);
+paintRanges();
 const usbDefaultKey = "jr-clrr.usb-default";
 function adoptAndroidDefaults() {
   let changed = false;
