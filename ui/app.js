@@ -922,6 +922,9 @@ function setViewMode(compact, remember = true) {
   }
   $("mode-compact").setAttribute("aria-pressed", String(compact));
   $("mode-full").setAttribute("aria-pressed", String(!compact));
+  // The screen's name under the title, as a train's monitor shows it.
+  $("screen-title").textContent = compact ? "受信状況" : "詳細表示";
+  $("screen-title").hidden = false;
   if (remember)
     try {
       localStorage.setItem(viewKey, compact ? "compact" : "full");
@@ -2091,6 +2094,16 @@ function usbProblem(answer) {
     return "ドングルを開けません。Rtl-sdr driver を閉じるか、挿し直してください。";
   return null;
 }
+// The time in the title bar, as "18時57分06秒" (as on a train's monitor).
+function tickClock() {
+  const now = new Date();
+  const two = (n) => String(n).padStart(2, "0");
+  const text = `${two(now.getHours())}時${two(now.getMinutes())}分${two(now.getSeconds())}秒`;
+  if ($("clock").textContent !== text) $("clock").textContent = text;
+  $("clock").dateTime = `${two(now.getHours())}:${two(now.getMinutes())}:${two(now.getSeconds())}`;
+}
+tickClock();
+setInterval(tickClock, 1000);
 const usbDefaultKey = "jr-clrr.usb-default";
 function adoptAndroidDefaults() {
   let changed = false;

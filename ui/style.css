@@ -1,53 +1,51 @@
-/* A plain Windows desktop application in dark mode: system font, flat
-   greys, square controls with 1px borders, flat toolbar buttons with small
-   icons, a status bar, and one highlight blue for selection. */
+/* An E233 train's TIMS monitor: a grey-green screen, black display areas
+   with white light Gothic, titles in pale green, and steel-blue bevelled
+   buttons that press in. Bright signal colours only for state. */
 :root {
   color-scheme: dark;
-  --gray-950: #191919;
-  --gray-925: #202020;
-  --gray-900: #2b2b2b;
-  --gray-875: #303030;
-  --gray-850: #333333;
-  --gray-750: #3c3c3c;
-  --gray-650: #555555;
-  --gray-500: #8a8a8a;
-  --gray-350: #a8a8a8;
-  --win-blue: #0078d7;
-  --win-blue-light: #60cdff;
-  --win-blue-dark: #0f3c63;
-  --win-green: #6ccb5f;
-  --win-green-bg: #393d1b;
-  --win-yellow: #fce100;
-  --win-red: #ff99a4;
-  --win-red-bg: #442726;
-  --win-red-icon: #e81123;
-  --bg: var(--gray-925);
-  --surface: var(--gray-900);
-  --inset: var(--gray-950);
-  --surface-raised: var(--gray-875);
-  --control: var(--gray-850);
-  --line: var(--gray-750);
-  --control-border: var(--gray-500);
+  --screen: #475555;
+  --display: #000000;
+  --display-line: #7a8384;
+  --display-raised: #1a2222;
+  --key: #365e79;
+  --key-hi: #e4e7e9;
+  --key-hi2: #8fa3b5;
+  --key-lo: #183837;
+  --key-lo2: #2c4a5a;
+  --key-pressed: #1f4a66;
+  --title-green: #a9fcc3;
+  --signal-green: #7dff9a;
+  --signal-yellow: #ffe100;
+  --signal-red: #ffcccc;
+  --bg: var(--screen);
+  --surface: var(--display);
+  --inset: var(--display);
+  --surface-raised: var(--display-raised);
+  --control: var(--key);
+  --line: var(--display-line);
+  --control-border: #b2b6b7;
   --text: #ffffff;
-  --muted: var(--gray-350);
-  --accent: var(--win-blue-light);
+  --muted: #d0d6d6;
+  --accent: var(--title-green);
   --on-accent: #000000;
-  --selected: var(--win-blue-dark);
-  --success: var(--win-green);
-  --success-bg: var(--win-green-bg);
-  --danger: var(--win-red);
-  --danger-bg: var(--win-red-bg);
-  --focus: #ffffff;
-  --plot-grid: #6e6e6e;
-  --plot-signal: var(--win-blue-light);
-  --call: var(--win-yellow);
+  --selected: var(--key-pressed);
+  --success: var(--signal-green);
+  --success-bg: #0c3a1a;
+  --danger: var(--signal-red);
+  --danger-bg: #4a1414;
+  --focus: var(--signal-yellow);
+  --plot-grid: var(--display-line);
+  --plot-signal: var(--title-green);
+  --call: var(--signal-yellow);
   --radius: 0;
-  --radius-control: 0;
+  --radius-control: 3px;
   --text-caption: 0.8125rem;
   --text-body: 0.875rem;
   --text-heading: 1.125rem;
   --text-title: 1.125rem;
-  font-family: "Segoe UI", "Yu Gothic UI", "Meiryo UI", "Noto Sans JP", system-ui, sans-serif;
+  /* The monitor's fixed-pitch Gothic: MS Gothic on Windows, Noto Sans Mono
+     CJK on Linux, the monospace face (with Noto Sans CJK) on Android. */
+  font-family: "MS Gothic", "Noto Sans Mono CJK JP", "Osaka-Mono", monospace;
   font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -2159,192 +2157,190 @@ button.stop {
 
 
 /* ===================================================================
-   Windows, dark. Later rules on purpose: they restyle the shared parts
-   above as a plain desktop application (toolbar, panes, list views,
-   status bar). Square corners, 1px borders, no shadows except menus
-   and dialogs, flat colours.
+   TIMS monitor. Later rules on purpose: they restyle the shared parts
+   above (buttons, panes, lists, status bar) in the monitor's vocabulary.
    =================================================================== */
 body {
   font-size: 0.875rem;
-}
-button {
-  border: 1px solid var(--gray-650);
-  border-radius: 0;
-  background: var(--control);
-  color: var(--text);
   font-weight: 400;
 }
-button:hover:not(:disabled) {
-  background: #3d3d3d;
-  border-color: var(--gray-500);
+/* Bevelled keys: light top-left edge, dark bottom-right edge. */
+button,
+button.primary,
+button.stop {
+  background: var(--key);
+  color: #ffffff;
+  border: 0;
+  border-radius: var(--radius-control);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  box-shadow:
+    inset 2px 2px 0 var(--key-hi),
+    inset 3px 3px 0 var(--key-hi2),
+    inset -2px -2px 0 var(--key-lo),
+    inset -3px -3px 0 var(--key-lo2),
+    1px 1px 0 #2f3a3a;
 }
-button:active:not(:disabled) {
-  background: #4a4a4a;
+/* Hover only where there is a pointer: on a phone it would stick after a tap. */
+@media (hover: hover) {
+  button:hover:not(:disabled):not([aria-pressed="true"]) {
+    background: #3d6886;
+  }
+}
+button:active:not(:disabled),
+button[aria-pressed="true"],
+#save-toggle.saving {
+  background: var(--key-pressed);
+  color: var(--title-green);
+  box-shadow:
+    inset 2px 2px 0 var(--key-lo),
+    inset 3px 3px 0 var(--key-lo2),
+    inset -2px -2px 0 var(--key-hi2),
+    1px 1px 0 #2f3a3a;
 }
 button:disabled {
   opacity: 1;
-  color: #6d6d6d;
-  border-color: var(--line);
-  background: var(--surface);
+  background: #3e4c4c;
+  color: #8c9696;
+  box-shadow:
+    inset 2px 2px 0 #6a7676,
+    inset -2px -2px 0 #2a3434;
 }
-button.primary {
-  background: var(--control);
-  color: var(--text);
-  border: 2px solid var(--win-blue);
-  font-weight: 400;
-}
-:is(input, select, summary, a, [tabindex]):focus-visible {
+:is(input, select, summary, a, [tabindex]:not(button)):focus-visible {
   outline: 2px solid var(--focus);
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
-/* Buttons show the classic dotted focus rectangle inside the border. */
 button:focus-visible {
-  outline: 1px dotted var(--focus);
-  outline-offset: -5px;
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 input,
 select {
+  background: var(--display);
+  color: #ffffff;
+  border: 1px solid var(--control-border);
   border-radius: 0;
 }
-input[type="checkbox"],
+/* Check boxes as the monitor's square lamps: lit pale green when on. */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  border: 2px solid var(--control-border);
+  background: var(--display);
+  border-radius: 0;
+  display: inline-grid;
+  place-content: center;
+}
+input[type="checkbox"]:checked {
+  background: var(--title-green);
+  box-shadow: inset 0 0 0 3px var(--display);
+}
 input[type="range"] {
-  accent-color: var(--win-blue);
+  accent-color: var(--title-green);
 }
 .card {
+  background: var(--display);
+  border: 1px solid var(--line);
   border-radius: 0;
 }
 .calling {
   color: var(--call);
 }
+.badge {
+  border-radius: 0;
+  background: var(--screen);
+  color: #ffffff;
+  border: 0;
+  padding: 2px 8px;
+}
 
-/* Title bar: small icon, the window title, the view as toggle buttons. */
+/* Title bar: a black display block with the time and the screen's name
+   in green, the view keys at its right. */
 .topbar {
-  background: var(--bg);
-  padding: 6px 12px 0;
-  gap: 4px 16px;
+  background: var(--display);
+  border-block-end: 2px solid var(--line);
+  padding: 6px 12px 8px;
+  gap: 8px;
   flex-wrap: wrap;
 }
-.topbar .brand-icon {
-  width: 20px;
-  flex-basis: 20px;
-}
-.topbar h1 {
-  font-size: 0.875rem;
-  font-weight: 400;
-}
+.topbar .brand-icon,
 .simple .brand .eyebrow {
   display: none;
 }
+.clock {
+  display: flex;
+  gap: 1em;
+  color: #ffffff;
+  font-weight: 300;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+}
+.clock span {
+  color: var(--muted);
+}
+.topbar h1 {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 300;
+  letter-spacing: 0.04em;
+}
+.screen-title {
+  color: var(--title-green);
+  font-size: 1.125rem;
+  font-weight: 300;
+  letter-spacing: 0.12em;
+  line-height: 1.3;
+}
 .mode-switch {
   border: 0;
-  border-radius: 0;
-  gap: 2px;
+  gap: 6px;
+  overflow: visible;
+  align-self: flex-start;
 }
 .mode-switch button,
 .mode-switch button + button {
-  min-height: 30px;
+  min-height: 40px;
   padding: 0 12px;
-  background: transparent;
-  border: 1px solid transparent;
+  border: 0;
+  border-radius: var(--radius-control);
 }
-.mode-switch button[aria-pressed="true"] {
-  background: var(--selected);
-  border-color: var(--win-blue);
-  color: var(--text);
-  font-weight: 400;
-}
-
-/* Toolbar: flat buttons with a 16px icon; a pressed toggle is outlined. */
+/* The session keys sit on the screen below the display block. */
 .session {
-  gap: 2px;
-  padding-block: 4px;
+  gap: 6px;
+  padding-block: 8px 0;
 }
 .android .session {
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 2px;
-}
-/* On a wide screen the toolbar keeps its buttons at their own width. */
-@media (min-width: 640px) {
-  .android .session {
-    display: flex;
-    width: auto;
-  }
-  .android .session > * {
-    width: auto;
-  }
-}
-.session button,
-.session button.primary,
-.session button.stop {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   gap: 6px;
-  min-height: 36px;
-  padding: 0 8px;
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text);
-  font-weight: 400;
-  white-space: nowrap;
 }
-.session button:disabled {
-  color: #6d6d6d;
+.session button {
+  min-height: 48px;
+  font-size: 0.9375rem;
 }
-.session button:disabled::before {
-  opacity: 0.4;
+.compact .topbar,
+.topbar {
+  padding-block-end: 0;
 }
-.session button::before {
-  content: "";
-  flex: none;
-  width: 16px;
-  height: 16px;
-  background-position: center;
-  background-size: 16px 16px;
-  background-repeat: no-repeat;
-}
-#start::before {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 2.5v11l9-5.5z' fill='%236ccb5f'/%3E%3C/svg%3E");
-}
-#start.stop::before {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='3' y='3' width='10' height='10' fill='%23e81123'/%3E%3C/svg%3E");
-}
-.mute-toggle::before {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.5 5.5h3l4-3.5v12l-4-3.5h-3z' fill='%23d6d6d6'/%3E%3Cpath d='M10.5 5.2a3.5 3.5 0 0 1 0 5.6M12.3 3.2a6.2 6.2 0 0 1 0 9.6' fill='none' stroke='%23d6d6d6' stroke-width='1.3'/%3E%3C/svg%3E");
-}
-.mute-toggle[aria-pressed="true"]::before {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.5 5.5h3l4-3.5v12l-4-3.5h-3z' fill='%23d6d6d6'/%3E%3Cpath d='M10.5 5.5l4.5 5M15 5.5l-4.5 5' stroke='%23ff99a4' stroke-width='1.5'/%3E%3C/svg%3E");
-}
-#save-toggle::before {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5' fill='none' stroke='%238a8a8a' stroke-width='1.5'/%3E%3C/svg%3E");
-}
-#save-toggle[aria-pressed="true"]::before {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5' fill='%237a2a2f' stroke='%23e81123' stroke-width='1.5'/%3E%3C/svg%3E");
-}
-#save-toggle.saving::before {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5.5' fill='%23e81123'/%3E%3C/svg%3E");
-}
-#save-toggle[aria-pressed="true"],
-#save-toggle.saving {
-  background: var(--selected);
-  border-color: var(--win-blue);
-  color: var(--text);
-}
-.mute-toggle[aria-pressed="true"] {
-  background: transparent;
-  border-color: transparent;
-  color: var(--text);
+.topbar .session {
+  width: calc(100% + 24px);
+  margin-inline: -12px;
+  padding: 8px 12px;
+  background: var(--screen);
 }
 
-/* Status bar: state first, then the compact view's counts, in segments. */
+/* Status bar: the monitor's message lines, grey bars on black. */
 .statusbar {
   display: flex;
-  align-items: center;
-  min-height: 26px;
-  padding-inline: 2px;
-  background: var(--bg);
-  border-block-start: 1px solid var(--line);
-  color: var(--muted);
+  align-items: stretch;
+  gap: 4px;
+  min-height: 30px;
+  padding: 4px;
+  background: var(--display);
+  border-block-start: 2px solid var(--line);
+  color: #ffffff;
   font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
@@ -2354,25 +2350,31 @@ html:not(.compact) .statusbar {
   bottom: 0;
   z-index: 5;
 }
+.compact .statusbar {
+  flex: none;
+}
 .statusbar #state {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 0 1 auto;
   padding: 0 8px;
   border: 0;
-  background: transparent;
-  color: var(--text);
+  border-radius: 0;
+  background: var(--screen);
+  color: #ffffff;
   font-size: inherit;
+  display: flex;
+  align-items: center;
 }
 .statusbar #state::before {
   display: none;
 }
 .statusbar #state.active {
-  color: var(--success);
+  color: var(--signal-green);
 }
 .statusbar .quick-stats {
   display: flex;
+  flex: 1 1 auto;
+  gap: 4px;
   margin: 0;
-  gap: 0;
   border: 0;
 }
 html:not(.compact) .statusbar .quick-stats {
@@ -2380,11 +2382,13 @@ html:not(.compact) .statusbar .quick-stats {
 }
 .statusbar .quick-stats div {
   display: flex;
+  align-items: center;
   gap: 4px;
-  padding: 0 8px;
-  background: transparent;
+  flex: 1 1 auto;
+  padding: 0 6px;
+  background: var(--screen);
+  border: 0;
   border-radius: 0;
-  border-inline-start: 1px solid var(--line);
 }
 .statusbar .quick-stats :is(dt, dd) {
   margin: 0;
@@ -2392,27 +2396,42 @@ html:not(.compact) .statusbar .quick-stats {
   font-weight: 400;
   line-height: 1.5;
 }
+.statusbar .quick-stats dt {
+  color: var(--muted);
+}
 .statusbar .quick-stats dd {
-  color: var(--text);
+  color: #ffffff;
   font-variant-numeric: tabular-nums;
 }
 .statusbar .quick-stats dd.active {
-  color: var(--success);
-}
-.compact .statusbar {
-  flex: none;
+  color: var(--signal-green);
 }
 
-/* Panes: a white-on-grey window's panes, in dark: header strip, body. */
+/* Display panes: black, a thin grey frame, titles in green. */
+.pane-title,
+.live-block h2,
+.live-heading h2,
+.card:not(.live-panel) h2 {
+  color: var(--title-green);
+  font-weight: 300;
+  letter-spacing: 0.1em;
+}
 .pane-title,
 .live-block h2,
 .live-heading h2 {
   margin: 0;
   padding: 0 8px;
-  line-height: 22px;
-  font-size: 0.75rem;
-  font-weight: 400;
-  color: var(--muted);
+  line-height: 24px;
+  font-size: 0.8125rem;
+}
+.card:not(.live-panel) h2 {
+  font-size: 1rem;
+}
+.card .source-heading,
+.card .panel-summary h2 {
+  color: var(--title-green);
+  font-weight: 300;
+  letter-spacing: 0.1em;
 }
 .quick {
   padding: 0;
@@ -2423,90 +2442,90 @@ html:not(.compact) .statusbar .quick-stats {
   background: transparent;
   border-radius: 0;
 }
-.band .pane-title {
-  background: var(--surface-raised);
-  border-block-end: 1px solid var(--line);
+.band .band-map {
+  margin: 0 8px;
 }
 .band-map,
 .overview-intro .band-map {
   height: 30px;
   padding: 3px 4px 5px;
-  background: var(--inset);
+  background: var(--display);
   border: 1px solid var(--line);
   border-radius: 0;
-}
-.band .band-map {
-  margin: 8px 8px 0;
 }
 .band-scale {
   padding: 2px 8px 0;
   color: var(--muted);
 }
+.band-cell,
+.band-cell:hover:not(:disabled),
+.band-cell:active:not(:disabled),
+.band-cell[aria-pressed="true"] {
+  background: none;
+  box-shadow: none;
+}
 .band-cell::before {
   height: 10px;
   border-radius: 0;
-  background: #4a4a4a;
+  background: var(--screen);
   box-shadow: none;
 }
 .band-cell[data-state="locked"]::before {
-  background: var(--win-green);
+  background: #4ce36a;
 }
 .band-cell[data-state="calling"]::before {
   height: 20px;
-  background: var(--win-yellow);
+  background: var(--signal-yellow);
 }
 .band-cell[data-state="error"]::before {
-  background: var(--win-red);
+  background: #ff4b4b;
 }
 .band-cell[data-state="untargeted"]::before {
   background: none;
-  box-shadow: inset 0 0 0 1px #4a4a4a;
+  box-shadow: inset 0 0 0 1px var(--screen);
 }
 .band-cell[aria-pressed="true"]::after {
   inset: auto -1px -4px;
   height: 3px;
   border-radius: 0;
-  background: var(--win-blue-light);
+  background: #ffffff;
 }
-
-/* What is heard: figures in the system font, the state as coloured text. */
 .quick-now {
   padding: 6px 8px 8px;
 }
 .quick-frequency {
-  font-size: 1.625rem;
-  font-weight: 600;
-  letter-spacing: 0;
+  font-size: 1.75rem;
+  font-weight: 300;
+  letter-spacing: 0.06em;
   white-space: nowrap;
 }
 .quick-frequency small {
-  font-weight: 400;
+  font-weight: 300;
 }
 .quick-channel {
-  font-weight: 600;
+  font-weight: 400;
+  letter-spacing: 0.04em;
 }
 .quick-lines {
   color: var(--muted);
   font-size: 0.75rem;
 }
 .quick-sync {
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
+  letter-spacing: 0.08em;
 }
 .quick-sync::before {
-  border-radius: 0;
-  width: 8px;
-  height: 8px;
+  display: none;
 }
 .quick-sync.locked {
-  color: var(--success);
+  color: var(--signal-green);
 }
 .quick-sync.calling {
   color: var(--call);
 }
-/* The settings strip of a pane, as in an editor's toolbar. */
 .quick-controls {
-  padding: 4px 8px;
-  background: #262626;
+  padding: 6px 8px;
+  background: var(--screen);
   border-block: 1px solid var(--line);
 }
 .quick-scope {
@@ -2515,100 +2534,100 @@ html:not(.compact) .statusbar .quick-stats {
 }
 #quick-constellation,
 .monitor canvas {
-  background: var(--inset);
+  background: var(--display);
   border: 1px solid var(--line);
   border-radius: 0;
 }
 .quick-detail div {
-  border-block-end: 1px solid var(--surface-raised);
+  border-block-end: 1px solid #263030;
 }
-.quick-detail dd {
+.quick-detail dd,
+.totals dd {
   font-variant-numeric: tabular-nums;
 }
+.totals dd {
+  font-size: 1.375rem;
+  font-weight: 300;
+}
+.section-title {
+  padding: 12px 14px;
+}
 
-/* List view: calls in rows, the one heard selected. */
+/* Calls: one bevelled key per call; the one heard is pressed in. */
 .live-panel,
 .compact .live-panel {
-  padding: 0;
+  padding: 0 0 6px;
   gap: 0;
-}
-.live-heading,
-.live-block > h2 {
-  background: var(--surface-raised);
-  border-block-end: 1px solid var(--line);
 }
 .live-calls {
-  gap: 0;
+  gap: 6px;
+  padding: 0 6px;
 }
 .live-call {
-  min-height: 36px;
-  padding: 6px 8px;
-  border: 1px solid transparent;
-  border-block-end-color: var(--surface-raised);
-  border-radius: 0;
-  background: transparent;
-  font-weight: 400;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--key);
+  color: #ffffff;
 }
-.live-call:hover:not(:disabled) {
-  background: #2f3a45;
-  border-color: transparent;
-  border-block-end-color: var(--surface-raised);
-}
-.live-call[aria-pressed="true"],
-.live-call[aria-pressed="true"]:hover:not(:disabled) {
-  background: var(--selected);
-  border-color: var(--win-blue);
+.live-call[aria-pressed="true"] {
+  background: var(--key-pressed);
+  color: var(--title-green);
 }
 .live-call .lamp {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 0;
   background: var(--call);
   box-shadow: none;
   animation: none;
 }
+.live-call .call-name bdi {
+  font-weight: 400;
+}
 .live-call .call-tags span {
   border-radius: 0;
+  border-color: currentColor;
 }
 .live-call .tag-rec {
-  color: var(--win-red);
+  color: #ff8080;
 }
 .live-call .tag-play {
-  color: #ffffff;
-  background: var(--win-blue);
-  border-color: var(--win-blue);
+  color: #000000;
+  background: var(--title-green);
+  border-color: var(--title-green);
 }
 .live-panel .empty,
 .live-block > p {
   padding: 8px;
 }
 
-/* Dialogs: a window with a shadow. */
+/* Dialogs: the screen colour inside a light frame. */
 #about-dialog,
 #route-dialog {
-  border: 1px solid var(--gray-650);
+  background: var(--screen);
+  border: 2px solid var(--control-border);
   border-radius: 0;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
 }
 .recording-menu {
   border-radius: 0;
-  border-color: var(--gray-650);
-  background: var(--surface-raised);
-  box-shadow: 2px 2px 6px rgb(0 0 0 / 0.5);
+  border-color: var(--control-border);
+  background: var(--screen);
+  box-shadow: 2px 2px 0 #000000;
 }
-
-/* An info bar (caution), as Windows shows above a window's content. */
 .notice {
   margin-block: 8px;
   padding: 8px 12px;
   display: grid;
   gap: 6px;
-  background: #433519;
-  border: 1px solid #6b5a1f;
+  background: var(--display);
+  border: 2px solid var(--signal-yellow);
 }
 .notice h2 {
+  color: var(--signal-yellow);
   font-size: var(--text-body);
-  font-weight: 600;
+  font-weight: 400;
 }
 .notice p {
   font-size: var(--text-caption);
@@ -2619,21 +2638,15 @@ html:not(.compact) .statusbar .quick-stats {
   gap: 6px;
 }
 
-/* Headings at window size, figures plain, labels as simple framed text. */
-.card:not(.live-panel) h2 {
-  font-size: 1rem;
-  font-weight: 600;
-}
-.section-title {
-  padding: 12px 14px;
-}
-.totals dd {
-  font-size: 1.375rem;
-  font-weight: 400;
-}
-.badge {
-  border-radius: 0;
-  background: transparent;
+/* The full view's band summary is a display pane like the others. */
+.overview {
+  margin-block: 12px;
+  padding: 12px 16px 16px;
+  background: var(--display);
   border: 1px solid var(--line);
-  padding: 2px 8px;
+}
+.overview .eyebrow {
+  color: var(--title-green);
+  font-weight: 300;
+  letter-spacing: 0.1em;
 }

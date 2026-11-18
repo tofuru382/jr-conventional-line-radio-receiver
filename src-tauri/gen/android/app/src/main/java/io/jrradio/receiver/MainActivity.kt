@@ -21,8 +21,9 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
-  // Matches --bg in ui/style.css so the inset areas blend with the page.
-  private val background = Color.parseColor("#202020")
+  // Black like the TIMS header and status bar in ui/style.css, so the system
+  // bar insets blend with them.
+  private val background = Color.parseColor("#000000")
 
   // While receiving, Back sends the app to the background instead of closing
   // the window (which would stop reception).

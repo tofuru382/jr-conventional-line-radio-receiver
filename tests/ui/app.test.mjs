@@ -708,6 +708,15 @@ test("Android shows when the phone killed the last run", async (t) => {
   assert.equal($("background-battery").hidden, true);
   assert.equal($("background-notice-vendor").hidden, true);
 });
+test("the title bar shows the time and the screen's name", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  assert.match($("clock").textContent, /^\d{2}時\d{2}分\d{2}秒$/);
+  assert.match($("clock").dateTime, /^\d{2}:\d{2}:\d{2}$/);
+  assert.equal($("screen-title").textContent, "受信状況");
+  $("mode-full").click();
+  assert.equal($("screen-title").textContent, "詳細表示");
+});
 test("the version dialog names the build", async (t) => {
   const app = await setup(t, {
     platformInfo: { android: true, soapy: false, simple: true, name: "JR-CLRR For Android", build: "6ee67ce0123456789abcdef" },

@@ -13,8 +13,8 @@ import kotlin.math.roundToInt
 
 /**
  * The band map in the receiving notification, as on the app's screen: one
- * cell per channel of the preset at its frequency, green while synchronised,
- * amber and taller during a call, red on an error, grey while searching and
+ * cell per channel of the preset at its frequency, in the TIMS monitor's
+ * signal colours: green while synchronised, yellow and taller during a call, red on an error, grey while searching and
  * outlined when not received; the one being heard is underlined.
  *
  * The page sends the layout (every channel, and which are received) when it
@@ -133,9 +133,9 @@ object NativeBand {
       context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
         Configuration.UI_MODE_NIGHT_YES
     return if (night) {
-      Palette(0xff6ccb5f.toInt(), 0xfffce100.toInt(), 0xffff99a4.toInt(), 0xff5d5d5d.toInt(), 0xff60cdff.toInt())
+      Palette(0xff4ce36a.toInt(), 0xffffe100.toInt(), 0xffff4b4b.toInt(), 0xff475555.toInt(), 0xffffffff.toInt())
     } else {
-      Palette(0xff107c10.toInt(), 0xff9d5d00.toInt(), 0xffc42b1c.toInt(), 0xff8a8a8a.toInt(), 0xff0078d7.toInt())
+      Palette(0xff1a8a3a.toInt(), 0xffb38f00.toInt(), 0xffd02020.toInt(), 0xff8a9696.toInt(), 0xff365e79.toInt())
     }
   }
 
