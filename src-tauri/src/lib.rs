@@ -248,6 +248,12 @@ mod usb_jni {
 fn connection_log() -> Vec<(u64, String)> {
     receiver_core::diag::notes()
 }
+/// The connection log of the previous run of the app (it may have been
+/// killed by the phone), oldest first.
+#[tauri::command]
+fn previous_connection_log() -> Vec<(u64, String)> {
+    receiver_core::diag::previous()
+}
 /// Diagnosis: save the next 10 s of raw IQ as a WAV next to the recordings
 /// (the IQ WAV input replays it). Returns the file path.
 #[tauri::command]
@@ -368,9 +374,14 @@ pub fn run() {
     #[cfg(target_os = "android")]
     band::register(receiver.clone(), monitor.clone());
     builder
-        .setup(|_app| {
+        .setup(|app| {
             #[cfg(target_os = "macos")]
             icon::set_dock_icon()?;
+            // The connection log also goes to a file, so the log of a run the
+            // phone killed in the background can be copied after a restart.
+            if let Ok(dir) = tauri::Manager::path(app).app_data_dir() {
+                receiver_core::diag::persist_to(dir.join("connection.log"));
+            }
             Ok(())
         })
         .manage(receiver)
@@ -385,6 +396,7 @@ pub fn run() {
             native_audio_status,
             capture_iq,
             connection_log,
+            previous_connection_log,
             list_recordings,
             read_recording,
             delete_recording,
@@ -402,6 +414,16 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
+                // Android destroys the window when the app is swiped away or
+                // when it reclaims memory in the background: reception goes on
+                // in the foreground service (stopped from its notification or
+                // the reopened app). Elsewhere closing the window ends it.
+                #[cfg(target_os = "android")]
+                {
+                    let _ = window;
+                    receiver_core::diag::note("画面が閉じられました（受信は続けます）");
+                }
+                #[cfg(not(target_os = "android"))]
                 if let Some(mut session) = window.state::<Receiver>().0.lock().unwrap().take() {
                     session.stop();
                 }

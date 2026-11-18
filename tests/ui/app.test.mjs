@@ -83,6 +83,7 @@ async function setup(
     driverError = null,
     recordings = [],
     connectionLog = [],
+    bridge = null,
   } = {},
 ) {
   const dom = new JSDOM(html, {
@@ -161,6 +162,7 @@ async function setup(
     pollDelays.push(delay);
     return timers.length;
   };
+  if (bridge) w.JrAndroid = bridge;
   w.__TAURI__ = native
     ? {
         core: {
@@ -650,6 +652,59 @@ test("Android says to replug a dongle that left USB, until it is back", async (t
   await app.poll();
   assert.match($("error").textContent, /^ドングルの受信を開始できません/);
   assert.equal($("error").hidden, false);
+});
+test("Android asks to lift battery optimisation, and reports a killed run", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  const asked = [];
+  let restricted = true;
+  app.w.JrAndroid = {
+    setReceiving() {},
+    requestUsb: () => "ok",
+    batteryRestricted: () => restricted,
+    manufacturer: () => "vivo",
+    requestBatteryExemption: () => asked.push("battery"),
+    openAppSettings: () => asked.push("settings"),
+  };
+  assert.equal($("background-notice").hidden, true);
+  await app.click("start");
+  assert.equal($("background-notice").hidden, false);
+  assert.equal($("background-notice-battery").hidden, false);
+  assert.equal($("background-notice-killed").hidden, true);
+  assert.match($("background-notice-vendor").textContent, /^vivo：設定 → 電池/);
+  $("background-battery").click();
+  $("background-settings").click();
+  assert.deepEqual(asked, ["battery", "settings"]);
+  // Back from the settings with the optimisation off: the notice goes.
+  restricted = false;
+  app.w.document.dispatchEvent(new app.w.Event("visibilitychange"));
+  assert.equal($("background-notice").hidden, true);
+  // Dismissed, it is not shown at the next start.
+  restricted = true;
+  await app.click("start");
+  await app.click("start");
+  assert.equal($("background-notice").hidden, false);
+  $("background-dismiss").click();
+  assert.equal($("background-notice").hidden, true);
+  await app.click("start");
+  await app.click("start");
+  assert.equal($("background-notice").hidden, true);
+});
+test("Android shows when the phone killed the last run", async (t) => {
+  const app = await setup(t, {
+    platformInfo: { android: true, soapy: false },
+    bridge: {
+      lastKill: () => `${Date.UTC(2026, 10, 18, 0, 0)}\t${Date.UTC(2026, 10, 18, 0, 41)}`,
+      batteryRestricted: () => false,
+      manufacturer: () => "Google",
+    },
+  });
+  const { $ } = app;
+  assert.equal($("background-notice").hidden, false);
+  assert.match($("background-notice-killed").textContent, /^前回は .+ ごろ、受信中に Android がアプリを止めました。$/);
+  assert.equal($("background-notice-battery").hidden, true);
+  assert.equal($("background-battery").hidden, true);
+  assert.equal($("background-notice-vendor").hidden, true);
 });
 test("the version dialog names the build", async (t) => {
   const app = await setup(t, {

@@ -589,29 +589,107 @@ function showLastUsbDiagnosis() {
   $("about-lost").textContent = last;
   $("about-lost").hidden = $("about-lost-title").hidden = false;
 }
-// The connection log (driver and Android notes, oldest first) for a report.
-async function connectionLogText() {
-  const notes = (await invoke("connection_log")).map(([ms, text]) => [ms, text]);
-  let android = "";
+// The connection log (driver and Android notes, oldest first) for a report,
+// with the previous run's (the phone may have killed it in the background).
+function bridgeText(method) {
   try {
-    android = window.JrAndroid?.usbLog?.() ?? "";
+    return window.JrAndroid?.[method]?.() ?? "";
   } catch {
-    // The bridge only exists in the Android app.
+    return "";
   }
+}
+function mergedNotes(driver, android) {
+  const notes = driver.map(([ms, text]) => [ms, text]);
   for (const line of android.split("\n")) {
     const tab = line.indexOf("\t");
     if (tab > 0) notes.push([Number(line.slice(0, tab)), line.slice(tab + 1)]);
   }
-  notes.sort((a, b) => a[0] - b[0]);
+  return notes.sort((a, b) => a[0] - b[0]);
+}
+async function connectionLogText() {
+  const notes = mergedNotes(await invoke("connection_log"), bridgeText("usbLog"));
+  let previous = [];
+  try {
+    previous = mergedNotes(await invoke("previous_connection_log"), bridgeText("usbLogPrevious"));
+  } catch {
+    // Older backends keep no previous log.
+  }
   const time = (ms) => new Date(ms).toLocaleTimeString("ja-JP", { hour12: false });
+  const day = (ms) => new Date(ms).toLocaleString("ja-JP", { hour12: false });
   return [
     `${$("about-product").textContent.trim()} ${document.querySelector(".about-metadata dd").textContent}`,
     $("about-lost").hidden ? null : `前回の切断: ${$("about-lost").textContent.replace("\n", " ")}`,
     ...notes.map(([ms, text]) => `${time(ms)} ${text}`),
+    ...(previous.length
+      ? ["", `--- 前回の起動（${day(previous[0][0])}〜）---`, ...previous.map(([ms, text]) => `${time(ms)} ${text}`)]
+      : []),
   ]
-    .filter(Boolean)
+    .filter((line) => line !== null)
     .join("\n");
 }
+// Android: background reception needs the battery optimisation off (and on
+// some phones, vivo among them, their own background settings). Shown when
+// reception starts while it is on, and after the phone killed a run.
+const batteryNoticeKey = "jr-clrr.battery-notice";
+function showBackgroundNotice({ killed = null, starting = false } = {}) {
+  if (!platform.android) return;
+  const restricted = window.JrAndroid?.batteryRestricted?.() === true;
+  let dismissed = false;
+  try {
+    dismissed = localStorage.getItem(batteryNoticeKey) === "dismissed";
+  } catch {
+    dismissed = false;
+  }
+  if (!killed && !(starting && restricted && !dismissed)) return;
+  if (killed) {
+    const at = new Date(killed).toLocaleString("ja-JP", { hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    $("background-notice-killed").textContent = `前回は ${at} ごろ、受信中に Android がアプリを止めました。`;
+  }
+  $("background-notice-killed").hidden = !killed;
+  $("background-notice-battery").hidden = !restricted;
+  $("background-battery").hidden = !restricted;
+  const vendor = bridgeText("manufacturer").toLowerCase();
+  const vendorHelp = {
+    vivo: "vivo：設定 → 電池 → バックグラウンドの電力消費の管理 で、このアプリの「高いバックグラウンド電力消費」を許可し、アプリの設定で自動起動もオンにします（項目名は機種によって違います）。",
+    xiaomi: "Xiaomi：アプリの設定 → バッテリーセーバー を「制限なし」にし、自動起動をオンにします。",
+    oppo: "OPPO：アプリの設定 → バッテリー使用 で「バックグラウンドアクティビティを許可」をオンにします。",
+    samsung: "Galaxy：アプリの設定 → バッテリー を「制限なし」にします。",
+  };
+  const help = Object.entries(vendorHelp).find(([name]) => vendor.includes(name))?.[1] ?? "";
+  $("background-notice-vendor").textContent = help;
+  $("background-notice-vendor").hidden = !help;
+  $("background-notice").hidden = false;
+}
+$("background-battery").addEventListener("click", () => {
+  try {
+    window.JrAndroid?.requestBatteryExemption?.();
+  } catch {
+    // The bridge only exists in the Android app.
+  }
+});
+$("background-settings").addEventListener("click", () => {
+  try {
+    window.JrAndroid?.openAppSettings?.();
+  } catch {
+    // The bridge only exists in the Android app.
+  }
+});
+$("background-dismiss").addEventListener("click", () => {
+  $("background-notice").hidden = true;
+  try {
+    localStorage.setItem(batteryNoticeKey, "dismissed");
+  } catch {
+    // It is shown again next time.
+  }
+});
+// Back from the settings: hide what was fixed there.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" || $("background-notice").hidden || !platform.android) return;
+  if (window.JrAndroid?.batteryRestricted?.() === false) {
+    $("background-notice-battery").hidden = $("background-battery").hidden = true;
+    if ($("background-notice-killed").hidden) $("background-notice").hidden = true;
+  }
+});
 $("about-copy-log").addEventListener("click", async () => {
   const button = $("about-copy-log");
   const log = $("about-log");
@@ -2103,6 +2181,7 @@ async function startReception() {
     running = true;
     syncBackgroundService();
     syncNativeMonitor();
+    if (input.kind !== "wave") showBackgroundNotice({ starting: true });
     sessionReplay = input.kind === "wave";
     recordingStatus = emptyRecording();
     recordingResumePending = recordingEnabled;
@@ -2429,6 +2508,8 @@ try {
     if (platform.android) {
       addTestSound();
       addRecordingsBrowser();
+      const kill = bridgeText("lastKill");
+      if (kill) showBackgroundNotice({ killed: Number(kill.split("\t")[1]) });
     }
   }
   bundledCatalog = native

@@ -27,6 +27,9 @@ object NativeBand {
   /** Implemented in Rust: `{"state", "heard", "channels": {id: state}}`. */
   @JvmStatic external fun state(): String
 
+  /** Implemented in Rust: stops reception and saving (notification button). */
+  @JvmStatic external fun stop()
+
   /** `{"channels": [{"id", "hz", "label"}], "enabled": [id]}` from ui/app.js. */
   @Volatile var layout: String? = null
 

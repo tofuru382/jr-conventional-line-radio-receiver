@@ -35,16 +35,75 @@ object UsbDongle {
   /** Android-side notes for the app's connection log (ui/app.js merges them). */
   private val notes = ArrayDeque<String>()
 
+  // The notes also go to a file, so those of a run the phone killed in the
+  // background can be read after the next start (previous run: .prev.log).
+  @Volatile private var logFile: java.io.File? = null
+
+  /** Starts this run's log file; called once per process. */
+  fun persist(context: Context) {
+    if (logFile != null) return
+    val file = java.io.File(context.filesDir, "android-connection.log")
+    if (file.exists()) file.renameTo(java.io.File(context.filesDir, "android-connection.prev.log"))
+    logFile = file
+  }
+
+  /** The previous run's notes, one "<unix ms>\t<text>" per line. */
+  fun previousNotes(context: Context): String =
+    try {
+      java.io.File(context.filesDir, "android-connection.prev.log").readText()
+    } catch (e: Exception) {
+      ""
+    }
+
   fun note(text: String) {
     Log.i(TAG, text)
+    val line = "${System.currentTimeMillis()}\t${text.replace('\n', ' ')}"
     synchronized(notes) {
       if (notes.size == 200) notes.removeFirst()
-      notes.addLast("${System.currentTimeMillis()}\t$text")
+      notes.addLast(line)
+      logFile?.let { file ->
+        try {
+          if (file.length() > 256 * 1024) file.writeText(file.readLines().takeLast(500).joinToString("\n", postfix = "\n"))
+          file.appendText(line + "\n")
+        } catch (e: Exception) {
+          Log.w(TAG, "connection log not written", e)
+        }
+      }
     }
   }
 
   /** When Android last reported a USB device detached (elapsedRealtime), or 0. */
   @Volatile private var detachedAt = 0L
+
+  // A dongle whose plug is losing contact comes and goes within a second.
+  // Opening it at once makes it draw its full current through that contact,
+  // and after a few such bounces some phones turn the USB port off until the
+  // dongle is replugged. So a dongle that just appeared is opened only once
+  // it has stayed attached for a while: 2.5 s, doubled for every further
+  // detach in the last minute (at most 20 s).
+  private const val SETTLE_MS = 2500L
+  private const val SETTLE_MAX_MS = 20000L
+  private const val BOUNCE_WINDOW_MS = 60000L
+  @Volatile private var attachedAt = 0L
+  private val detaches = ArrayDeque<Long>()
+  private var settlingNoted = 0L
+  private var lastMissing: String? = null
+  private var lastMissingNoted = 0L
+
+  /** How long a dongle must stay attached before it is opened (ms). */
+  internal fun settleTime(now: Long, detachTimes: List<Long>): Long {
+    val recent = detachTimes.count { now - it <= BOUNCE_WINDOW_MS }
+    if (recent <= 1) return SETTLE_MS
+    return (SETTLE_MS shl minOf(recent - 1, 3)).coerceAtMost(SETTLE_MAX_MS)
+  }
+
+  /** Milliseconds left before a dongle that just appeared may be opened. */
+  private fun settling(): Long {
+    if (attachedAt == 0L) return 0
+    val now = SystemClock.elapsedRealtime()
+    val wait = synchronized(detaches) { settleTime(now, detaches.toList()) }
+    return (attachedAt + wait - now).coerceAtLeast(0)
+  }
 
   /** "電池 38.5℃ 62%": heat or a low battery can make a phone cut USB power. */
   private fun battery(context: Context): String {
@@ -110,7 +169,16 @@ object UsbDongle {
           @Suppress("DEPRECATION")
           val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
           val detached = intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED
-          if (detached) detachedAt = SystemClock.elapsedRealtime()
+          val now = SystemClock.elapsedRealtime()
+          if (detached) {
+            detachedAt = now
+            synchronized(detaches) {
+              detaches.addLast(now)
+              while (detaches.isNotEmpty() && now - detaches.first() > BOUNCE_WINDOW_MS) detaches.removeFirst()
+            }
+          } else if (device == null || (device.vendorId == VENDOR && device.productId in PRODUCTS)) {
+            attachedAt = now
+          }
           val what = if (detached) "外れました" else "つながりました"
           note("Android: USB 機器が$what（${device?.let { describe(it) } ?: "不明"}）· ${battery(context)}")
         }
@@ -150,7 +218,8 @@ object UsbDongle {
   /**
    * Makes the dongle available to the driver: "ok" (handed over), "asking"
    * (permission dialog shown; handed over once granted), "none" (no USB device
-   * at all), "other:N" (N USB devices, none an RTL-SDR, e.g. only a hub) or
+   * at all), "other:N" (N USB devices, none an RTL-SDR, e.g. only a hub),
+   * "settling" (it just appeared; asked again until it stayed attached) or
    * "busy" (the dongle is there but could not be opened).
    */
   @Synchronized
@@ -160,8 +229,24 @@ object UsbDongle {
     val device = attached.firstOrNull { it.vendorId == VENDOR && it.productId in PRODUCTS }
     if (device == null) {
       val result = if (attached.isEmpty()) "none" else "other:${attached.size}"
-      note("Android: ドングルを探しました: USB 機器 ${attached.size} 台 ${attached.joinToString { describe(it) }} → $result")
+      // Asked every second while a session waits: note changes, and every 10 s.
+      val now = SystemClock.elapsedRealtime()
+      if (result != lastMissing || now - lastMissingNoted >= 10000) {
+        lastMissing = result
+        lastMissingNoted = now
+        note("Android: ドングルを探しました: USB 機器 ${attached.size} 台 ${attached.joinToString { describe(it) }} → $result")
+      }
       return result
+    }
+    lastMissing = null
+    val wait = settling()
+    if (wait > 0) {
+      val now = SystemClock.elapsedRealtime()
+      if (now - settlingNoted > 1500) {
+        settlingNoted = now
+        note("Android: ドングルがつながったばかりなので、安定するまで待ちます（あと ${(wait + 999) / 1000} 秒）")
+      }
+      return "settling"
     }
     if (usb.hasPermission(device)) {
       val result = if (open(context, device)) "ok" else "busy"

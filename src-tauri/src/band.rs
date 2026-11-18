@@ -60,10 +60,33 @@ pub fn register(receiver: Receiver, monitor: NativeMonitor) {
     let _ = SOURCES.set((receiver, monitor));
 }
 
+/// Stops reception and saving, from the notification (the page may be gone).
+#[cfg(target_os = "android")]
+fn stop() {
+    let Some((receiver, _)) = SOURCES.get() else {
+        return;
+    };
+    let Ok(mut guard) = receiver.0.lock() else {
+        return;
+    };
+    if let Some(session) = guard.as_mut() {
+        receiver_core::diag::note("通知から受信を停止しました");
+        session.stop();
+        session.stop_recording();
+    }
+}
+
 /// JNI entry point for io.jrradio.receiver.NativeBand (Kotlin).
 #[cfg(target_os = "android")]
 mod jni_entry {
     use jni::{objects::JClass, sys::jstring, JNIEnv};
+    #[no_mangle]
+    pub extern "system" fn Java_io_jrradio_receiver_NativeBand_stop<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+    ) {
+        super::stop();
+    }
     #[no_mangle]
     pub extern "system" fn Java_io_jrradio_receiver_NativeBand_state<'local>(
         env: JNIEnv<'local>,

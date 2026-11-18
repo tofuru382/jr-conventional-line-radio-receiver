@@ -6,8 +6,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
 import android.graphics.Color
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -37,6 +39,10 @@ class MainActivity : TauriActivity() {
       navigationBarStyle = SystemBarStyle.dark(background),
     )
     super.onCreate(savedInstanceState)
+    UsbDongle.persist(this)
+    // Read before reception can start again in this process.
+    lastKill = ReceiverService.lastKill(this)
+    if (lastKill.isNotEmpty()) UsbDongle.note("Android: 前回の受信は途中でアプリごと止められていました")
     UsbDongle.watch(this)
     window.decorView.setBackgroundColor(background)
     // Android 15+ always draws apps edge to edge. Keep the WebView clear of the
@@ -67,6 +73,18 @@ class MainActivity : TauriActivity() {
     if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED && UsbDongle.sessionWantsDevice()) {
       UsbDongle.request(this)
     }
+  }
+
+  private var lastKill = ""
+
+  override fun onStart() {
+    super.onStart()
+    UsbDongle.note("Android: アプリを表示しました")
+  }
+
+  override fun onStop() {
+    UsbDongle.note("Android: アプリがバックグラウンドになりました")
+    super.onStop()
   }
 
   @SuppressLint("JavascriptInterface")
@@ -113,6 +131,48 @@ class MainActivity : TauriActivity() {
 
     /** Android-side connection notes, one "<unix ms>\t<text>" per line. */
     @JavascriptInterface fun usbLog(): String = UsbDongle.notes()
+
+    /** The previous run's Android notes (it may have been killed). */
+    @JavascriptInterface fun usbLogPrevious(): String = UsbDongle.previousNotes(this@MainActivity)
+
+    /** "<start ms>\t<last sign of life ms>" when the previous run was killed while receiving. */
+    @JavascriptInterface fun lastKill(): String = this@MainActivity.lastKill
+
+    @JavascriptInterface fun manufacturer(): String = Build.MANUFACTURER ?: ""
+
+    /** Whether Android may stop the app in the background to save battery. */
+    @JavascriptInterface
+    fun batteryRestricted(): Boolean = ReceiverService.batteryRestricted(this@MainActivity)
+
+    /** Asks to exempt the app from battery optimisation (system dialog). */
+    @JavascriptInterface
+    fun requestBatteryExemption() {
+      runOnUiThread {
+        val ask =
+          Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+        try {
+          startActivity(ask)
+        } catch (e: Exception) {
+          openSettings(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+      }
+    }
+
+    /** The app's page in the system settings (battery, autostart on some phones). */
+    @JavascriptInterface
+    fun openAppSettings() {
+      runOnUiThread {
+        openSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+      }
+    }
+  }
+
+  private fun openSettings(intent: Intent) {
+    try {
+      startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (e: Exception) {
+      UsbDongle.note("Android: 設定画面を開けませんでした（${intent.action}）")
+    }
   }
 
   private fun requestNotificationPermission() {

@@ -45,6 +45,19 @@
     </header>
     <main>
       <div id="error" class="error" role="alert" hidden></div>
+      <section id="background-notice" class="notice" aria-labelledby="background-notice-title" hidden>
+        <h2 id="background-notice-title">バックグラウンドで止まらないようにする</h2>
+        <p id="background-notice-killed" hidden></p>
+        <p id="background-notice-battery" hidden>
+          電池の最適化がオンのため、画面を消すと Android に受信を止められることがあります。
+        </p>
+        <p id="background-notice-vendor" hidden></p>
+        <div class="notice-actions">
+          <button id="background-battery" type="button">電池の最適化をオフ</button>
+          <button id="background-settings" type="button">アプリの設定</button>
+          <button id="background-dismiss" type="button">閉じる</button>
+        </div>
+      </section>
       <div id="preferences-error" class="error" hidden>
         <p id="preferences-message" role="alert"></p>
         <button id="preferences-retry" type="button">保存を再試行</button>
