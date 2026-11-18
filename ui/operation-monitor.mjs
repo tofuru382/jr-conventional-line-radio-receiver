@@ -33,20 +33,20 @@ export class OperationMonitorView {
       this.key = "";
       this.get("operation-rows").replaceChildren();
       this.text("operation-state", available ? "情報待ち" : "受信対象なし");
-      this.text("operation-empty-title", available ? "線区別の情報を待っています" : "共用波が受信対象にありません");
+      this.text("operation-empty-title", available ? "線区別の情報はまだありません" : "共用波が受信対象にありません");
       this.text("operation-empty-hint", available
-        ? running ? "電文が最後まで届くと表示します。音声を聴きながら受信できます。" : "共用波を含めて受信を開始すると、線区別の情報を表示します。"
-        : "チャンネル一覧で共用波（一斉形式）を受信対象にしてください。JR東日本の対応電文を表示します。");
+        ? running ? "" : "共用波を含めて受信を開始してください。"
+        : "チャンネル一覧で共用波（一斉形式）を受信対象にしてください。");
       return;
     }
     const monitor = source.status.operation_monitor;
     let state = "受信済み";
-    if (!running) state = `受信停止 · ${state}`;
-    if (replay) state = `IQ再生 · ${state}`;
+    if (!running) state = `受信停止　${state}`;
+    if (replay) state = `IQ再生　${state}`;
     this.text("operation-state", state);
     this.text("operation-received-time", receivedTime(monitor.last_received_at));
     this.text("operation-received-label", replay ? "最終読取日時（JST）" : "最終受信日時（JST）");
-    this.text("operation-source", `${source.config.label} · ${(source.config.frequency_hz / 1e6).toFixed(5)} MHz`);
+    this.text("operation-source", `${source.config.label}　${(source.config.frequency_hz / 1e6).toFixed(5)} MHz`);
     this.text("operation-repetitions", `同一内容を ${monitor.receptions} 回受信`);
     const rows = monitor.summary.rows;
     const key = JSON.stringify([source.config.id, rows]);

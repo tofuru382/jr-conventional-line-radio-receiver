@@ -787,23 +787,23 @@ test("the measured input rate is shown and flagged when it differs from the sett
   await app.click("start");
   app.setSnapshot({ status: { ...status(), input_rate: 239990.4 }, audio: [] });
   await app.poll();
-  assert.match($("capture-info").textContent, /実測 239,990 S\/s · 入力 -10\.0 dBFS$/);
+  assert.match($("capture-info").textContent, /実測 239,990 S\/s　入力 -10\.0 dBFS$/);
   app.setSnapshot({ status: { ...status(), input_rate: 514285 }, audio: [] });
   await app.poll();
-  assert.match($("capture-info").textContent, /実測 514,285 S\/s（設定と違います） · 入力 -10\.0 dBFS$/);
-  app.setSnapshot({ status: { ...status(), input_rate: 240000, source_info: "R828D · RTL-SDR Blog V4" }, audio: [] });
+  assert.match($("capture-info").textContent, /実測 514,285 S\/s（設定と違います）　入力 -10\.0 dBFS$/);
+  app.setSnapshot({ status: { ...status(), input_rate: 240000, source_info: "R828D　RTL-SDR Blog V4" }, audio: [] });
   await app.poll();
-  assert.match($("capture-info").textContent, /実測 240,000 S\/s · R828D · RTL-SDR Blog V4 · 入力/);
+  assert.match($("capture-info").textContent, /実測 240,000 S\/s　R828D　RTL-SDR Blog V4　入力/);
   // Automatic frequency correction appears once it moved.
   app.setSnapshot({ status: { ...status(), frequency_correction_hz: 0 }, audio: [] });
   await app.poll();
   assert.doesNotMatch($("capture-info").textContent, /自動補正/);
   app.setSnapshot({ status: { ...status(), frequency_correction_hz: -232.6 }, audio: [] });
   await app.poll();
-  assert.match($("capture-info").textContent, / · 周波数 自動補正 −233 Hz · 入力/);
+  assert.match($("capture-info").textContent, /　周波数 自動補正 −233 Hz　入力/);
   app.setSnapshot({ status: { ...status(), frequency_correction_hz: 120 }, audio: [] });
   await app.poll();
-  assert.match($("capture-info").textContent, / · 周波数 自動補正 \+120 Hz · 入力/);
+  assert.match($("capture-info").textContent, /　周波数 自動補正 \+120 Hz　入力/);
 });
 test("no diagnosis panels: IQ capture and the connection log are gone", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -894,13 +894,13 @@ test("Android lists saved recordings newest first, by channel or by session, and
   $("recordings-browser").dispatchEvent(new app.w.Event("toggle"));
   await tick();
   await tick();
-  assert.equal($("recordings-count").textContent, "1 回の保存 · 3 件");
+  assert.equal($("recordings-count").textContent, "1 回の保存　3 件");
   const texts = () => [...$("recordings-list").querySelectorAll(".recording-play")].map((b) => b.textContent);
   // Newest first, with the end time (JST) and the channel name from the file.
   assert.deepEqual(texts(), [
-    "▶ 10/18 22:31:40 · 352.53750 MHz · D5 音声第1波 · 中央・総武緩行線・横浜線 ほか · #1 · 3 秒",
-    "▶ 10/18 22:31:30 · 352.60625 MHz · D7 音声第2波 · 山手線・仙石線 ほか · #2 · 5 秒",
-    "▶ 10/18 22:31:10 · 352.60625 MHz · D7 音声第2波 · 山手線・仙石線 ほか · #1 · 12 秒",
+    "▶ 10/18 22:31:40　352.53750 MHz　D5 音声第1波　中央・総武緩行線・横浜線 ほか　#1　3 秒",
+    "▶ 10/18 22:31:30　352.60625 MHz　D7 音声第2波　山手線・仙石線 ほか　#2　5 秒",
+    "▶ 10/18 22:31:10　352.60625 MHz　D7 音声第2波　山手線・仙石線 ほか　#1　12 秒",
   ]);
   await app.change("recordings-sort", "oldest");
   assert.match(texts()[0], /22:31:10/);
@@ -910,7 +910,7 @@ test("Android lists saved recordings newest first, by channel or by session, and
   assert.equal(headings.length, 2);
   assert.match(headings[0], /^352\.53750 MHz/);
   await app.change("recordings-sort", "session");
-  assert.match($("recordings-list").querySelector("summary").textContent, /^10\/18 22:31:00 · 3 件$/);
+  assert.match($("recordings-list").querySelector("summary").textContent, /^10\/18 22:31:00　3 件$/);
   $("recordings-list").querySelector(".recording-play").click();
   await tick();
   await tick();
@@ -939,7 +939,7 @@ test("Android lists saved recordings newest first, by channel or by session, and
   await tick();
   assert.equal(app.calls.filter((c) => c.command === "delete_recording").at(-1).args.path, recordings[0].files[0].path);
   assert.equal($("recordings-player").hidden, true);
-  assert.equal($("recordings-count").textContent, "1 回の保存 · 2 件");
+  assert.equal($("recordings-count").textContent, "1 回の保存　2 件");
   assert.equal($("recordings-status").textContent, "削除しました");
   assert.equal($("recordings-list").querySelectorAll(".recording-play").length, 2);
   // A failure is reported and the list stays.
@@ -1005,7 +1005,7 @@ test("route draft is searchable, cancelable, and only applies explicit receive t
   const visible = [...ui.$("route-results").children].filter((n) => !n.hidden);
   assert.equal(visible.length, 1);
   visible[0].querySelector("input").click();
-  assert.equal(ui.$("route-selected-count").textContent, "1 区間 · 4 波");
+  assert.equal(ui.$("route-selected-count").textContent, "1 区間　4 波");
   assert.match(ui.$("route-frequencies").textContent, /352\.61250 MHz/);
   assert.equal(ui.$("total-enabled").textContent, "22");
   ui.input("route-search", "該当なし");
@@ -1166,7 +1166,7 @@ test("saving remains enabled across reception stops and restart, and an explicit
   assert.equal(second.$("recording-state").textContent, "保存中");
   await second.click("record-stop");
   assert.equal(preferences.value.output.enabled, false);
-  assert.equal(second.$("start").textContent, "■ 受信を停止");
+  assert.equal(second.$("start").textContent, "受信を停止");
   const third = await setup(t, { preferences, configureConnection: false });
   await third.click("start");
   await third.poll();
@@ -1225,7 +1225,7 @@ test("automatic saving errors do not loop or stop reception, and EOF retains the
     1,
   );
   assert.equal(second.$("recording-error").hidden, false);
-  assert.equal(second.$("start").textContent, "■ 受信を停止");
+  assert.equal(second.$("start").textContent, "受信を停止");
   assert.equal(first.preferences.value.output.enabled, true);
   await second.click("record-stop");
   assert.equal(first.preferences.value.output.enabled, false);
@@ -1709,7 +1709,7 @@ test("JSONL outputs can be selected without audio and empty output choices are r
   );
   await ui.click("record-stop");
   assert.equal(ui.$("output-data").matches(":disabled"), false);
-  assert.equal(ui.$("start").textContent, "■ 受信を停止");
+  assert.equal(ui.$("start").textContent, "受信を停止");
 });
 test("configuration load failure shows an error and blocks starting", async (t) => {
   const ui = await setup(t, { catalogError: "設定の検証に失敗しました" });
@@ -1756,7 +1756,7 @@ test("about dialog shows product and author, restores focus, and leaves receptio
   await ui.click("about-close");
   assert.equal(dialog.open, false);
   assert.equal(ui.w.document.activeElement.id, "about-open");
-  assert.equal(ui.$("start").textContent, "■ 受信を停止");
+  assert.equal(ui.$("start").textContent, "受信を停止");
   assert.equal(ui.$("record-stop").disabled, false);
   assert.equal(
     ui.calls.some(
@@ -1991,11 +1991,11 @@ test("recording validates its folder, is independent of monitoring, and stops wi
     directory: "/tmp/recordings/recording-test",
   });
   await ui.poll();
-  assert.equal(ui.$("recording-summary").textContent, "WAV 2 件 · 1.0 秒");
+  assert.equal(ui.$("recording-summary").textContent, "WAV 2 件　1.0 秒");
   await ui.click("record-stop");
   assert.equal(ui.$("recording-state").textContent, "保存完了");
   assert.equal(ui.$("record-directory").disabled, false);
-  assert.equal(ui.$("start").textContent, "■ 受信を停止");
+  assert.equal(ui.$("start").textContent, "受信を停止");
   assert.equal(ui.w.document.activeElement.id, "record-start");
   assert.equal(
     ui.calls.some((c) => c.command === "stop"),
@@ -2074,13 +2074,13 @@ test("cancelled directory picker and rejected recording start never report recor
   assert.equal(ui.$("recording-error").hidden, false);
   assert.match(ui.$("recording-error").textContent, /書き込めません/);
   assert.equal(ui.$("record-directory").disabled, false);
-  assert.equal(ui.$("start").textContent, "■ 受信を停止");
+  assert.equal(ui.$("start").textContent, "受信を停止");
 });
 test("default source requires a user endpoint; filtering never removes active channels", async (t) => {
   const ui = await setup(t, { configureConnection: false });
   assert.equal(ui.$("host").value, "");
   assert.equal(ui.$("port").value, "");
-  assert.equal(ui.$("source-summary").textContent, "RTL-TCP · 接続先未設定");
+  assert.equal(ui.$("source-summary").textContent, "RTL-TCP　接続先未設定");
   await ui.click("start");
   assert.equal(ui.w.document.activeElement.id, "host");
   assert.equal(
@@ -2095,7 +2095,7 @@ test("default source requires a user endpoint; filtering never removes active ch
     false,
   );
   ui.input("port", "1234");
-  assert.equal(ui.$("source-summary").textContent, "RTL-TCP · 127.0.0.1:1234");
+  assert.equal(ui.$("source-summary").textContent, "RTL-TCP　127.0.0.1:1234");
   assert.equal(
     ui.calls.some((c) => c.command === "start"),
     false,
@@ -2190,7 +2190,7 @@ test("company changes isolate editable formats and restore the source allocation
   assert.equal(ui.$("selected-format").value, "slotted");
   assert.equal(
     ui.$("selected-label").textContent,
-    "D2 音声第1波 · 湖西線・片町線・JR東西線",
+    "D2 音声第1波　湖西線・片町線・JR東西線",
   );
   // Route-table line names appear on the channel tiles and are searchable.
   assert.ok(
@@ -2386,21 +2386,21 @@ test("operation monitor selects by reception time and ignores legacy message dat
   const view = new OperationMonitorView(app.w.document);
   view.update(s, { channels: s.channels.map((c) => c.config), enabled: new Set(), running: true, replay: true });
   assert.equal(app.$("operation-received-label").textContent, "最終読取日時（JST）");
-  assert.equal(app.$("operation-state").textContent, "IQ再生 · 受信済み");
+  assert.equal(app.$("operation-state").textContent, "IQ再生　受信済み");
 });
 test("one top button starts and stops reception", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
   assert.equal($("stop"), null);
-  assert.equal($("start").textContent, "▶ 受信を開始");
+  assert.equal($("start").textContent, "受信を開始");
   assert.ok($("start").classList.contains("primary"));
   await app.click("start");
   assert.equal(app.calls.filter((c) => c.command === "start").length, 1);
-  assert.equal($("start").textContent, "■ 受信を停止");
+  assert.equal($("start").textContent, "受信を停止");
   assert.ok($("start").classList.contains("stop"));
   await app.click("start");
   assert.equal(app.calls.filter((c) => c.command === "stop").length, 1);
-  assert.equal($("start").textContent, "▶ 受信を開始");
+  assert.equal($("start").textContent, "受信を開始");
 });
 test("the top save toggle arms saving while stopped, saves once receiving, and turns it off", async (t) => {
   const preferences = { value: null };
@@ -2467,7 +2467,7 @@ test("phones open in the compact view; the switch next to the logo shows the ful
   assert.equal(cell(1).getAttribute("aria-pressed"), "true");
   assert.equal(cell(0).dataset.state, "locked");
   assert.equal(cell(5).dataset.state, "idle");
-  assert.match(cell(0).getAttribute("aria-label"), /352\.\d{5} MHz .+ · 同期中/);
+  assert.match(cell(0).getAttribute("aria-label"), /352\.\d{5} MHz .+　同期中/);
   assert.equal($("band-map").children.length, 22);
   cell(5).click();
   assert.equal($("quick-frequency").textContent, (presets[5].frequency_hz / 1e6).toFixed(5));

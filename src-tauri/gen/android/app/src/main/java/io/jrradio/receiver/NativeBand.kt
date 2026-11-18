@@ -100,7 +100,7 @@ object NativeBand {
       when {
         session == "reconnecting" -> "再接続中"
         session == "starting" -> "準備中"
-        heardChannel != null -> "${heardChannel.label} · $heardState"
+        heardChannel != null -> "${heardChannel.label}　$heardState"
         else -> "列車無線を受信中"
       }
     val text =
@@ -109,7 +109,7 @@ object NativeBand {
           "同期 $synced / ${enabled.size} 波",
           if (calls > 0) "通話 $calls" else null,
         )
-        .joinToString(" · ")
+        .joinToString("　")
     return Content(
       title,
       text,
@@ -190,7 +190,7 @@ object NativeBand {
   /** Collapsed and expanded views for the notification. */
   fun views(context: Context, content: Content): Pair<RemoteViews, RemoteViews> {
     val small = RemoteViews(context.packageName, R.layout.notification_band_small)
-    small.setTextViewText(R.id.band_title, "${content.title} · ${content.text}")
+    small.setTextViewText(R.id.band_title, "${content.title}　${content.text}")
     small.setImageViewBitmap(R.id.band_map, bitmap(context, content, 16))
     val big = RemoteViews(context.packageName, R.layout.notification_band)
     big.setTextViewText(R.id.band_title, content.title)

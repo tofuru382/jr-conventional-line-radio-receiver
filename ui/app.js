@@ -132,8 +132,8 @@ function recordingLabel(file) {
   return p
     ? [`${(p.hz / 1e6).toFixed(5)} MHz`, p.label, p.lines, `#${p.number}`, length]
         .filter(Boolean)
-        .join(" · ")
-    : `${file.name} · ${length}`;
+        .join("　")
+    : `${file.name}　${length}`;
 }
 // Where a recording plays (the recordings browser's player).
 const browserPlayer = { player: "recordings-player", now: "recordings-now", status: "recordings-status" };
@@ -153,7 +153,7 @@ async function playRecording(session, file, target = browserPlayer) {
     player.src = recordingUrl;
     player.dataset.path = file.path;
     player.hidden = false;
-    $(target.now).textContent = `再生中：${fileTime(session, file)} · ${recordingLabel(file)}`;
+    $(target.now).textContent = `再生中：${fileTime(session, file)}　${recordingLabel(file)}`;
     $(target.now).hidden = false;
     $(target.status).textContent = session.incomplete ? "保存中のため途中までの場合があります" : "";
     await Promise.resolve(player.play?.()).catch(() => {});
@@ -193,7 +193,7 @@ function moreButton(left, onMore) {
   return button;
 }
 function recordingButton(session, file, withTime, target = browserPlayer) {
-  const text = `▶ ${withTime ? `${fileTime(session, file)} · ` : ""}${recordingLabel(file)}${session.incomplete ? " · 保存中" : ""}`;
+  const text = `▶ ${withTime ? `${fileTime(session, file)}　` : ""}${recordingLabel(file)}${session.incomplete ? "　保存中" : ""}`;
   const button = el("button", text, "recording-play");
   button.type = "button";
   button.addEventListener("click", () => playRecording(session, file, target));
@@ -283,7 +283,7 @@ async function deleteRecording(session, file, button) {
 }
 function updateRecordingsCount() {
   const total = recordingSessions.reduce((n, s) => n + s.files.length, 0);
-  $("recordings-count").textContent = `${recordingSessions.length} 回の保存 · ${total} 件`;
+  $("recordings-count").textContent = `${recordingSessions.length} 回の保存　${total} 件`;
 }
 function renderRecordings() {
   closeRecordingMenu();
@@ -297,7 +297,7 @@ function renderRecordings() {
       group.append(
         el(
           "summary",
-          `${recordingTime(session.name)} · ${session.files.length} 件${session.incomplete ? " · 保存中" : ""}`,
+          `${recordingTime(session.name)}　${session.files.length} 件${session.incomplete ? "　保存中" : ""}`,
         ),
       );
       for (const file of session.files) group.append(recordingButton(session, file, false));
@@ -324,7 +324,7 @@ function renderRecordings() {
   for (const { session, file, info } of all.slice(0, recordingsShown)) {
     if (order === "channel") {
       const title = info
-        ? [`${(info.hz / 1e6).toFixed(5)} MHz`, info.label, info.lines].filter(Boolean).join(" · ")
+        ? [`${(info.hz / 1e6).toFixed(5)} MHz`, info.label, info.lines].filter(Boolean).join("　")
         : "その他";
       if (title !== heading) {
         heading = title;
@@ -438,7 +438,7 @@ const routePicker = new RoutePicker(document, async (preset, selection) => {
   const names = selection.routes.slice(0, 2).map((r) => `${r.line}（${r.section}）`).join("、");
   const more = selection.routes.length > 2 ? ` ほか${selection.routes.length - 2}区間` : "";
   $("route-feedback").textContent =
-    `${names}${more} · ${enabled.size} 波を受信対象にしました。「受信を開始」で受信します。`;
+    `${names}${more}　${enabled.size} 波を受信対象にしました。「受信を開始」で受信します。`;
   setControls();
   filterRows();
   await persistPreferences();
@@ -877,7 +877,8 @@ function setControls() {
   $("preset-builtin").disabled = !native || running || busy || !presetFile;
   $("all").disabled = running || busy || !channels.length;
   $("start").disabled = !native || busy || (!running && !channels.length);
-  const startLabel = running ? "■ 受信を停止" : "▶ 受信を開始";
+  // The key's LED shows the state (style.css).
+  const startLabel = running ? "受信を停止" : "受信を開始";
   if ($("start").textContent !== startLabel) $("start").textContent = startLabel;
   $("start").classList.toggle("primary", !running);
   $("start").classList.toggle("stop", running);
@@ -901,7 +902,7 @@ function setControls() {
   renderSelectionMode();
   renderChannelStates();
   $("channel-count").textContent =
-    `${presetCatalog.find((p) => p.id === activePresetId)?.label ?? "プリセット未読込"} · ${enabled.size} 波を選択 · ${running ? "同時処理中" : "待機"}`;
+    `${presetCatalog.find((p) => p.id === activePresetId)?.label ?? "プリセット未読込"}　${enabled.size} 波を選択　${running ? "同時処理中" : "待機"}`;
   $("all").checked = enabled.size === channels.length;
   $("all").indeterminate = enabled.size > 0 && enabled.size < channels.length;
   renderRecording();
@@ -1054,7 +1055,7 @@ function renderBandMap() {
       if (cell.dataset.state !== state) cell.dataset.state = state;
       const pressed = String(id === selected);
       if (cell.getAttribute("aria-pressed") !== pressed) cell.setAttribute("aria-pressed", pressed);
-      const label = `${(c.frequency_hz / 1e6).toFixed(5)} MHz ${c.label} · ${
+      const label = `${(c.frequency_hz / 1e6).toFixed(5)} MHz ${c.label}　${
         {
           untargeted: "受信対象外",
           error: "エラー",
@@ -1189,12 +1190,12 @@ function renderRecording() {
         : s.state === "recording" && !saved
           ? "通話を待っています"
           : [
-              `WAV ${s.files} 件 · ${(s.pcm_samples / 8000).toFixed(1)} 秒`,
+              `WAV ${s.files} 件　${(s.pcm_samples / 8000).toFixed(1)} 秒`,
               s.raw_frames ? `生フレーム ${s.raw_frames} 件` : "",
               s.data_messages ? `データ電文 ${s.data_messages} 件` : "",
             ]
               .filter(Boolean)
-              .join(" · ");
+              .join("　");
   $("recording-summary").textContent = summary;
   if (s.discarded) $("recording-output").hidden = true;
   else if (s.directory) {
@@ -1482,7 +1483,13 @@ function renderChannelStates() {
                 ? "探索"
                 : "準備";
     const tone =
-      c?.error && included ? "channel-error" : locked ? "locked" : "lost";
+      c?.error && included
+        ? "channel-error"
+        : label === "通話中"
+          ? "calling"
+          : locked
+            ? "locked"
+            : "lost";
     r.sync.textContent = r.simple.sync.textContent = label;
     r.sync.className = tone;
     r.simple.sync.className = `compact-state ${tone}`;
@@ -1529,11 +1536,11 @@ function select(id, manual = false) {
   const lines = c ? channelLines(c.id) : "";
   $("selected-label").textContent = c
     ? c.label +
-      (lines ? ` · ${lines}` : "") +
-      (note ? ` · ${note}` : "")
+      (lines ? `　${lines}` : "") +
+      (note ? `　${note}` : "")
     : "プリセットを読み込んでください";
   const summary = c
-    ? `${(c.frequency_hz / 1e6).toFixed(5)} MHz · ${c.label}`
+    ? `${(c.frequency_hz / 1e6).toFixed(5)} MHz　${c.label}`
     : "プリセットを読み込んでください";
   $("monitor-summary").textContent = summary;
   $("message-channel").textContent = summary;
@@ -1608,26 +1615,17 @@ function showMessages(messages) {
           {
             noPreset: "プリセットを読み込んでください",
             excluded: "この波は受信対象外です",
-            receiving: "データを待っています",
+            receiving: "受信待ち",
             finished: "この波の受信データはありません",
-            ready: "受信の準備ができています",
-          }[emptyKind],
-        ),
-        el(
-          "p",
-          {
-            noPreset:
-              "チャンネル一覧のプリセットファイル設定で、再読み込みまたはファイルの選択ができます。",
-            excluded:
-              "受信を停止し、一覧のチェックを入れると、この波も復号できます。",
-            receiving:
-              "RS / CRC を通過した旅客情報・列車登録などが届くと表示します。",
-            finished: "受信設定やデータ形式を確認し、受信を再開してください。",
-            ready:
-              "受信ソースを確認し、画面上部の「受信を開始」を選んでください。",
+            ready: "受信していません",
           }[emptyKind],
         ),
       );
+      const hint = {
+        noPreset: "チャンネル一覧のプリセットファイル設定で、再読み込みかファイルの選択をしてください。",
+        excluded: "受信を停止してから、一覧でこの波にチェックを入れてください。",
+      }[emptyKind];
+      if (hint) empty.append(el("p", hint));
       $("messages").replaceChildren(empty);
     }
     return;
@@ -1659,8 +1657,8 @@ function showMessages(messages) {
     const description = m.fields.find((f) =>
       ["Description", "NoticeText", "TrainNumber"].includes(f.field),
     )?.value;
-    entry.summary.textContent = `${kinds[m.kind] ?? m.kind} · ${m.identity}${description ? " · " + description.slice(0, 55) + (description.length > 55 ? "…" : "") : ""}`;
-    entry.meta.textContent = `${m.timestamp ? "電文日時 " + m.timestamp.replace("T", " ") : "受信位置 " + (m.last_bit / 9600).toFixed(2) + " 秒"} · ${item.receptions} 回受信`;
+    entry.summary.textContent = `${kinds[m.kind] ?? m.kind}　${m.identity}${description ? "　" + description.slice(0, 55) + (description.length > 55 ? "…" : "") : ""}`;
+    entry.meta.textContent = `${m.timestamp ? "電文日時 " + m.timestamp.replace("T", " ") : "受信位置 " + (m.last_bit / 9600).toFixed(2) + " 秒"}　${item.receptions} 回受信`;
   }
   for (const [key, entry] of messageNodes) {
     if (!retained.has(key)) {
@@ -1697,7 +1695,7 @@ function detail(s) {
     ? (row?.audio_drops ?? 0).toLocaleString()
     : "—";
   $("data-status").textContent = s
-    ? `有効 ${s.data.valid_frames} · 訂正 ${s.data.corrected_frames} · 電文拒否 ${s.data.rejected_messages}`
+    ? `有効 ${s.data.valid_frames}　訂正 ${s.data.corrected_frames}　電文拒否 ${s.data.rejected_messages}`
     : "";
   constellation(s?.constellation);
   // The compact view repeats the selected channel's figures.
@@ -1901,8 +1899,8 @@ function updateSource() {
     ? "USB 直結（内蔵ドライバー）"
     : tcp
     ? host && port
-      ? `RTL-TCP · ${host.includes(":") ? `[${host}]` : host}:${port}`
-      : "RTL-TCP · 接続先未設定"
+      ? `RTL-TCP　${host.includes(":") ? `[${host}]` : host}:${port}`
+      : "RTL-TCP　接続先未設定"
     : wave
       ? "IQ WAV ファイル"
       : "SoapySDR デバイス";
@@ -2011,7 +2009,7 @@ function applySimpleLayout(name) {
   }
   if (platform.build) {
     const version = document.querySelector(".about-metadata dd");
-    version.textContent = `${version.textContent} · ビルド ${platform.build.slice(0, 7)}`;
+    version.textContent = `${version.textContent}　ビルド ${platform.build.slice(0, 7)}`;
   }
   renderAbout();
   document.querySelector("footer > span").firstChild.textContent = `${name} `;
@@ -2279,7 +2277,7 @@ function updatePause() {
     : "更新を一時停止";
   $("pause-messages").setAttribute("aria-pressed", String(messagesPaused));
   $("message-scope").textContent = messagesPaused
-    ? "表示を一時停止中 · 受信と復号は継続"
+    ? "表示を一時停止中　受信と復号は継続"
     : "選択波の最新 128 件まで";
 }
 $("pause-messages").addEventListener("click", () => {
@@ -2295,19 +2293,19 @@ $("pause-messages").addEventListener("click", () => {
 // means hardly any signal reaches the dongle's output.
 function inputLevel(s) {
   const level = s.channels?.find((c) => c.status.iq_samples)?.status.input_dbfs;
-  return Number.isFinite(level) ? ` · 入力 ${level.toFixed(1)} dBFS` : "";
+  return Number.isFinite(level) ? `　入力 ${level.toFixed(1)} dBFS` : "";
 }
 // Automatic frequency correction, once the synchronised channels moved it.
 function frequencyCorrection(s) {
   const hz = Math.round(s.frequency_correction_hz ?? 0);
-  return hz ? ` · 周波数 自動補正 ${hz > 0 ? "+" : "−"}${Math.abs(hz)} Hz` : "";
+  return hz ? `　周波数 自動補正 ${hz > 0 ? "+" : "−"}${Math.abs(hz)} Hz` : "";
 }
 // Samples per second actually arriving; far from the setting means the
 // dongle is not running at the requested rate (or input is being lost).
 function measuredRate(s) {
   if (!s.input_rate || $("input-kind").value === "wave") return "";
   const off = Math.abs(s.input_rate / s.sample_rate - 1) > 0.05;
-  return ` · 実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : ""}`;
+  return `　実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : ""}`;
 }
 // Main page: calls in progress (with background recording and playback state)
 // and the latest recordings, playable in place.
@@ -2431,7 +2429,7 @@ async function poll() {
         $("state").classList.toggle("active", s.running);
         if (s.error) fail(s.error);
         $("capture-info").textContent = s.sample_rate
-          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz · ${s.sample_rate.toLocaleString()} S/s · ${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? ` · 自動再接続 ${s.reconnects} 回` : ""}${measuredRate(s)}${s.source_info ? ` · ${s.source_info}` : ""}${frequencyCorrection(s)}${inputLevel(s)}`
+          ? `${$("input-kind").value === "rtl_tcp" ? "要求中心" : "実効中心"} ${(s.center_hz / 1e6).toFixed(6)} MHz　${s.sample_rate.toLocaleString()} S/s　${$("input-kind").value === "rtl_tcp" ? "サーバー側欠落：通知なし" : "ソース欠落 " + s.source_overflows}${s.reconnects ? `　自動再接続 ${s.reconnects} 回` : ""}${measuredRate(s)}${s.source_info ? `　${s.source_info}` : ""}${frequencyCorrection(s)}${inputLevel(s)}`
           : s.running
             ? "接続中"
             : "未接続";
@@ -2544,7 +2542,7 @@ try {
     poll();
   } else {
     $("runtime-note").textContent =
-      "ブラウザプレビュー · 受信にはデスクトップアプリを起動してください";
+      "ブラウザプレビュー　受信にはデスクトップアプリを起動してください";
     $("runtime-note").hidden = false;
     $("scan").disabled = true;
     $("browse").disabled = true;

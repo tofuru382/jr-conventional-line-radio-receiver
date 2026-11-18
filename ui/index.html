@@ -36,8 +36,7 @@
       </div>
       <div class="session">
         <span id="state" class="badge" role="status">停止中</span
-        ><button id="start" class="primary" disabled>
-          <span aria-hidden="true">▶</span> 受信を開始</button
+        ><button id="start" class="primary" disabled>受信を開始</button
         ><button id="save-toggle" type="button" aria-pressed="false" disabled>
           保存オフ
         </button>
@@ -79,7 +78,7 @@
         </div>
         <dl class="quick-stats">
           <div>
-            <dt>同期（波）</dt>
+            <dt>同期</dt>
             <dd id="quick-locked">—</dd>
           </div>
           <div>
@@ -97,10 +96,10 @@
         </dl>
         <div class="quick-controls">
           <label class="check-label" for="quick-auto"
-            ><input id="quick-auto" type="checkbox" checked />通話を自動選択</label
+            ><input id="quick-auto" type="checkbox" checked />自動選択</label
           >
           <label class="check-label" for="quick-level"
-            ><input id="quick-level" type="checkbox" />音量をそろえる</label
+            ><input id="quick-level" type="checkbox" />音量補正</label
           >
           <label class="quick-volume" for="quick-volume"
             >音量<input id="quick-volume" type="range" min="0" max="100" value="70"
@@ -135,7 +134,7 @@
             ><bdi id="band-high">352.66875</bdi> <small>MHz</small>
           </p>
           <div id="band-map" class="band-map" role="group" aria-label="受信帯域の波（押すとその波を聴きます）"></div>
-          <p id="band-note">22 波 · 音声とデータを並列復号</p>
+          <p id="band-note">22 波　音声とデータを並列復号</p>
         </div>
         <dl class="totals">
           <div>
@@ -160,9 +159,9 @@
           </div>
         </dl>
       </section>
-      <section id="live-panel" class="card live-panel" aria-label="受信中の通話">
+      <section id="live-panel" class="card live-panel" aria-label="通話中の波">
         <div class="live-block">
-          <h2>受信中の通話</h2>
+          <h2>通話中の波</h2>
           <ul id="live-calls" class="live-calls"></ul>
           <p id="live-calls-empty" class="muted">受信していません</p>
         </div>
@@ -170,7 +169,7 @@
       <details id="source-panel" class="card source" open>
         <summary class="source-summary">
           <span class="source-heading">受信設定</span
-          ><span id="source-summary">RTL-TCP · 接続先未設定</span>
+          ><span id="source-summary">RTL-TCP　接続先未設定</span>
         </summary>
         <fieldset id="settings">
           <legend class="sr-only">受信設定</legend>
@@ -392,7 +391,7 @@
           <details id="channels-panel" class="card channels panel-disclosure">
             <summary id="channels-title" class="panel-summary">
               <h2>チャンネル一覧</h2>
-              <span id="channel-count" class="panel-summary-meta">22 波を選択 · 待機</span>
+              <span id="channel-count" class="panel-summary-meta">22 波を選択　待機</span>
             </summary>
             <div class="section-title">
               <label class="region" for="region"
@@ -403,7 +402,7 @@
             </div>
             <details id="preset-settings" class="preset-settings">
               <summary>
-                プリセットファイル · <span id="preset-source">組み込み</span>
+                プリセットファイル　<span id="preset-source">組み込み</span>
               </summary>
               <p id="preset-path" dir="auto" hidden></p>
               <div class="preset-actions">
@@ -507,7 +506,7 @@
                   type="checkbox"
                   checked
                   aria-describedby="selection-hint"
-                />通話を自動選択</label
+                />自動選択</label
               >
               <p id="selection-hint" role="status"></p>
             </div>
@@ -577,7 +576,7 @@
                 /><output id="volume-value" for="volume">70%</output></label
               >
               <label class="check-label level-choice" for="level"
-                ><input id="auto-level" type="checkbox" />音量を自動でそろえる</label
+                ><input id="auto-level" type="checkbox" />音量補正</label
               >
             </div>
             <details class="decoder-options">
@@ -600,7 +599,7 @@
             <span id="operation-state" class="badge" role="status">情報待ち</span>
           </div>
           <div id="operation-empty" class="empty compact">
-            <h3 id="operation-empty-title">線区別の情報を待っています</h3>
+            <h3 id="operation-empty-title">線区別の情報はまだありません</h3>
             <p id="operation-empty-hint">共用波を含めて受信を開始してください。</p>
             <a href="#channels-title">受信チャンネルを確認</a>
           </div>
@@ -721,7 +720,7 @@
           </section>
           <section class="route-preview" aria-labelledby="route-preview-title">
             <div class="route-preview-heading"><h3 id="route-preview-title">受信対象の確認</h3><button id="route-clear" type="button">選択を解除</button></div>
-            <p id="route-selected-count" class="route-selection-count" role="status">0 区間 · 0 波</p>
+            <p id="route-selected-count" class="route-selection-count" role="status">0 区間　0 波</p>
             <p id="route-chosen-empty" class="muted">選択した区間がここに表示されます。</p>
             <ul id="route-chosen" aria-label="選択した区間" role="list"></ul>
             <label class="check-label route-common-label" for="route-common"><input id="route-common" type="checkbox" aria-describedby="route-common-hint" />旅客一斉情報も受信</label>

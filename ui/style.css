@@ -1,42 +1,56 @@
+/* A professional radio's front panel: a moulded graphite body with printed
+   legends, a reflective LCD for the frequency, LEDs for state (green sync,
+   amber call, red error/recording) and hardware keys. The LCD is the one
+   bold element; everything around it stays plain. */
+@font-face {
+  font-family: "DSEG7";
+  src: url("fonts/DSEG7Classic-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-display: block;
+}
 :root {
   color-scheme: dark;
-  --slate-950: #0d141b;
-  --slate-900: #141e28;
-  --slate-850: #1a2734;
-  --slate-800: #223140;
-  --slate-700: #2d3e4c;
-  --slate-500: #71869a;
-  --slate-300: #acbecd;
-  --slate-100: #e5edf3;
-  --blue-300: #9bcaff;
-  --blue-950: #102d4a;
-  --mint-300: #72dfc1;
-  --mint-950: #17392f;
-  --red-200: #ffb7ab;
-  --red-950: #472b2b;
-  --amber-300: #ffbe5c;
-  --bg: var(--slate-950);
-  --surface: var(--slate-900);
-  --inset: var(--slate-950);
-  --surface-raised: var(--slate-850);
-  --control: var(--slate-800);
-  --line: var(--slate-700);
-  --control-border: var(--slate-500);
-  --text: var(--slate-100);
-  --muted: var(--slate-300);
-  --accent: var(--blue-300);
-  --on-accent: var(--blue-950);
-  --selected: var(--blue-950);
-  --success: var(--mint-300);
-  --success-bg: var(--mint-950);
-  --danger: var(--red-200);
-  --danger-bg: var(--red-950);
-  --focus: var(--blue-300);
-  --plot-grid: var(--slate-500);
-  --plot-signal: var(--mint-300);
-  --call: var(--amber-300);
-  --radius: 12px;
-  --radius-control: 6px;
+  --graphite-950: #1c1d1a;
+  --graphite-900: #242521;
+  --graphite-850: #2c2d28;
+  --graphite-800: #363731;
+  --graphite-700: #46473f;
+  --graphite-500: #888a7c;
+  --legend-300: #bdbcae;
+  --legend-100: #ecebe2;
+  --bezel: #10110e;
+  --lcd: #b4bd99;
+  --lcd-light: #c9d1ae;
+  --lcd-ink: #1b2113;
+  --olive-900: #343a2a;
+  --led-green: #74d874;
+  --led-green-off: #213021;
+  --led-amber: #ffb43a;
+  --led-red: #ff8a78;
+  --led-red-off: #3c221d;
+  --led-off: #3d3e37;
+  --bg: var(--graphite-950);
+  --surface: var(--graphite-900);
+  --inset: #151613;
+  --surface-raised: var(--graphite-850);
+  --control: var(--graphite-800);
+  --line: var(--graphite-700);
+  --control-border: var(--graphite-500);
+  --text: var(--legend-100);
+  --muted: var(--legend-300);
+  --accent: var(--lcd-light);
+  --on-accent: var(--lcd-ink);
+  --selected: var(--olive-900);
+  --success: var(--led-green);
+  --success-bg: var(--led-green-off);
+  --danger: var(--led-red);
+  --danger-bg: var(--led-red-off);
+  --focus: var(--lcd-light);
+  --plot-grid: var(--graphite-500);
+  --plot-signal: var(--lcd-light);
+  --call: var(--led-amber);
+  --radius: 4px;
+  --radius-control: 3px;
   --text-caption: 0.8125rem;
   --text-body: 0.875rem;
   --text-heading: 1.125rem;
@@ -169,9 +183,7 @@ small,
 .eyebrow {
   color: var(--muted);
   font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-weight: 500;
   margin-block-end: 4px;
 }
 .topbar {
@@ -246,7 +258,7 @@ main {
   margin-block-start: 6px;
 }
 .band-range {
-  font-family: ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 1.125rem;
   font-variant-numeric: tabular-nums;
 }
@@ -656,7 +668,7 @@ tr.selected {
 }
 .frequency {
   display: block;
-  font-family: ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 0.9375rem;
   letter-spacing: 0.01em;
   white-space: nowrap;
@@ -710,7 +722,7 @@ tr.selected {
   padding: 0 22px 22px;
 }
 .frequency-heading > p:first-child {
-  font-family: ui-monospace, monospace;
+  font-family: "DSEG7", ui-monospace, monospace;
   font-size: 2rem;
   font-variant-numeric: tabular-nums;
   line-height: 1.3;
@@ -1827,7 +1839,7 @@ button.stop {
 }
 
 /* Empty status and hint lines take no room. */
-:is(#selection-hint, #recording-summary, #data-status, #route-common-hint,
+:is(#selection-hint, #recording-summary, #data-status, #route-common-hint, #operation-empty-hint,
   #driver-hint, #recordings-status, #route-effect, .field-hint):empty {
   display: none;
 }
@@ -1835,9 +1847,9 @@ button.stop {
 /* Compact view: the essentials on one phone screen. */
 .quick {
   margin-block-start: 10px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 /* The sync lamp sits beside the frequency to keep the card short. */
 .quick-now {
@@ -1848,19 +1860,28 @@ button.stop {
 .quick-now > p {
   grid-column: 1 / -1;
 }
+/* Digits on their own line; the annunciator beside the channel name. */
 .quick-now > .quick-frequency {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+.quick-now > .quick-channel {
   grid-column: 1;
+  grid-row: 2;
 }
 .quick-now > .quick-sync {
   grid-column: 2;
-  grid-row: 1;
+  grid-row: 2;
   align-self: center;
+}
+.quick-now > .quick-lines {
+  grid-row: 3;
 }
 .quick p {
   margin: 0;
 }
 .quick-frequency {
-  font-family: ui-monospace, monospace;
+  font-family: "DSEG7", ui-monospace, monospace;
   font-size: 1.625rem;
   line-height: 1.15;
   font-weight: 650;
@@ -1964,7 +1985,27 @@ button.stop {
   gap: 8px;
 }
 .compact .topbar h1 {
-  font-size: 1rem;
+  font-size: 0.9375rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compact .brand {
+  gap: 10px;
+}
+.compact .brand > div {
+  min-width: 0;
+}
+/* The compact view is a phone's front panel: one column, also on a tablet. */
+.compact :is(.topbar, main) {
+  max-width: 600px;
+}
+.compact .topbar {
+  flex-direction: column;
+  align-items: stretch;
+}
+.compact .brand {
+  width: 100%;
 }
 /* The compact page fills the screen; the calls list takes what is left and
    scrolls inside, so the page itself does not scroll. */
@@ -1990,14 +2031,14 @@ button.stop {
 }
 .compact .live-panel {
   flex: 1 1 0;
-  min-height: 6rem;
+  min-height: 5rem;
   overflow-y: auto;
   align-content: start;
   margin-block: 10px 0;
   padding: 10px 14px;
 }
 .compact .mode-switch button {
-  padding-inline: 10px;
+  padding-inline: 9px;
 }
 /* Selected channel: DQPSK symbols on the left, its figures on the right. */
 .quick-scope {
@@ -2010,8 +2051,8 @@ button.stop {
 }
 #quick-constellation {
   display: block;
-  width: 120px;
-  height: 120px;
+  width: 112px;
+  height: 112px;
   background: var(--inset);
   border-radius: var(--radius-control);
 }
@@ -2020,7 +2061,7 @@ button.stop {
   gap: 1px;
   margin: 0;
   font-size: 0.75rem;
-  line-height: 1.25;
+  line-height: 1.2;
 }
 .quick-detail div {
   display: flex;
@@ -2118,8 +2159,322 @@ button.stop {
   display: flex;
   justify-content: space-between;
   margin-block-start: 3px;
-  font-family: ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   font-size: 0.6875rem;
   line-height: 1.2;
   color: var(--muted);
+}
+
+/* ===================================================================
+   Front panel. Later rules on purpose: they restyle the shared parts
+   above (keys, panels, lamps) into the radio's hardware vocabulary.
+   =================================================================== */
+
+/* Keys: a moulded key with a little travel, legends in the panel's ink. */
+button {
+  border: 1px solid var(--control-border);
+  border-block-end: 3px solid var(--bezel);
+  border-radius: var(--radius-control);
+  background: var(--control);
+  font-weight: 600;
+}
+button:active:not(:disabled) {
+  translate: 0 1px;
+  border-block-end-width: 2px;
+}
+button.primary {
+  background: var(--control);
+  color: var(--text);
+  border-color: var(--control-border);
+  border-block-end-color: var(--bezel);
+}
+
+/* LEDs on the keys and the state window: off, or lit with a short glow. */
+#start,
+#save-toggle,
+.mute-toggle,
+#state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+}
+#start::before,
+#save-toggle::before,
+.mute-toggle::before,
+#state::before {
+  /* An LED. */
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--led-off);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.35);
+}
+button.stop,
+.mute-toggle[aria-pressed="true"],
+#save-toggle[aria-pressed="true"],
+#save-toggle.saving {
+  color: var(--text);
+  background: var(--control);
+  border-color: var(--control-border);
+  border-block-end-color: var(--bezel);
+}
+#start.stop::before,
+.mute-toggle:not([aria-pressed="true"])::before,
+#state.active::before {
+  background: var(--led-green);
+  box-shadow: 0 0 6px rgb(116 216 116 / 0.7);
+}
+#save-toggle[aria-pressed="true"]::before {
+  background: #8a4136;
+}
+#save-toggle.saving::before {
+  background: var(--led-red);
+  box-shadow: 0 0 6px rgb(255 138 120 / 0.75);
+}
+.badge {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+}
+.badge.active {
+  background: transparent;
+  color: var(--text);
+}
+
+/* The view switch: two keys side by side; the chosen one is lit. */
+.mode-switch {
+  border: 0;
+  gap: 2px;
+  overflow: visible;
+}
+.mode-switch button,
+.mode-switch button + button {
+  border: 1px solid var(--control-border);
+  border-block-end: 3px solid var(--bezel);
+  border-radius: var(--radius-control);
+}
+.mode-switch button[aria-pressed="true"] {
+  background: var(--selected);
+  color: var(--accent);
+}
+
+/* Panels: flat moulded sections, separated by a line, no floating cards. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.topbar {
+  background: var(--surface);
+}
+
+/* The LCD: reflective glass in a dark bezel, 7-segment digits with the
+   unlit segments faintly visible, annunciators printed in ink. */
+.quick-now,
+.frequency-heading {
+  position: relative;
+  background: var(--lcd);
+  color: var(--lcd-ink);
+  border: 3px solid var(--bezel);
+  border-radius: var(--radius);
+  box-shadow: inset 0 2px 3px rgb(0 0 0 / 0.28);
+}
+.quick-now {
+  padding: 6px 12px 7px;
+}
+.quick-now :is(p, small, .quick-lines),
+.frequency-heading :is(p, small, .unit, #selected-label) {
+  color: var(--lcd-ink);
+}
+.quick-frequency,
+.frequency-heading > p:first-child {
+  position: relative;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.quick-frequency {
+  font-size: 1.75rem;
+}
+.quick-frequency bdi,
+.frequency-heading > p:first-child bdi {
+  position: relative;
+  font-family: "DSEG7", ui-monospace, monospace;
+}
+.quick-frequency bdi::before,
+.frequency-heading > p:first-child bdi::before {
+  content: "888.88888";
+  position: absolute;
+  inset-inline-start: 0;
+  color: rgb(27 33 19 / 0.09);
+  pointer-events: none;
+}
+.quick-frequency small,
+.frequency-heading > p:first-child .unit {
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin-inline-start: 4px;
+}
+.quick-frequency small {
+  font-family: "Noto Sans JP", system-ui, sans-serif;
+}
+.quick-channel {
+  font-weight: 700;
+}
+.quick-lines {
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+/* Annunciator: "通話中" reversed out of the ink, "同期中" boxed. */
+.quick-sync {
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  font-weight: 700;
+  color: rgb(27 33 19 / 0.45);
+}
+.quick-sync::before {
+  display: none;
+}
+.quick-sync.locked {
+  color: var(--lcd-ink);
+  border-color: var(--lcd-ink);
+}
+.quick-sync.calling {
+  color: var(--lcd);
+  background: var(--lcd-ink);
+  border-color: var(--lcd-ink);
+}
+
+/* LED bar graph of the band: one LED per channel at its frequency. */
+.band {
+  padding: 6px 8px 3px;
+  background: var(--bezel);
+  border-radius: var(--radius);
+}
+.band-cell::before {
+  background: var(--led-off);
+  border-radius: 1px;
+}
+.band-cell[data-state="locked"]::before {
+  background: var(--led-green);
+  box-shadow: 0 0 5px rgb(116 216 116 / 0.55);
+}
+.band-cell[data-state="calling"]::before {
+  background: var(--led-amber);
+  box-shadow: 0 0 6px rgb(255 180 58 / 0.6);
+}
+.band-cell[data-state="error"]::before {
+  background: var(--led-red);
+}
+.band-cell[data-state="untargeted"]::before {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--led-off);
+}
+.band-cell[aria-pressed="true"]::after {
+  background: var(--lcd-light);
+  border-radius: 1px;
+}
+.overview-intro .band-map {
+  padding: 6px 8px 4px;
+  background: var(--bezel);
+  border-radius: var(--radius);
+  height: auto;
+  min-height: 34px;
+}
+
+/* Meters: figures in a row, divided by panel lines rather than boxes. */
+.quick-stats {
+  gap: 0;
+  border-block: 1px solid var(--line);
+}
+.quick-stats div {
+  background: transparent;
+  border-radius: 0;
+  padding: 4px 8px;
+}
+.quick-stats div + div {
+  border-inline-start: 1px solid var(--line);
+}
+.quick-stats dd,
+.totals dd,
+.quick-detail dd {
+  font-variant-numeric: tabular-nums;
+}
+#quick-constellation,
+.monitor canvas {
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+
+/* Calls in progress: a list of lines with an amber call LED. */
+.live-calls {
+  gap: 0;
+}
+.live-call {
+  border: 0;
+  border-block-end: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  padding: 9px 4px;
+  font-weight: 400;
+}
+.live-call:active:not(:disabled) {
+  translate: none;
+}
+.live-call[aria-pressed="true"] {
+  background: var(--selected);
+}
+.live-call .lamp {
+  width: 8px;
+  height: 8px;
+  background: var(--led-amber);
+  box-shadow: 0 0 6px rgb(255 180 58 / 0.7);
+}
+.live-call .call-tags span {
+  border-radius: 2px;
+}
+.live-call .tag-rec {
+  color: var(--led-red);
+}
+.live-call .tag-play {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Notices (background reception) sit on the panel like a printed label. */
+.notice {
+  margin-block: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--led-amber);
+  border-radius: var(--radius);
+  background: var(--surface);
+  display: grid;
+  gap: 8px;
+}
+.notice h2 {
+  font-size: var(--text-body);
+  font-weight: 700;
+}
+.notice p {
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
+.notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* A call is amber wherever it shows: LED, band, channel list. */
+.calling {
+  color: var(--call);
 }

@@ -161,7 +161,7 @@ export class RoutePicker {
   preview() {
     this.selection = resolveRouteSelection(this.preset, this.chosen, this.get("route-common").checked);
     const { channels, routes, roles } = this.selection;
-    this.get("route-selected-count").textContent = `${routes.length} 区間 · ${channels.length} 波`;
+    this.get("route-selected-count").textContent = `${routes.length} 区間　${channels.length} 波`;
     this.get("route-chosen-empty").hidden = !!routes.length;
     this.get("route-clear").disabled = !routes.length;
     this.get("route-chosen").replaceChildren(...routes.map((r) => {
