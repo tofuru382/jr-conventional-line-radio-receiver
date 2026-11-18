@@ -43,9 +43,11 @@
   --text-body: 0.875rem;
   --text-heading: 1.125rem;
   --text-title: 1.125rem;
-  /* The monitor's lettering: a thin, square, fixed-pitch Gothic. M PLUS 1
-     Code ships with the app (ui/fonts), so every phone shows the same face. */
-  font-family: "M PLUS 1 Code Variable", "M PLUS 1 Code", "Noto Sans Mono CJK JP", monospace;
+  /* The monitor's lettering: a dot-matrix Gothic. DotGothic16 ships with
+     the app (ui/fonts), so every phone shows the same face. It has one
+     weight, so nothing is made bold or light by the browser. */
+  font-family: "DotGothic16", "Noto Sans Mono CJK JP", monospace;
+  font-synthesis: none;
   font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -2708,8 +2710,8 @@ html:not(.compact) .statusbar .quick-stats {
   letter-spacing: 0.1em;
 }
 
-/* Nothing is bold on the monitor: emphasis is a regular weight against the
-   light body text. */
+/* Nothing is bold on the monitor: the dot font has one weight, and the
+   rules above that ask for more weight are brought back to it. */
 h1,
 h2,
 h3,
@@ -2746,9 +2748,6 @@ th,
 .frequency-unit,
 .about-log {
   font-family: inherit;
-}
-.quick-frequency {
-  font-weight: 200;
 }
 .mode-switch button[aria-pressed="true"] {
   font-weight: 400;

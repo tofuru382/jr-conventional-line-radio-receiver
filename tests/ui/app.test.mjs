@@ -2559,5 +2559,5 @@ test("the version dialog credits the dongle drivers", async (t) => {
   assert.match($("about-driver").textContent, /rtlsdr-nusb（bastibl、Apache-2\.0）/);
   assert.match($("about-driver").textContent, /librtlsdr/);
   assert.match($("about-driver").textContent, /Rtl-sdr driver/);
-  assert.match($("about-font").textContent, /M PLUS 1 Code（M\+ FONTS Project、SIL OFL 1\.1）/);
+  assert.match($("about-font").textContent, /DotGothic16（Fontworks、SIL OFL 1\.1）/);
 });
