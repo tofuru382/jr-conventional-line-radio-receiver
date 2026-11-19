@@ -32,6 +32,9 @@ pub struct VoiceStream {
     output_count: usize,
     pub synthesized: u32,
     pub emitted: u32,
+    // The last received payload and how many slots in a row repeated it.
+    last_payload: Option<Payload>,
+    concealed: u32,
 }
 impl Default for VoiceStream {
     fn default() -> Self {
@@ -58,6 +61,8 @@ impl Default for VoiceStream {
             output_count: 0,
             synthesized: 0,
             emitted: 0,
+            last_payload: None,
+            concealed: 0,
         }
     }
 }
@@ -75,6 +80,33 @@ impl VoiceStream {
         Some(result)
     }
     pub fn push(&mut self, index: u32, payload: Payload) -> Result<(), ()> {
+        self.last_payload = Some(payload);
+        self.concealed = 0;
+        self.enqueue(index, payload)
+    }
+    /// A slot whose frame did not decode. Up to [`crate::plc::frames`] such
+    /// slots in a row repeat the last received payload (packet loss
+    /// concealment): the speech parameters carry on through a short fade
+    /// instead of the synthesis draining, resetting and fading in again.
+    /// Longer losses, or a slot that does not follow the last one, are
+    /// handled as a discontinuity as before.
+    pub fn conceal(&mut self, index: u32) -> Result<(), ()> {
+        let last = if self.count != 0 {
+            Some(self.queue[(self.head + self.count - 1) % self.queue.len()].index)
+        } else {
+            self.last_fed
+        };
+        match (self.last_payload, last) {
+            (Some(payload), Some(last))
+                if self.concealed < crate::plc::frames() && index as u64 == last as u64 + 1 =>
+            {
+                self.concealed += 1;
+                self.enqueue(index, payload)
+            }
+            _ => self.missing_frame(),
+        }
+    }
+    fn enqueue(&mut self, index: u32, payload: Payload) -> Result<(), ()> {
         if self.count == self.queue.len() {
             return Err(());
         }

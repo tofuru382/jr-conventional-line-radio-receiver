@@ -61,7 +61,10 @@ fn repeated_gaps_do_not_exhaust_the_input_queue() {
                 index += 1;
             }
             if missing_events {
+                // A reported missing slot right after a received frame is
+                // concealed (the last payload repeats), so it has output.
                 events.push((index, None));
+                expected.push(index);
             }
             index += 1;
         }

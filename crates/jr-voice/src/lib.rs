@@ -12,6 +12,24 @@ mod plan_target;
 mod planner;
 mod predictor;
 pub mod receiver;
+/// Packet loss concealment setting (see [`stream`]'s `conceal`).
+pub mod plc {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    /// Three: with crates/jr-voice/examples/plc_bench.rs, two and three are
+    /// equal for single losses and three is slightly better for pairs; both
+    /// beat silence and a decoder restart by far (lost frames 6–14 dB instead
+    /// of 40 dB log-spectral distance, the next frames 15–22 dB instead of
+    /// 8–11 dB segmental SNR).
+    static FRAMES: AtomicU32 = AtomicU32::new(3);
+    /// Undecodable frames in a row filled by repeating the last payload.
+    pub fn frames() -> u32 {
+        FRAMES.load(Ordering::Relaxed)
+    }
+    /// Evaluation only: change [`frames`] (process-wide).
+    pub fn set(frames: u32) {
+        FRAMES.store(frames, Ordering::Relaxed);
+    }
+}
 mod source_features;
 mod stream;
 mod synthesis;
