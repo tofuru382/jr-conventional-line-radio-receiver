@@ -855,6 +855,7 @@ pub fn parse_features(value: &str) -> Result<u32, String> {
             "flywheel" => FLYWHEEL,
             "weighted-distance" => WEIGHTED_DISTANCE,
             "conservative-erasures" => CONSERVATIVE_ERASURES,
+            "channelizer" => CHANNELIZER,
             other => return Err(format!("unknown feature {other}")),
         })
     };
@@ -880,7 +881,7 @@ pub fn parse_features(value: &str) -> Result<u32, String> {
 /// Payload bits 0..78 are carried by the convolutional code and CRC; the
 /// remaining 80 travel raw. Accepted frames are identified by the former.
 const UNPROTECTED_BITS: u64 = 80;
-fn protected_bits(payload: &[u8; 20]) -> [u8; 10] {
+pub fn protected_bits(payload: &[u8; 20]) -> [u8; 10] {
     let mut key = [0; 10];
     key.copy_from_slice(&payload[..10]);
     key[9] &= 0x3f;

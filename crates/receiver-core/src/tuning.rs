@@ -17,12 +17,17 @@ pub const WEIGHTED_DISTANCE: u32 = 1 << 4;
 /// Erase at most six data bytes (instead of eight) in soft RS retries.
 pub const CONSERVATIVE_ERASURES: u32 = 1 << 5;
 
+/// Split the input into channels with one shared polyphase filter bank
+/// (jr_conventional_dsp::channelizer) instead of a front end per channel.
+pub const CHANNELIZER: u32 = 1 << 6;
+
 pub const ALL: u32 = COMBINE
     | MARKER_TOLERANCE
     | SINGLE_FRAME_ACQUISITION
     | FLYWHEEL
     | WEIGHTED_DISTANCE
-    | CONSERVATIVE_ERASURES;
+    | CONSERVATIVE_ERASURES
+    | CHANNELIZER;
 
 static FLAGS: AtomicU32 = AtomicU32::new(ALL);
 

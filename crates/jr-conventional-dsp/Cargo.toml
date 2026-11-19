@@ -6,3 +6,6 @@ publish = false
 
 [lib]
 crate-type = ["rlib"]
+
+[dependencies]
+rustfft = "6.2"

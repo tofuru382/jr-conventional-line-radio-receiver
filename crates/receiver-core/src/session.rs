@@ -759,11 +759,30 @@ fn run(
     let total = source.samples();
     // Construct every pipeline before starting threads: no partial receiver on invalid input.
     let queue_capacity = queue_capacity(&config.input);
+    // One polyphase filter bank splits the input for every channel, which
+    // then works at about 24 kS/s; without it (or below 96 kS/s) each
+    // channel mixes and filters the whole input itself.
+    let mut channelizer = crate::tuning::on(crate::tuning::CHANNELIZER)
+        .then(|| jr_conventional_dsp::channelizer::Channelizer::new(rate))
+        .flatten();
+    // Each pipeline's input rate and centre, and its channelizer bin.
+    let mut placements = Vec::new();
     let pipelines = config
         .channels
         .into_iter()
-        .map(|c| Pipeline::new(c, rate, center))
+        .map(|c| {
+            let placement = match channelizer.as_mut() {
+                Some(bank) => {
+                    let p = bank.place(c.frequency_hz - center);
+                    (p.rate, c.frequency_hz - p.residual_hz, Some(p.bin))
+                }
+                None => (rate, center, None),
+            };
+            placements.push(placement);
+            Pipeline::new(c, placement.0, placement.1)
+        })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut bands: Vec<(usize, Vec<Complex32>)> = Vec::new();
     let mut senders = Vec::new();
     let mut handles = Vec::new();
     // Automatic frequency correction (f64 bits, Hz), set by this thread from
@@ -777,8 +796,8 @@ fn run(
         let (tx, rx) = mpsc::sync_channel::<Block>(queue_capacity);
         let worker = Worker {
             index: channel_index,
-            rate,
-            center,
+            rate: placements[channel_index].0,
+            center: placements[channel_index].1,
             cancel: stop.clone(),
             recording: recorder.clone(),
             monitor: monitor.clone(),
@@ -830,6 +849,9 @@ fn run(
                 Some(Read::SamplesAfterGap(n)) => {
                     window = (Instant::now(), 0);
                     sequence += 1;
+                    if let Some(bank) = channelizer.as_mut() {
+                        bank.reset();
+                    }
                     crate::lock(shared).overflows += 1;
                     Some(Read::Samples(n))
                 }
@@ -848,6 +870,9 @@ fn run(
                 Some(Read::Discontinuity) => {
                     window = (Instant::now(), 0);
                     sequence += 1;
+                    if let Some(bank) = channelizer.as_mut() {
+                        bank.reset();
+                    }
                     crate::lock(shared).overflows += 1;
                     continue;
                 }
@@ -861,6 +886,9 @@ fn run(
                     {
                         samples += n as u64;
                         sequence += 1;
+                        if let Some(bank) = channelizer.as_mut() {
+                            bank.reset();
+                        }
                         crate::lock(shared).invalid_blocks += 1;
                         continue;
                     }
@@ -922,16 +950,37 @@ fn run(
                         window = (Instant::now(), 0);
                     }
                     let iq: Arc<[Complex32]> = Arc::from(&buf[..n]);
-                    let info = crate::pipeline::BlockInfo {
+                    let mut info = crate::pipeline::BlockInfo {
                         dbfs: Some(crate::pipeline::block_dbfs(&iq)),
                         captured: received.checked_sub(Duration::from_secs_f64(n as f64 / rate)),
+                        input_samples: None,
                     };
+                    // Each bin's samples, shared by the channels in it, and
+                    // where they start at the bins' rate.
+                    let mut narrow: Vec<(usize, Arc<[Complex32]>)> = Vec::new();
+                    let mut narrow_start = 0;
+                    if let Some(bank) = channelizer.as_mut() {
+                        for (_, out) in &mut bands {
+                            out.clear();
+                        }
+                        bank.process(&buf[..n], &mut bands);
+                        narrow = bands.iter().map(|(k, v)| (*k, Arc::from(&v[..]))).collect();
+                        narrow_start = (samples - n as u64) / bank.decimation() as u64;
+                        info.input_samples = Some(n as u64);
+                    }
                     for (i, slot) in senders.iter_mut().enumerate() {
                         let Some(tx) = slot else { continue };
+                        let (start_sample, iq) = match placements[i].2 {
+                            Some(bin) => (
+                                narrow_start,
+                                narrow.iter().find(|(k, _)| *k == bin).unwrap().1.clone(),
+                            ),
+                            None => (samples - n as u64, iq.clone()),
+                        };
                         let block = Block {
                             sequence,
-                            start_sample: samples - n as u64,
-                            iq: iq.clone(),
+                            start_sample,
+                            iq,
                             info,
                         };
                         let gone = if blocking {

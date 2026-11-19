@@ -39,6 +39,23 @@ pub enum Soft {
     Min = 2,
 }
 static SOFT: AtomicU32 = AtomicU32::new(Soft::Sova as u32);
+/// How the channelizer computes its bins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Bins {
+    /// A dot product per bin in use.
+    Direct = 0,
+    /// One FFT over all bins: as fast with a single bin in use and up to
+    /// five times faster with 22 (jr-channelizer-bench).
+    Fft = 1,
+}
+static BINS: AtomicU32 = AtomicU32::new(Bins::Fft as u32);
+pub fn bins() -> Bins {
+    match BINS.load(Ordering::Relaxed) {
+        0 => Bins::Direct,
+        _ => Bins::Fft,
+    }
+}
 pub fn soft() -> Soft {
     match SOFT.load(Ordering::Relaxed) {
         1 => Soft::Sova,
@@ -81,6 +98,8 @@ pub fn parse(settings: &str) -> Result<(), String> {
             ("soft", "differential") => SOFT.store(Soft::Differential as u32, Ordering::Relaxed),
             ("soft", "sova") => SOFT.store(Soft::Sova as u32, Ordering::Relaxed),
             ("soft", "min") => SOFT.store(Soft::Min as u32, Ordering::Relaxed),
+            ("bins", "direct") => BINS.store(Bins::Direct as u32, Ordering::Relaxed),
+            ("bins", "fft") => BINS.store(Bins::Fft as u32, Ordering::Relaxed),
             _ => return Err(format!("unknown DSP setting {item}")),
         }
     }

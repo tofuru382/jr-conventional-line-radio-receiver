@@ -9,6 +9,7 @@ mod sequence;
 mod signal;
 use dsp::Demodulator;
 pub use dsp::{Complex32, Snapshot};
+pub mod channelizer;
 pub mod receiver;
 pub mod tuning;
 use std::ffi::c_void;

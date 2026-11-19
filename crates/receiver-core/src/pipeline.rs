@@ -92,6 +92,9 @@ pub struct BlockInfo {
     pub dbfs: Option<f64>,
     /// When the block's first sample was received.
     pub captured: Option<std::time::SystemTime>,
+    /// Input samples the block was made from, when a channelizer decimated
+    /// it: `iq_samples` keeps counting input samples.
+    pub input_samples: Option<u64>,
 }
 /// Frame decoded once and reused by the merger, the voice decoder, the data
 /// decoder and the recording.
@@ -156,7 +159,9 @@ pub struct Pipeline {
     alternate_until: u64,
     // The session checked the IQ for non-finite samples (see trust_input).
     input_checked: bool,
-    // iq_samples when the correction last changed.
+    // Samples processed (at this pipeline's rate), and that count when the
+    // correction last changed.
+    processed: u64,
     retuned_at: u64,
     // Capture time of the current segment's sample 0, when known.
     segment_time: Option<std::time::SystemTime>,
@@ -191,6 +196,7 @@ impl Pipeline {
             segment_samples: 0,
             alternate_until: 0,
             input_checked: false,
+            processed: 0,
             retuned_at: 0,
             segment_time: None,
             history_revision: 0,
@@ -226,7 +232,7 @@ impl Pipeline {
         self.dsp
             .retune(self.rate, self.config.frequency_hz - self.center + tuning)?;
         self.tuning = tuning;
-        self.retuned_at = self.status.iq_samples;
+        self.retuned_at = self.processed;
         self.status.applied_correction_hz = tuning;
         self.status.correction_settled = false;
         Ok(())
@@ -281,7 +287,8 @@ impl Pipeline {
                 std::time::Duration::from_secs_f64(self.segment_samples as f64 / self.rate);
             self.segment_time = captured.checked_sub(before);
         }
-        self.status.iq_samples += iq.len() as u64;
+        self.status.iq_samples += info.input_samples.unwrap_or(iq.len() as u64);
+        self.processed += iq.len() as u64;
         // The alternate detector costs twice the primary one; run it only
         // around signals (see `alternate_until`).
         self.dsp
@@ -300,7 +307,7 @@ impl Pipeline {
         // The carrier loop follows a correction step within a few hundred
         // symbols; half a second leaves a wide margin.
         if !self.status.correction_settled
-            && self.status.iq_samples.saturating_sub(self.retuned_at) as f64 >= 0.5 * self.rate
+            && self.processed.saturating_sub(self.retuned_at) as f64 >= 0.5 * self.rate
         {
             self.status.correction_settled = true;
         }
