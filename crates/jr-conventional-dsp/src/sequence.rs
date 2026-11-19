@@ -33,6 +33,10 @@ const LEVEL: f32 = std::f32::consts::FRAC_1_SQRT_2;
 // Bit reliabilities saturate here; a factor of SOFT_SCALE maps the estimated
 // per-bit SNR onto 0..=255 so that fades and noise rank below clean symbols.
 const SOFT_SCALE: f32 = 32.0;
+/// Reliability per unit of cost margin over the noise power (SOVA output).
+/// Chosen with the synthetic benchmark (crates/demod-eval): 8 to 24 decode
+/// data alike; voice is best around 16.
+const SOVA_SCALE: f32 = 16.0;
 // Smoothing for the residual (noise) power that normalizes reliabilities.
 const NOISE_SMOOTHING: f32 = 0.02;
 const SYMBOLS: [Complex32; 4] = [
@@ -63,7 +67,13 @@ pub struct Sequence {
     // and double-buffered so survivor updates swap rather than copy.
     drift: Box<DriftState>,
     drift_next: Box<DriftState>,
+    // One inverse correlation for every survivor (Rls::Shared).
+    shared: Box<Inverse8>,
     history: [[u8; STATES]; DEPTH],
+    // Per step and state: the cost margin of the survivor over the best
+    // competing branch, and that competitor's parent (for SOVA output).
+    deltas: Box<[[f32; STATES]; DEPTH]>,
+    rivals: Box<[[u8; STATES]; DEPTH]>,
     write: usize,
     filled: usize,
     previous: Option<usize>,
@@ -86,7 +96,10 @@ impl Default for Sequence {
             tracking: Tracking::Lms,
             drift: DriftState::boxed(),
             drift_next: DriftState::boxed(),
+            shared: Box::new(identity8()),
             history: [[0; STATES]; DEPTH],
+            deltas: Box::new([[0.0; STATES]; DEPTH]),
+            rivals: Box::new([[0; STATES]; DEPTH]),
             write: 0,
             filled: 0,
             previous: None,
@@ -136,10 +149,17 @@ fn cmul(a: Complex32, b: Complex32) -> Complex32 {
 // Matrix updates index rows and columns explicitly.
 #[allow(clippy::needless_range_loop)]
 fn drift_predict(h: &mut [Complex32; 4], d: &[Complex32; 4], p: &mut Inverse8) {
+    drift_advance(h, d);
+    covariance_predict(p);
+}
+fn drift_advance(h: &mut [Complex32; 4], d: &[Complex32; 4]) {
     for (tap, step) in h.iter_mut().zip(d) {
         tap.real += step.real;
         tap.imaginary += step.imaginary;
     }
+}
+#[allow(clippy::needless_range_loop)]
+fn covariance_predict(p: &mut Inverse8) {
     // Rows: top += bottom; then columns: left += right.
     for i in 0..4 {
         for j in 0..8 {
@@ -166,6 +186,16 @@ fn drift_update(
     u: &[Complex32; 4],
     error: Complex32,
 ) {
+    let Some(gain) = rls_gain(p, u) else {
+        *p = identity8();
+        return;
+    };
+    apply_gain(h, d, &gain, error);
+    covariance_update(p, u, &gain);
+}
+/// The RLS gain P [u; 0] / (lambda + u^H P u), or `None` when degenerate.
+#[allow(clippy::needless_range_loop)]
+fn rls_gain(p: &Inverse8, u: &[Complex32; 4]) -> Option<[Complex32; 8]> {
     let conj = |c: Complex32| Complex32 {
         real: c.real,
         imaginary: -c.imaginary,
@@ -183,13 +213,19 @@ fn drift_update(
         denominator += cmul(u[j], pi[j]).real;
     }
     if !denominator.is_finite() || denominator <= 1e-6 {
-        *p = identity8();
-        return;
+        return None;
     }
-    let gain = pi.map(|v| Complex32 {
+    Some(pi.map(|v| Complex32 {
         real: v.real / denominator,
         imaginary: v.imaginary / denominator,
-    });
+    }))
+}
+fn apply_gain(
+    h: &mut [Complex32; 4],
+    d: &mut [Complex32; 4],
+    gain: &[Complex32; 8],
+    error: Complex32,
+) {
     for i in 0..4 {
         let t = cmul(gain[i], error);
         h[i].real += t.real;
@@ -198,6 +234,10 @@ fn drift_update(
         d[i].real += t.real;
         d[i].imaginary += t.imaginary;
     }
+}
+/// P = (P - gain u^T P) / lambda, kept Hermitian and bounded.
+#[allow(clippy::needless_range_loop)]
+fn covariance_update(p: &mut Inverse8, u: &[Complex32; 4], gain: &[Complex32; 8]) {
     let mut row = [Complex32::default(); 8];
     for (j, r) in row.iter_mut().enumerate() {
         for i in 0..4 {
@@ -253,8 +293,49 @@ impl Sequence {
             copy.tracking = tracking;
             copy.drift = DriftState::boxed();
             copy.drift_next = DriftState::boxed();
+            copy.shared = Box::new(identity8());
         }
         copy
+    }
+    /// Soft output of the traced-back (oldest) decision, by the soft-output
+    /// Viterbi algorithm: for each bit, the smallest cost margin at which a
+    /// competing path merging into the survivor path would have decided that
+    /// bit the other way, scaled by the residual noise power (a log-likelihood
+    /// ratio estimate). Bits no competitor disagrees with saturate.
+    // Trellis steps and survivor paths index the same ring explicitly.
+    #[allow(clippy::needless_range_loop)]
+    fn sova(&self, best: usize) -> [u8; 2] {
+        let newest = (self.write + DEPTH - 1) % DEPTH;
+        let index = |back: usize| (newest + DEPTH - back) % DEPTH;
+        let mut path = [0usize; DEPTH];
+        path[0] = best;
+        for k in 1..DEPTH {
+            path[k] = self.history[index(k - 1)][path[k - 1]] as usize;
+        }
+        let label = |state: usize| [0u8, 1, 3, 2][(state % 4 + 4 - (state / 4) % 4) % 4];
+        let decided = label(path[DEPTH - 1]);
+        let mut margin = [f32::INFINITY; 2];
+        for k in 0..DEPTH - 1 {
+            let at = index(k);
+            let delta = self.deltas[at][path[k]];
+            if !delta.is_finite() || delta >= margin[0].max(margin[1]) {
+                continue;
+            }
+            // The competitor's state one step before the merge, then back to
+            // the oldest step along its own survivors.
+            let mut state = self.rivals[at][path[k]] as usize;
+            for hop in 0..DEPTH - 2 - k {
+                state = self.history[index(k + 1 + hop)][state] as usize;
+            }
+            let other = label(state);
+            for (bit, m) in margin.iter_mut().enumerate() {
+                if (other ^ decided) >> (1 - bit) & 1 == 1 {
+                    *m = m.min(delta);
+                }
+            }
+        }
+        let scale = SOVA_SCALE / self.noise.max(1e-4);
+        margin.map(|m| (m * scale).clamp(0.0, 255.0) as u8)
     }
     pub fn new(tracking: Tracking) -> Self {
         Self {
@@ -279,17 +360,28 @@ impl Sequence {
         reliable: bool,
     ) -> (Option<(u8, [u8; 2])>, f32, f32) {
         let drifting = self.tracking == Tracking::Drift;
+        let shared = crate::tuning::rls() == crate::tuning::Rls::Shared;
         if drifting && reliable {
-            for state in 0..STATES {
-                let d = self.drift.drift[state];
-                drift_predict(
-                    &mut self.channels[state],
-                    &d,
-                    &mut self.drift.inverse[state],
-                );
+            if shared {
+                for state in 0..STATES {
+                    let d = self.drift.drift[state];
+                    drift_advance(&mut self.channels[state], &d);
+                }
+                covariance_predict(&mut self.shared);
+            } else {
+                for state in 0..STATES {
+                    let d = self.drift.drift[state];
+                    drift_predict(
+                        &mut self.channels[state],
+                        &d,
+                        &mut self.drift.inverse[state],
+                    );
+                }
             }
         }
         let mut costs = [f32::INFINITY; STATES];
+        let mut seconds = [f32::INFINITY; STATES];
+        let mut rivals = [0u8; STATES];
         let mut parents = [0; STATES];
         let mut predictions = [Complex32::default(); STATES];
         for prior in 0..STATES {
@@ -317,9 +409,14 @@ impl Sequence {
                 let cost = self.costs[prior] + error;
                 let state = current + 4 * (prior % 16);
                 if cost < costs[state] {
+                    seconds[state] = costs[state];
+                    rivals[state] = parents[state];
                     costs[state] = cost;
                     parents[state] = prior as u8;
                     predictions[state] = prediction;
+                } else if cost < seconds[state] {
+                    seconds[state] = cost;
+                    rivals[state] = prior as u8;
                 }
             }
         }
@@ -423,9 +520,22 @@ impl Sequence {
             channels[state] = self.channels[prior];
             if drifting {
                 self.drift_next.drift[state] = self.drift.drift[prior];
-                self.drift_next.inverse[state] = self.drift.inverse[prior];
+                if !shared {
+                    self.drift_next.inverse[state] = self.drift.inverse[prior];
+                }
             }
-            if reliable && drifting {
+            if reliable && drifting && shared {
+                // Each survivor's own gain from the common correlation; the
+                // correlation itself is updated once, below.
+                if let Some(gain) = rls_gain(&self.shared, &symbols) {
+                    apply_gain(
+                        &mut channels[state],
+                        &mut self.drift_next.drift[state],
+                        &gain,
+                        error,
+                    );
+                }
+            } else if reliable && drifting {
                 let next = &mut *self.drift_next;
                 drift_update(
                     &mut channels[state],
@@ -453,12 +563,29 @@ impl Sequence {
             }
         }
         self.channels = channels;
+        if drifting && reliable && shared {
+            let prior = parents[best] as usize;
+            let u = [
+                SYMBOLS[best % 4],
+                SYMBOLS[prior % 4],
+                SYMBOLS[(prior / 4) % 4],
+                SYMBOLS[prior / 16],
+            ];
+            match rls_gain(&self.shared, &u) {
+                Some(gain) => covariance_update(&mut self.shared, &u, &gain),
+                None => *self.shared = identity8(),
+            }
+        }
         if drifting {
             std::mem::swap(&mut self.drift, &mut self.drift_next);
         }
         // Common-offset removal bounds accumulated costs for an unlimited stream.
         self.costs = costs.map(|value| value - costs[best]);
         self.history[self.write] = parents;
+        for state in 0..STATES {
+            self.deltas[self.write][state] = seconds[state] - costs[state];
+        }
+        self.rivals[self.write] = rivals;
         self.soft[self.write] = step_soft;
         self.write = (self.write + 1) % DEPTH;
         self.filled = (self.filled + 1).min(DEPTH);
@@ -473,7 +600,7 @@ impl Sequence {
                 .previous
                 .map_or(0, |last| [0, 1, 3, 2][(current + 4 - last) % 4]);
             // The traced-back step is the oldest in the ring: index `write`.
-            let soft = match (self.previous, self.soft[self.write]) {
+            let differential = match (self.previous, self.soft[self.write]) {
                 (Some(_), Some((signs, reliabilities))) => {
                     let mut out = [0u8; 2];
                     for (bit, out) in out.iter_mut().enumerate() {
@@ -485,6 +612,20 @@ impl Sequence {
                     out
                 }
                 _ => [0, 0],
+            };
+            let soft = match crate::tuning::soft() {
+                crate::tuning::Soft::Differential => differential,
+                mode => {
+                    let sova = match self.previous {
+                        Some(_) => self.sova(best),
+                        None => [0, 0],
+                    };
+                    if mode == crate::tuning::Soft::Sova {
+                        sova
+                    } else {
+                        [differential[0].min(sova[0]), differential[1].min(sova[1])]
+                    }
+                }
             };
             output = Some((dibit, soft));
             self.previous = Some(current);

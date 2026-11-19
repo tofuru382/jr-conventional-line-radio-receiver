@@ -289,12 +289,19 @@ pub(crate) fn encode(payload: &[u8; 20], alternate: bool) -> [u8; 48] {
 /// requires CRC-8 over the protected payload and the re-encoded tail
 /// (CRC-16 and Reed–Solomon parity, 64 bits) to match the received tail.
 const SOFT_DISTANCE: u16 = 24;
-/// With [`crate::tuning::WEIGHTED_DISTANCE`]: more disagreeing bits are
-/// allowed, but their summed reliabilities may not exceed
-/// [`SOFT_WEIGHT_LIMIT`]. In the synthetic benchmark (crates/demod-eval)
-/// correctly decoded frames stay below about 600; the limit keeps a factor
-/// of 2.5 above that and rejects candidates contradicted by reliable bits.
-const SOFT_DISTANCE_WEIGHTED: u16 = 32;
+/// With [`crate::tuning::WEIGHTED_DISTANCE`]: at most this many disagreeing
+/// bits, whose summed reliabilities may not exceed [`SOFT_WEIGHT_LIMIT`]
+/// (correct frames stay below about 1450 in the synthetic benchmark).
+///
+/// Beyond the convolutional code, a soft-decoded voice frame is checked only
+/// by its CRC-8 (the tail CRC-16 and Reed–Solomon parity cover just the last
+/// bytes), so a wrong path through a deep fade passes 1 time in 256. With
+/// SOVA reliabilities, 30 seeds of four fading conditions in crates/demod-eval
+/// (about 30,000 frames) accepted 8 frames never sent at 32 bits, 8 at 24 and
+/// 4 at 20; the previous receiver accepted 1. Twenty keeps nearly all of
+/// SOVA's gain (2 to 10 points more frames than before, depending on the
+/// channel) at about one false 40 ms frame per 7,500 in weak fading signals.
+const SOFT_DISTANCE_WEIGHTED: u16 = 20;
 const SOFT_WEIGHT_LIMIT: u32 = 1500;
 
 /// [`decode`], then, if that fails and per-bit reliabilities are available,
