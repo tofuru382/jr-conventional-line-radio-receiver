@@ -297,6 +297,7 @@ impl ClockRecovery {
 // time-varying simulcast ISI) see the same matched-filter output; each loop
 // follows its own channel estimate. Both decision streams leave at the same
 // latency and the frame decoders use whichever passes their checks.
+#[derive(Clone)]
 struct Carrier {
     phase: f64,
     frequency: f64,
@@ -435,6 +436,8 @@ pub struct Demodulator {
     step_imaginary: f64,
     renormalize: usize,
     pub failed: bool,
+    alternate_wanted: bool,
+    alternate_active: bool,
 }
 
 #[repr(C)]
@@ -460,6 +463,8 @@ impl Demodulator {
             step_imaginary: angle.sin(),
             renormalize: 0,
             failed: false,
+            alternate_wanted: false,
+            alternate_active: false,
         }
     }
 
@@ -474,9 +479,37 @@ impl Demodulator {
 
     /// Also run the alternate (drift RLS) detector; see [`Self::process_dual`].
     pub fn enable_alternate(&mut self) {
+        self.alternate_wanted = true;
         if self.symbols.alternate.is_none() {
             self.symbols.alternate = Some(Carrier::new(Tracking::Drift));
         }
+        self.alternate_active = true;
+    }
+
+    /// With [`crate::tuning::Alternate::Gated`], run the enabled alternate
+    /// detector only while `active` (the caller sees a signal). While idle,
+    /// the alternate stream repeats the primary one, which keeps both on the
+    /// same symbols; on resuming, the alternate detector starts as a copy of
+    /// the primary one (its survivors and channel estimates), so it needs no
+    /// training and its decisions stay aligned.
+    pub fn set_alternate_active(&mut self, active: bool) {
+        if !self.alternate_wanted
+            || crate::tuning::alternate() == crate::tuning::Alternate::Always
+            || active == self.alternate_active
+        {
+            return;
+        }
+        self.alternate_active = active;
+        self.symbols.alternate = active.then(|| {
+            let mut copy = self.symbols.carrier.clone();
+            copy.sequence = copy.sequence.retracked(Tracking::Drift);
+            copy
+        });
+    }
+
+    /// Whether the alternate detector currently runs.
+    pub fn alternate_running(&self) -> bool {
+        self.symbols.alternate.is_some()
     }
 
     pub fn process(&mut self, input: &[Complex32], output: &mut [u8]) -> usize {

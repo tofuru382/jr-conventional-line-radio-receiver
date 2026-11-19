@@ -12,6 +12,7 @@ pub mod session;
 pub mod source;
 #[cfg(feature = "synthesis")]
 pub mod synthesis;
+pub mod tuning;
 #[cfg(feature = "usb")]
 pub mod usb;
 pub mod voice_frame;

@@ -1203,6 +1203,9 @@ mod tests {
                     },
                     corrected_bits: None,
                     messages: vec![message],
+                    speech: None,
+                    data: None,
+                    detector: Default::default(),
                 },
             })
             .unwrap();
@@ -1248,6 +1251,9 @@ mod tests {
                     },
                     corrected_bits: None,
                     messages: vec![],
+                    speech: None,
+                    data: None,
+                    detector: Default::default(),
                 },
             })
             .unwrap();

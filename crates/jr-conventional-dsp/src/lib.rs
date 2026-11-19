@@ -10,6 +10,7 @@ mod signal;
 use dsp::Demodulator;
 pub use dsp::{Complex32, Snapshot};
 pub mod receiver;
+pub mod tuning;
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 

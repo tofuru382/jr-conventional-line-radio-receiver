@@ -54,6 +54,7 @@ const SYMBOLS: [Complex32; 4] = [
     },
 ];
 
+#[derive(Clone)]
 pub struct Sequence {
     costs: [f32; STATES],
     channels: [[Complex32; 4]; STATES],
@@ -243,6 +244,18 @@ pub enum Tracking {
 }
 
 impl Sequence {
+    /// This detector's state with `tracking` from now on: survivors, channel
+    /// estimates and traceback are kept, so a copy of a running detector
+    /// emits decisions on the same symbols at once; drift starts at rest.
+    pub fn retracked(&self, tracking: Tracking) -> Self {
+        let mut copy = self.clone();
+        if tracking != self.tracking {
+            copy.tracking = tracking;
+            copy.drift = DriftState::boxed();
+            copy.drift_next = DriftState::boxed();
+        }
+        copy
+    }
     pub fn new(tracking: Tracking) -> Self {
         Self {
             tracking,

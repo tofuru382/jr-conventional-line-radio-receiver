@@ -1,12 +1,18 @@
+pub use crate::frame::Detector;
 use crate::{
     data::{Decoder, Format, Message, OperationReception, Stats},
-    frame::{Frame, Merger, Synchronizer},
+    frame::{Decodes, Frame, Merger, Synchronizer},
     voice_frame, Complex32,
 };
 use jr_conventional_dsp::receiver::Dsp;
 use jr_conventional_voice::receiver::Voice;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+
+/// Seconds the alternate detector keeps running after the last frame lock:
+/// a call's pauses and fades are shorter, idle channels pay for the primary
+/// detector alone.
+const ALTERNATE_HOLD_SECONDS: f64 = 3.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelConfig {
@@ -41,6 +47,10 @@ pub struct Status {
     /// Frames taken from the alternate (fast-tracking) detector because only
     /// it decoded at that position.
     pub alternate_frames: u64,
+    /// Frames that decoded only after combining both detectors bit by bit.
+    pub combined_frames: u64,
+    /// Whether the alternate detector runs (it pauses on idle channels).
+    pub alternate_running: bool,
     pub carrier_locked: bool,
     pub frequency_error_hz: f64,
     pub evm_percent: f64,
@@ -57,6 +67,52 @@ pub struct FrameEvent {
     pub frame: Frame,
     pub corrected_bits: Option<u16>,
     pub messages: Vec<Message>,
+    /// The accepted CELP payload, when the frame decoded as voice.
+    pub speech: Option<[u8; 20]>,
+    /// The 28 information bytes, when the frame decoded as data.
+    pub data: Option<[u8; 28]>,
+    /// Which detector's decisions the frame was taken from.
+    pub detector: Detector,
+}
+/// Frame decoded once and reused by the merger, the voice decoder, the data
+/// decoder and the recording.
+#[derive(Default)]
+pub struct Decoded {
+    pub speech: Option<voice_frame::Speech>,
+    pub data: Option<([u8; 28], usize)>,
+}
+impl Decodes for Decoded {
+    fn ok(&self) -> bool {
+        self.speech.is_some() || self.data.is_some()
+    }
+}
+impl Decoded {
+    /// Cheap hard-decision decoders first, so a clean frame of either kind
+    /// never pays for the other kind's soft-decision retries.
+    pub fn of(frame: &Frame) -> Self {
+        if let Some(speech) = voice_frame::decode(&frame.received) {
+            return Self {
+                speech: Some(speech),
+                data: None,
+            };
+        }
+        if let Some(data) = crate::data::decode_frame(&frame.received) {
+            return Self {
+                speech: None,
+                data: Some(data),
+            };
+        }
+        if let Some(speech) = voice_frame::decode_soft_only(&frame.received, &frame.confidence) {
+            return Self {
+                speech: Some(speech),
+                data: None,
+            };
+        }
+        Self {
+            speech: None,
+            data: crate::data::decode_frame_soft_only(&frame.received, &frame.confidence),
+        }
+    }
 }
 pub struct Pipeline {
     pub config: ChannelConfig,
@@ -76,6 +132,9 @@ pub struct Pipeline {
     last_offset: Option<u64>,
     last_speech: Option<u64>,
     segment_samples: u64,
+    // Segment sample count until which the alternate detector keeps running
+    // after the last frame lock.
+    alternate_until: u64,
     history: VecDeque<Received>,
     events: VecDeque<Message>,
     pub status: Status,
@@ -87,8 +146,8 @@ impl Pipeline {
         }
         Ok(Self {
             dsp: Self::demodulator(rate, config.frequency_hz - center)?,
-            sync: Synchronizer::default(),
-            alternate_sync: Synchronizer::default(),
+            sync: Self::synchronizer(),
+            alternate_sync: Self::synchronizer(),
             merger: Merger::default(),
             voice: Voice::default(),
             data: Decoder::new(config.format),
@@ -102,6 +161,7 @@ impl Pipeline {
             last_offset: None,
             last_speech: None,
             segment_samples: 0,
+            alternate_until: 0,
             history: VecDeque::new(),
             events: VecDeque::new(),
             status: Status {
@@ -109,6 +169,9 @@ impl Pipeline {
                 ..Status::default()
             },
         })
+    }
+    fn synchronizer() -> Synchronizer {
+        Synchronizer::with_validator(|frame| Decoded::of(frame).ok())
     }
     // Two detectors: LMS tracking, and drift RLS tracking for simulcast paths
     // fading at train speed. Their frames merge by position (see Merger).
@@ -130,8 +193,8 @@ impl Pipeline {
             self.rate,
             self.config.frequency_hz - self.center + self.tuning,
         )?;
-        self.sync = Synchronizer::default();
-        self.alternate_sync = Synchronizer::default();
+        self.sync = Self::synchronizer();
+        self.alternate_sync = Self::synchronizer();
         self.merger.clear();
         self.voice = Voice::default();
         self.data.reset_assembly();
@@ -139,6 +202,7 @@ impl Pipeline {
         self.last_offset = None;
         self.last_speech = None;
         self.segment_samples = 0;
+        self.alternate_until = 0;
         self.history.clear();
         self.events.clear();
         self.status.epoch += 1;
@@ -158,6 +222,10 @@ impl Pipeline {
         mut observe: impl FnMut(FrameEvent),
     ) -> Result<Vec<Audio>, String> {
         self.status.iq_samples += iq.len() as u64;
+        // The alternate detector costs twice the primary one; run it only
+        // around signals (see `alternate_until`).
+        self.dsp
+            .set_alternate_active(self.segment_samples < self.alternate_until);
         self.segment_samples += iq.len() as u64;
         let snap = self
             .dsp
@@ -175,11 +243,14 @@ impl Pipeline {
             }
         }
         let settled = [self.sync.settled(), self.alternate_sync.settled()];
-        let mut frames = Vec::new();
-        for (frame, alternate) in self.merger.release(settled, false, Self::decodes) {
-            self.status.alternate_frames += u64::from(alternate);
-            frames.push(frame);
+        let frames = self.merger.release(settled, false, Decoded::of);
+        // Frame lock, not carrier lock: the sequence detector's carrier loop
+        // reports lock on plain noise as well.
+        if self.sync.locked || self.alternate_sync.locked {
+            self.alternate_until =
+                self.segment_samples + (ALTERNATE_HOLD_SECONDS * self.rate) as u64;
         }
+        self.status.alternate_running = self.dsp.alternate_running();
         self.status.carrier_locked = snap.carrier_locked != 0;
         self.status.frequency_error_hz = snap.frequency_offset_hz;
         self.status.frame_locked = self.sync.locked || self.alternate_sync.locked;
@@ -192,16 +263,12 @@ impl Pipeline {
             self.status.input_dbfs = 10.0 * power.max(1e-12).log10();
         }
         let mut audio = Vec::new();
-        for frame in frames {
-            audio.extend(self.frame_observed(&frame, &mut observe)?);
+        for (frame, detector, decoded) in frames {
+            audio.extend(self.frame_decoded(frame, detector, decoded, &mut observe)?);
         }
         // Release synthesis lookahead even when the RF carrier disappears.
         audio.extend(self.flush_idle((self.segment_samples as f64 / self.rate * 9600.0) as u64)?);
         Ok(audio)
-    }
-    fn decodes(frame: &Frame) -> bool {
-        voice_frame::decode_soft(&frame.received, &frame.confidence).is_some()
-            || crate::data::decode_frame_soft(&frame.received, &frame.confidence).is_some()
     }
     pub fn frame(&mut self, frame: &Frame) -> Result<Vec<Audio>, String> {
         self.frame_observed(frame, &mut |_| {})
@@ -211,6 +278,21 @@ impl Pipeline {
         frame: &Frame,
         observe: &mut impl FnMut(FrameEvent),
     ) -> Result<Vec<Audio>, String> {
+        let decoded = Decoded::of(frame);
+        self.frame_decoded(frame.clone(), Detector::Primary, decoded, observe)
+    }
+    fn frame_decoded(
+        &mut self,
+        frame: Frame,
+        detector: Detector,
+        decoded: Decoded,
+        observe: &mut impl FnMut(FrameEvent),
+    ) -> Result<Vec<Audio>, String> {
+        match detector {
+            Detector::Primary => {}
+            Detector::Alternate => self.status.alternate_frames += 1,
+            Detector::Combined => self.status.combined_frames += 1,
+        }
         let new_stream = self.origin.is_some_and(|o| {
             frame.bit_offset < o
                 || !(frame.bit_offset - o).is_multiple_of(384)
@@ -230,8 +312,9 @@ impl Pipeline {
         self.last_offset = Some(frame.bit_offset);
         self.status.frames += 1;
         self.status.synchronized_frames += u64::from(frame.sync_matched);
-        let speech = voice_frame::decode_soft(&frame.received, &frame.confidence);
+        let Decoded { speech, data } = decoded;
         let corrected_bits = speech.as_ref().map(|s| s.corrected_bits);
+        let payload = speech.as_ref().map(|s| s.payload);
         if let Some(ref s) = speech {
             self.last_speech = Some(frame.bit_offset);
             self.status.voice_frames += 1;
@@ -239,8 +322,9 @@ impl Pipeline {
         } else {
             self.status.rejected_voice += 1;
         }
-        self.voice.push(index, speech.map(|s| s.payload))?;
-        let messages = self.data.decode(frame);
+        self.voice.push(index, payload)?;
+        let info = data.map(|(info, _)| info);
+        let messages = self.data.decode_with(&frame, data);
         for message in messages.iter().cloned() {
             if message.operation_summary.is_some() {
                 OperationReception::update(
@@ -274,15 +358,19 @@ impl Pipeline {
                 });
             }
         }
+        let bit_offset = frame.bit_offset;
         observe(FrameEvent {
             epoch: self.status.epoch,
             index,
-            frame: frame.clone(),
+            frame,
             corrected_bits,
             messages,
+            speech: payload,
+            data: info,
+            detector,
         });
         let mut audio = self.drain();
-        audio.extend(self.flush_idle(frame.bit_offset)?);
+        audio.extend(self.flush_idle(bit_offset)?);
         Ok(audio)
     }
     // Drain the 160 ms synthesis lookahead after 100 ms without voice. This
@@ -315,11 +403,18 @@ impl Pipeline {
         audio
     }
     pub fn flush(&mut self) -> Result<Vec<Audio>, String> {
+        self.flush_observed(|_| {})
+    }
+    /// [`Self::flush`], reporting the frames it releases like
+    /// [`Self::process_observed`].
+    pub fn flush_observed(
+        &mut self,
+        mut observe: impl FnMut(FrameEvent),
+    ) -> Result<Vec<Audio>, String> {
         // Positions still waiting for the other detector at end of input.
         let mut audio = Vec::new();
-        for (frame, alternate) in self.merger.release([None, None], true, Self::decodes) {
-            self.status.alternate_frames += u64::from(alternate);
-            audio.extend(self.frame_observed(&frame, &mut |_| {})?);
+        for (frame, detector, decoded) in self.merger.release([None, None], true, Decoded::of) {
+            audio.extend(self.frame_decoded(frame, detector, decoded, &mut observe)?);
         }
         self.voice.flush()?;
         audio.extend(self.drain());

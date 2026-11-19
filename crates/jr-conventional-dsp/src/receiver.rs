@@ -59,6 +59,14 @@ impl Dsp {
     pub fn enable_alternate(&mut self) {
         self.0.enable_alternate();
     }
+    /// Pause or resume the alternate detector (see
+    /// [`crate::tuning::Alternate::Gated`]); a no-op unless it is enabled.
+    pub fn set_alternate_active(&mut self, active: bool) {
+        self.0.set_alternate_active(active);
+    }
+    pub fn alternate_running(&self) -> bool {
+        self.0.alternate_running()
+    }
     /// Primary (LMS) and alternate (drift RLS) decision streams with
     /// reliabilities, aligned index for index.
     pub fn process_dual(
