@@ -47,6 +47,11 @@ pub struct InputSettings {
     pub rx_channel: String,
     pub antenna: String,
     pub path: String,
+    /// SoapySDR stream arguments (empty: chosen for the driver).
+    pub stream_args: String,
+    pub bias_tee: bool,
+    /// Decode IQ WAV files faster than real time.
+    pub wave_fast: bool,
 }
 impl Default for InputSettings {
     fn default() -> Self {
@@ -63,6 +68,9 @@ impl Default for InputSettings {
             rx_channel: "0".into(),
             antenna: String::new(),
             path: String::new(),
+            stream_args: String::new(),
+            bias_tee: false,
+            wave_fast: false,
         }
     }
 }

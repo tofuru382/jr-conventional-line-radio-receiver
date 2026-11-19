@@ -73,6 +73,7 @@ fn run() -> Result<()> {
                 gain_db: a.get(6).map(|s| s.parse()).transpose()?,
                 ppm: 0,
                 reconnect_seconds: 60,
+                bias_tee: false,
             };
             let session = Session::start(Config {
                 input: Input::RtlTcp { radio },

@@ -1,11 +1,17 @@
 //! Native rtl_tcp input. Control words are big-endian; samples are interleaved CU8.
 //! The protocol has no command acknowledgements or sample-loss counters.
-use crate::{source::Read, Complex32};
+use crate::{
+    source::{Control, Read},
+    Complex32,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{ErrorKind, Read as _, Write},
-    net::{IpAddr, SocketAddr, TcpStream},
-    sync::atomic::{AtomicBool, Ordering},
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -22,16 +28,50 @@ pub struct Config {
     /// the connection (0: fail at once).
     #[serde(default = "default_reconnect_seconds")]
     pub reconnect_seconds: u32,
+    /// Power an active antenna or LNA through the coaxial cable (rtl_tcp
+    /// command 0x0e; servers without it ignore the command).
+    #[serde(default)]
+    pub bias_tee: bool,
 }
 fn default_reconnect_seconds() -> u32 {
     RECONNECT_LIMIT.as_secs() as u32
 }
+/// rtl_tcp's tuner type in its header (librtlsdr's `rtlsdr_tuner`).
+pub fn tuner_name(tuner_type: u32) -> &'static str {
+    match tuner_type {
+        1 => "E4000",
+        2 => "FC0012",
+        3 => "FC0013",
+        4 => "FC2580",
+        5 => "R820T",
+        6 => "R828D",
+        _ => "不明なチューナー",
+    }
+}
+/// What a connection test found at the server.
+#[derive(Clone, Debug, Serialize)]
+pub struct Probe {
+    pub address: String,
+    pub tuner: String,
+    pub gain_count: u32,
+}
 impl Config {
-    pub fn validate(&self) -> Result<SocketAddr, String> {
-        let ip: IpAddr = self
-            .host
-            .parse()
-            .map_err(|_| "RTL-TCP: IPv4 / IPv6 アドレスを入力してください")?;
+    /// Checks the settings without touching the network. The host is an IPv4
+    /// or IPv6 address (an IPv6 scope such as `%wlan0` is allowed) or a host
+    /// name such as `raspberrypi.local`; names are resolved when connecting.
+    pub fn validate(&self) -> Result<(), String> {
+        let host = self.host.trim();
+        if host.is_empty()
+            || host.len() > 253
+            || !host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '%' | '_'))
+        {
+            return Err(
+                "RTL-TCP: IPv4 / IPv6 アドレスかホスト名（例: raspberrypi.local）を入力してください"
+                    .into(),
+            );
+        }
         if self.port == 0 || self.center_hz == 0 {
             return Err("RTL-TCP: ポートと中心周波数は 0 より大きい値を指定してください".into());
         }
@@ -51,8 +91,102 @@ impl Config {
                     .into(),
             );
         }
-        Ok(SocketAddr::new(ip, self.port))
+        Ok(())
     }
+}
+
+/// Resolves the host (a blocking name lookup for names) and connects to the
+/// first address that answers within the timeout, while `stop` can abandon
+/// the attempt at any moment: the lookup and connection run on a helper
+/// thread, which finishes on its own after the caller has given up.
+fn connect(config: &Config, stop: &AtomicBool) -> Result<(TcpStream, SocketAddr), String> {
+    let host = config.host.trim().to_string();
+    let port = config.port;
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("rtl-tcp-connect".into())
+        .spawn(move || {
+            let result = (host.as_str(), port)
+                .to_socket_addrs()
+                .map_err(|e| format!("RTL-TCP: {host} の名前を解決できません ({e})"))
+                .and_then(|addresses| {
+                    let mut last = format!("RTL-TCP: {host} のアドレスが見つかりません");
+                    for address in addresses {
+                        match TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
+                            Ok(stream) => return Ok((stream, address)),
+                            Err(e) => {
+                                last = format!(
+                                    "RTL-TCP: {address} に接続できません。サーバーとポートを確認してください ({e})"
+                                )
+                            }
+                        }
+                    }
+                    Err(last)
+                });
+            let _ = tx.send(result);
+        })
+        .map_err(|e| format!("RTL-TCP: 接続を開始できません ({e})"))?;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err("RTL-TCP: 接続を中止しました".into());
+        }
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("RTL-TCP: 接続処理が異常終了しました".into())
+            }
+        }
+    }
+}
+
+/// Connection test: connects, reads the server header and disconnects,
+/// without configuring the tuner or streaming.
+pub fn probe(config: &Config, stop: &AtomicBool) -> Result<Probe, String> {
+    config.validate()?;
+    let (mut stream, address) = connect(config, stop)?;
+    let header = read_header(&mut stream, stop)?;
+    let tuner_type = u32::from_be_bytes(header[4..8].try_into().unwrap());
+    Ok(Probe {
+        address: address.to_string(),
+        tuner: tuner_name(tuner_type).into(),
+        gain_count: u32::from_be_bytes(header[8..12].try_into().unwrap()),
+    })
+}
+
+fn read_header(stream: &mut TcpStream, stop: &AtomicBool) -> Result<[u8; 12], String> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|e| e.to_string())?;
+    let mut header = [0; 12];
+    let mut filled = 0;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while filled < header.len() {
+        if stop.load(Ordering::Relaxed) {
+            return Err("RTL-TCP: 接続を中止しました".into());
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "RTL-TCP: ヘッダーが届きません。他のクライアントが接続中か確認してください".into(),
+            );
+        }
+        match stream.read(&mut header[filled..]) {
+            Ok(0) => return Err("RTL-TCP: ヘッダー受信中に接続が閉じられました".into()),
+            Ok(n) => filled += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
+                ) => {}
+            Err(e) => return Err(format!("RTL-TCP: ヘッダーを受信できません ({e})")),
+        }
+    }
+    if &header[..4] != b"RTL0" {
+        return Err(
+            "RTL-TCP: RTL0 ヘッダーではありません。rtl_tcp のポートを指定してください".into(),
+        );
+    }
+    Ok(header)
 }
 
 // rtl_tcp's automatic mode hands gain to the tuner's AGC, which drives the
@@ -262,49 +396,13 @@ impl RtlTcp {
         stop: &AtomicBool,
         gain_index: Option<u32>,
     ) -> Result<Self, String> {
-        let address = config.validate()?;
-        let mut stream =
-            TcpStream::connect_timeout(&address, Duration::from_secs(3)).map_err(|e| {
-                format!(
-                    "RTL-TCP: {address} に接続できません。サーバーとポートを確認してください ({e})"
-                )
-            })?;
-        stream
-            .set_read_timeout(Some(Duration::from_millis(100)))
-            .map_err(|e| e.to_string())?;
+        config.validate()?;
+        let (mut stream, _) = connect(config, stop)?;
         stream
             .set_write_timeout(Some(Duration::from_secs(1)))
             .map_err(|e| e.to_string())?;
         stream.set_nodelay(true).map_err(|e| e.to_string())?;
-        let mut header = [0; 12];
-        let mut filled = 0;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while filled < header.len() {
-            if stop.load(Ordering::Relaxed) {
-                return Err("RTL-TCP: 接続を中止しました".into());
-            }
-            if Instant::now() >= deadline {
-                return Err(
-                    "RTL-TCP: ヘッダーが届きません。他のクライアントが接続中か確認してください"
-                        .into(),
-                );
-            }
-            match stream.read(&mut header[filled..]) {
-                Ok(0) => return Err("RTL-TCP: ヘッダー受信中に接続が閉じられました".into()),
-                Ok(n) => filled += n,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        ErrorKind::TimedOut | ErrorKind::WouldBlock | ErrorKind::Interrupted
-                    ) => {}
-                Err(e) => return Err(format!("RTL-TCP: ヘッダーを受信できません ({e})")),
-            }
-        }
-        if &header[..4] != b"RTL0" {
-            return Err(
-                "RTL-TCP: RTL0 ヘッダーではありません。rtl_tcp のポートを指定してください".into(),
-            );
-        }
+        let header = read_header(&mut stream, stop)?;
         let mut input = Self {
             stream,
             bytes: Vec::new(),
@@ -335,7 +433,39 @@ impl RtlTcp {
                 None => input.command(0x03, 0)?,
             },
         }
+        if config.bias_tee {
+            input.command(0x0e, 1)?;
+        }
         Ok(input)
+    }
+    /// Changes tuning while streaming (rtl_tcp applies each command at once).
+    /// The new gain reaches the samples after the server's buffers drain, so
+    /// the automatic gain waits before measuring again.
+    pub fn apply(&mut self, control: &Control, config: &Config) -> Result<(), String> {
+        if let Some(gain) = control.gain_db {
+            match gain {
+                Some(gain) => {
+                    self.auto_gain = None;
+                    self.command(0x03, 1)?;
+                    self.command(0x04, (gain * 10.0).round() as i32 as u32)?;
+                }
+                None => match AutoGain::new(self.gain_count, config.sample_rate) {
+                    Some(auto) => {
+                        self.command(0x03, 1)?;
+                        self.command(0x0d, auto.index)?;
+                        self.auto_gain = Some(auto);
+                    }
+                    None => self.command(0x03, 0)?,
+                },
+            }
+        }
+        if let Some(ppm) = control.ppm {
+            self.command(0x05, ppm as u32)?;
+        }
+        if let Some(bias) = control.bias_tee {
+            self.command(0x0e, u32::from(bias))?;
+        }
+        Ok(())
     }
     fn command(&mut self, command: u8, value: u32) -> Result<(), String> {
         let mut word = [command, 0, 0, 0, 0];
@@ -440,11 +570,35 @@ impl Reconnecting {
     pub fn reconnecting(&self) -> bool {
         self.inner.is_none()
     }
-    /// For the status line: the automatic gain, when one is in use.
+    /// For the status line: the server's tuner and the gain in use.
     pub fn info(&self) -> Option<String> {
-        let index = self.inner.as_ref()?.auto_gain.as_ref()?.index;
-        let db = GAINS_TENTH_DB.get(index as usize)?;
-        Some(format!("ゲイン 自動 {} dB", f64::from(*db) / 10.0))
+        let inner = self.inner.as_ref()?;
+        let mut info = tuner_name(inner.tuner_type).to_string();
+        match (&inner.auto_gain, self.config.gain_db) {
+            (Some(auto), _) => {
+                if let Some(db) = GAINS_TENTH_DB.get(auto.index as usize) {
+                    info += &format!(" · ゲイン 自動 {} dB", f64::from(*db) / 10.0);
+                }
+            }
+            (None, Some(db)) => info += &format!(" · ゲイン {db} dB"),
+            (None, None) => info += " · ゲイン チューナー AGC",
+        }
+        if self.config.bias_tee {
+            info += " · Bias-T オン";
+        }
+        Some(info)
+    }
+    /// Applies a tuning change now and to every later reconnection.
+    pub fn apply(&mut self, control: &Control) -> Result<(), String> {
+        control.update_rtl_tcp(&mut self.config);
+        if control.gain_db.is_some() {
+            // A new connection starts from the new gain, not the old index.
+            self.gain_index = None;
+        }
+        match self.inner.as_mut() {
+            Some(inner) => inner.apply(control, &self.config),
+            None => Ok(()),
+        }
     }
     pub fn read(&mut self, output: &mut [Complex32], stop: &AtomicBool) -> Result<Read, String> {
         if let Some(inner) = self.inner.as_mut() {
@@ -509,6 +663,7 @@ mod tests {
             gain_db: Some(19.7),
             ppm: -12,
             reconnect_seconds: 60,
+            bias_tee: false,
         }
     }
     fn header(s: &mut TcpStream) {
@@ -551,6 +706,58 @@ mod tests {
         assert_eq!((iq[1].real, iq[1].imaginary), (0.5 / 128.0, -0.5 / 128.0));
         server.join().unwrap();
         assert!(input.read(&mut iq).unwrap_err().contains("接続を閉じ"));
+    }
+    #[test]
+    fn host_names_probe_and_live_tuning_reach_the_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            // A connection test: header only, then the client hangs up.
+            let (mut s, _) = listener.accept().unwrap();
+            header(&mut s);
+            drop(s);
+            let (mut s, _) = listener.accept().unwrap();
+            header(&mut s);
+            let mut setup = [0; 25];
+            s.read_exact(&mut setup).unwrap();
+            // Manual gain 30.5 dB, ppm 7, bias tee on, sent while streaming.
+            let mut live = [0; 20];
+            s.read_exact(&mut live).unwrap();
+            live
+        });
+        let mut c = config(port);
+        c.host = "localhost".into();
+        let probe = probe(&c, &AtomicBool::new(false)).unwrap();
+        assert_eq!((probe.tuner.as_str(), probe.gain_count), ("R820T", 29));
+        let mut input = Reconnecting::open(&c, &AtomicBool::new(false)).unwrap();
+        input
+            .apply(&Control {
+                gain_db: Some(Some(30.5)),
+                ppm: Some(7),
+                bias_tee: Some(true),
+            })
+            .unwrap();
+        let live = server.join().unwrap();
+        let words: Vec<(u8, u32)> = live
+            .as_chunks::<5>()
+            .0
+            .iter()
+            .map(|w| (w[0], u32::from_be_bytes(w[1..].try_into().unwrap())))
+            .collect();
+        assert_eq!(words, vec![(3, 1), (4, 305), (5, 7), (14, 1)]);
+        // Kept for reconnections, and shown in the status line.
+        assert_eq!(input.config.gain_db, Some(30.5));
+        assert!(input.info().unwrap().contains("Bias-T"));
+    }
+    #[test]
+    fn connecting_can_be_abandoned_at_once() {
+        let started = Instant::now();
+        let mut c = config(9);
+        // Documentation range (TEST-NET-3): nothing answers there.
+        c.host = "203.0.113.1".into();
+        let error = RtlTcp::open(&c, &AtomicBool::new(true)).err().unwrap();
+        assert!(error.contains("中止"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
     #[test]
     fn empty_gain_steps_manual_gain_down_while_the_adc_clips() {
@@ -764,14 +971,14 @@ mod tests {
             ..config(port)
         };
         let mut input = Reconnecting::open(&config, &stop).unwrap();
-        assert_eq!(input.info().as_deref(), Some("ゲイン 自動 49.6 dB"));
+        assert_eq!(input.info().as_deref(), Some("R820T · ゲイン 自動 49.6 dB"));
         let mut iq = vec![Complex32::default(); 12000];
         let deadline = Instant::now() + Duration::from_secs(10);
         while input.reconnects == 0 || input.reconnecting() {
             assert!(Instant::now() < deadline, "no reconnection");
             input.read(&mut iq, &stop).unwrap();
         }
-        assert_eq!(input.info().as_deref(), Some("ゲイン 自動 43.9 dB"));
+        assert_eq!(input.info().as_deref(), Some("R820T · ゲイン 自動 43.9 dB"));
         server.join().unwrap();
     }
     #[test]
@@ -852,8 +1059,18 @@ mod tests {
         }
         c.host = "bad host".into();
         assert!(c.validate().is_err());
+        c.host = "".into();
+        assert!(c.validate().is_err());
+        for host in [
+            "::1",
+            "raspberrypi.local",
+            "fe80::1%wlan0",
+            "rtl-tcp.example.org",
+        ] {
+            c.host = host.into();
+            assert!(c.validate().is_ok(), "{host}");
+        }
         c.host = "::1".into();
-        assert!(c.validate().is_ok());
         c.port = 0;
         assert!(c.validate().is_err());
     }

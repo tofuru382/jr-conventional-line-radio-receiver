@@ -39,6 +39,10 @@ pub struct Config {
     /// off the bus (0: fail at once).
     #[serde(default = "default_reconnect_seconds")]
     pub reconnect_seconds: u32,
+    /// Power an active antenna or LNA through the coaxial cable (GPIO 0).
+    /// The phone supplies that current too.
+    #[serde(default)]
+    pub bias_tee: bool,
 }
 /// Ten minutes: a dongle the phone stopped powering only returns once it is
 /// replugged, and a person needs longer than a minute to notice and do that.
@@ -167,7 +171,8 @@ fn open_device(
         .frequency_hz(config.center_hz.into())
         .sample_rate_hz(config.sample_rate)
         .gain(gain)
-        .correction_ppm(config.ppm);
+        .correction_ppm(config.ppm)
+        .bias_tee(config.bias_tee);
     let (manufacturer, product) = match identity {
         Identity::BlogV4 => (Some("RTLSDRBlog".into()), Some("Blog V4".into())),
         Identity::Other => (Some(String::new()), Some(String::new())),
@@ -389,6 +394,52 @@ impl Usb {
     }
     pub fn reconnecting(&self) -> bool {
         self.rx.is_none()
+    }
+    /// Applies a tuning change now and to every later reconnection.
+    pub fn apply(&mut self, control: &crate::source::Control) -> Result<(), String> {
+        if let Some(gain) = control.gain_db {
+            if gain.is_some_and(|g| !(0.0..=52.5).contains(&g)) {
+                return Err("USB: ゲインは 0–52.5 dB（空欄で自動）を指定してください".into());
+            }
+            self.config.gain_db = gain;
+            self.auto_gain = auto_gain(&self.config, None);
+        }
+        if let Some(ppm) = control.ppm {
+            if !(-488..=488).contains(&ppm) {
+                return Err("USB: 周波数補正は −488–488 ppm を指定してください".into());
+            }
+            self.config.ppm = ppm;
+        }
+        if let Some(bias) = control.bias_tee {
+            self.config.bias_tee = bias;
+        }
+        let Some(device) = self.device.as_mut() else {
+            return Ok(());
+        };
+        if control.gain_db.is_some() {
+            let db = self
+                .config
+                .gain_db
+                .unwrap_or_else(|| gain_at(self.auto_gain.as_ref().map_or(0, |g| g.index)));
+            self.gain_changed = Some(Instant::now());
+            device
+                .set_manual_gain_db(db as f32)
+                .wait()
+                .map_err(|e| format!("USB: ゲインを変更できません ({e})"))?;
+        }
+        if let Some(ppm) = control.ppm {
+            device
+                .set_correction_ppm(ppm)
+                .wait()
+                .map_err(|e| format!("USB: 周波数補正を変更できません ({e})"))?;
+        }
+        if let Some(bias) = control.bias_tee {
+            device
+                .set_bias_tee(bias)
+                .wait()
+                .map_err(|e| format!("USB: Bias-T を切り替えられません ({e})"))?;
+        }
+        Ok(())
     }
     /// For the status line: tuner, V4 handling, gain and recovered USB errors.
     pub fn info(&self) -> String {
@@ -628,6 +679,7 @@ mod tests {
             gain_db: Some(20.0),
             ppm: 0,
             reconnect_seconds: 60,
+            bias_tee: false,
         }
     }
 

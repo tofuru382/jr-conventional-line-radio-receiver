@@ -154,6 +154,29 @@ async fn stop_recording(
     .await
     .map_err(|e| e.to_string())?
 }
+/// Gain, frequency correction or bias tee while receiving (see
+/// `receiver_core::source::Control`; absent fields stay as they are).
+#[tauri::command]
+async fn set_tuning(
+    control: receiver_core::source::Control,
+    state: tauri::State<'_, Receiver>,
+) -> Result<(), String> {
+    state
+        .current()
+        .ok_or("受信中に変更してください。")?
+        .set_control(control)
+}
+/// Connection test for RTL-TCP: connect, read the header, disconnect.
+#[tauri::command]
+async fn test_rtl_tcp(
+    radio: receiver_core::rtl_tcp::Config,
+) -> Result<receiver_core::rtl_tcp::Probe, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        receiver_core::rtl_tcp::probe(&radio, &std::sync::atomic::AtomicBool::new(false))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[derive(serde::Serialize)]
 struct Snapshot {
     status: receiver_core::session::Overview,
@@ -425,7 +448,9 @@ pub fn run() {
             default_recording_directory,
             start_recording,
             stop_recording,
-            snapshot
+            snapshot,
+            set_tuning,
+            test_rtl_tcp
         ])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {

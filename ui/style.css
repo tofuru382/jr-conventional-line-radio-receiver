@@ -329,6 +329,32 @@ fieldset {
   grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr);
   gap: 12px;
 }
+.tcp-test-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+.tcp-test-row .field-hint {
+  margin-block-start: 0;
+}
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block-start: 12px;
+}
+.check-field[hidden] {
+  display: none;
+}
+.check-field input {
+  width: auto;
+  margin: 0;
+}
+#apply-ppm[hidden] {
+  display: none;
+}
 .driver-row {
   display: flex;
   flex-wrap: wrap;

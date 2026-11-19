@@ -71,10 +71,57 @@ pub(crate) struct Selector {
     pub serial: Option<String>,
     pub usb_id: Option<(u16, u16)>,
 }
+/// RTL2832U dongles by USB ID (librtlsdr's list of known devices). Only
+/// those with an R820T/R828D tuner can be driven; others fail with
+/// [`Error::UnsupportedTuner`] when opened.
+pub const KNOWN_DEVICES: &[(u16, u16)] = &[
+    (0x0bda, 0x2832),
+    (0x0bda, 0x2838),
+    (0x0413, 0x6680),
+    (0x0413, 0x6f0f),
+    (0x0458, 0x707f),
+    (0x0ccd, 0x00a9),
+    (0x0ccd, 0x00b3),
+    (0x0ccd, 0x00b4),
+    (0x0ccd, 0x00b5),
+    (0x0ccd, 0x00b7),
+    (0x0ccd, 0x00b8),
+    (0x0ccd, 0x00b9),
+    (0x0ccd, 0x00c0),
+    (0x0ccd, 0x00c6),
+    (0x0ccd, 0x00d3),
+    (0x0ccd, 0x00d7),
+    (0x0ccd, 0x00e0),
+    (0x1554, 0x5020),
+    (0x15f4, 0x0131),
+    (0x15f4, 0x0133),
+    (0x185b, 0x0620),
+    (0x185b, 0x0650),
+    (0x185b, 0x0680),
+    (0x1b80, 0xd393),
+    (0x1b80, 0xd394),
+    (0x1b80, 0xd395),
+    (0x1b80, 0xd397),
+    (0x1b80, 0xd398),
+    (0x1b80, 0xd39d),
+    (0x1b80, 0xd3a4),
+    (0x1b80, 0xd3a8),
+    (0x1b80, 0xd3af),
+    (0x1b80, 0xd3b0),
+    (0x1d19, 0x1101),
+    (0x1d19, 0x1102),
+    (0x1d19, 0x1103),
+    (0x1d19, 0x1104),
+    (0x1f4d, 0xa803),
+    (0x1f4d, 0xb803),
+    (0x1f4d, 0xc803),
+    (0x1f4d, 0xd286),
+    (0x1f4d, 0xd803),
+];
 impl Selector {
     pub(crate) fn matches_id(&self, vid: u16, pid: u16) -> bool {
         self.usb_id
-            .map_or(vid == 0x0bda && matches!(pid, 0x2832 | 0x2838), |pair| {
+            .map_or(KNOWN_DEVICES.contains(&(vid, pid)), |pair| {
                 pair == (vid, pid)
             })
     }
@@ -125,7 +172,7 @@ pub(crate) fn select(
 pub(crate) async fn request_permission(selector: &Selector) -> Result<()> {
     let pairs = selector
         .usb_id
-        .map_or_else(|| vec![(0x0bda, 0x2832), (0x0bda, 0x2838)], |p| vec![p]);
+        .map_or_else(|| KNOWN_DEVICES.to_vec(), |p| vec![p]);
     let selectors: Vec<_> = pairs
         .into_iter()
         .map(|(vid, pid)| {

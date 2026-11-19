@@ -4,7 +4,7 @@ use crate::{
     monitor::{Activity, Monitor},
     pipeline::{validate_channels, Audio, ChannelConfig, Pipeline, Status},
     recording::{OutputOptions, Recorder, RecordingStatus},
-    source::{RadioConfig, Read},
+    source::{Control, RadioConfig, Read},
     wave::IqWave,
     Complex32,
 };
@@ -54,6 +54,8 @@ pub struct UsbRadio {
     pub gain_db: Option<f64>,
     #[serde(default)]
     pub ppm: i32,
+    #[serde(default)]
+    pub bias_tee: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -153,6 +155,9 @@ pub struct Overview {
     /// Blocks with non-finite samples, dropped as discontinuities.
     #[serde(default)]
     pub invalid_blocks: u64,
+    /// Why the last tuning change while receiving could not be applied.
+    #[serde(default)]
+    pub control_error: Option<String>,
 }
 struct Shared {
     state: String,
@@ -169,6 +174,10 @@ struct Shared {
     source_info: Option<String>,
     frequency_correction: f64,
     invalid_blocks: u64,
+    /// Tuning change waiting for the acquisition thread, and the outcome of
+    /// the last one.
+    control: Option<Control>,
+    control_error: Option<String>,
 }
 pub struct Session {
     stop: Arc<AtomicBool>,
@@ -192,7 +201,7 @@ enum Source {
     #[cfg(feature = "usb")]
     Usb(Box<crate::usb::Usb>),
     #[cfg(feature = "soapy")]
-    Sdr(crate::source::Sdr),
+    Sdr(crate::source::Reconnecting),
     #[cfg(test)]
     Gated {
         source: Box<Source>,
@@ -247,7 +256,7 @@ impl Source {
             Input::Sdr { radio } => {
                 #[cfg(feature = "soapy")]
                 {
-                    let s = crate::source::Sdr::open(radio)?;
+                    let s = crate::source::Reconnecting::open(radio)?;
                     let (rate, center) = (s.sample_rate, s.center_hz);
                     Ok((Self::Sdr(s), rate, center))
                 }
@@ -269,12 +278,27 @@ impl Source {
             _ => None,
         }
     }
+    /// Applies a tuning change while receiving.
+    fn apply(&mut self, control: &Control) -> Result<(), String> {
+        match self {
+            Self::RtlTcp(s) => s.apply(control),
+            #[cfg(feature = "usb")]
+            Self::Usb(s) => s.apply(control),
+            #[cfg(feature = "soapy")]
+            Self::Sdr(s) => s.apply(control),
+            #[cfg(test)]
+            Self::Gated { source, .. } => source.apply(control),
+            _ => Err("IQ WAV の再生中はゲインと周波数補正を変更できません".into()),
+        }
+    }
     /// RTL-TCP reconnection state: (reconnecting, failed attempts, reconnects).
     fn reconnection(&self) -> (bool, u32, u64) {
         match self {
             Self::RtlTcp(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
             #[cfg(feature = "usb")]
             Self::Usb(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
+            #[cfg(feature = "soapy")]
+            Self::Sdr(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
             #[cfg(test)]
             Self::Gated { source, .. } => source.reconnection(),
             _ => (false, 0, 0),
@@ -290,7 +314,7 @@ impl Source {
                 Ok(if n == 0 { None } else { Some(Read::Samples(n)) })
             }
             #[cfg(feature = "soapy")]
-            Self::Sdr(s) => s.read(buf).map(Some),
+            Self::Sdr(s) => s.read(buf, stop).map(Some),
             #[cfg(test)]
             Self::Endless(blocks) => {
                 *blocks += 1;
@@ -339,6 +363,8 @@ impl Session {
             source_info: None,
             frequency_correction: 0.0,
             invalid_blocks: 0,
+            control: None,
+            control_error: None,
         }));
         let channels: Vec<_> = config
             .channels
@@ -496,9 +522,26 @@ impl Session {
                     0.0
                 },
                 invalid_blocks: s.invalid_blocks,
+                control_error: s.control_error.clone(),
             },
             audio,
         )
+    }
+    /// Changes gain, frequency correction or bias tee while receiving. The
+    /// acquisition thread applies it between two reads (within 100 ms) and
+    /// keeps it for reconnections; a failure is reported in the status.
+    pub fn set_control(&self, control: Control) -> Result<(), String> {
+        control.validate()?;
+        let mut s = crate::lock(&self.shared);
+        if !matches!(s.state.as_str(), "starting" | "receiving") {
+            return Err("受信中に変更してください。".into());
+        }
+        match s.control.as_mut() {
+            Some(pending) => pending.merge(control),
+            None => s.control = Some(control),
+        }
+        s.control_error = None;
+        Ok(())
     }
     /// Status of every channel without touching the monitor audio: safe to
     /// call from any number of observers (UI, notification, tools).
@@ -761,8 +804,26 @@ fn run(
     let mut buf = vec![Complex32::default(); block_samples(rate)];
     let result = (|| -> Result<(), String> {
         while !stop.load(Ordering::Relaxed) {
+            let control = crate::lock(shared).control.take();
+            if let Some(control) = control {
+                let outcome = source.apply(&control);
+                if let Err(e) = &outcome {
+                    crate::diag::note(format!("受信設定を変更できません：{e}"));
+                }
+                crate::lock(shared).control_error = outcome.err();
+            }
             let read = source.read(&mut buf, stop)?;
             let received = std::time::SystemTime::now();
+            // Samples after lost ones: mark the gap, then take them.
+            let read = match read {
+                Some(Read::SamplesAfterGap(n)) => {
+                    window = (Instant::now(), 0);
+                    sequence += 1;
+                    crate::lock(shared).overflows += 1;
+                    Some(Read::Samples(n))
+                }
+                other => other,
+            };
             let reconnection = source.reconnection();
             if crate::lock(shared).reconnection != reconnection {
                 let mut s = crate::lock(shared);
@@ -772,6 +833,7 @@ fn run(
             match read {
                 None => break,
                 Some(Read::Timeout) => continue,
+                Some(Read::SamplesAfterGap(_)) => unreachable!("handled above"),
                 Some(Read::Discontinuity) => {
                     window = (Instant::now(), 0);
                     sequence += 1;
@@ -1191,6 +1253,7 @@ mod tests {
                 gain_db: None,
                 ppm: 0,
                 reconnect_seconds: 60,
+                bias_tee: false,
             },
         };
         let held = queue_capacity(&input) * block_samples(240_000.0);
@@ -1392,6 +1455,8 @@ mod tests {
                 source_info: None,
                 frequency_correction: 0.0,
                 invalid_blocks: 0,
+                control: None,
+                control_error: None,
             })),
             channels: configs
                 .iter()

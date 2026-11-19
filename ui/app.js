@@ -1,4 +1,4 @@
-import { makeInput } from "./config.mjs";
+import { makeInput, makeTuning } from "./config.mjs";
 import { buildCatalog } from "./presets.mjs";
 import { AudioPlayer, Leveler } from "./audio.mjs";
 import { OperationMonitorView } from "./operation-monitor.mjs";
@@ -408,6 +408,7 @@ const preferenceFields = {
   rx_channel: "rx-channel",
   antenna: "antenna",
   path: "path",
+  stream_args: "stream-args",
 };
 const emptyRecording = () => ({
   state: "idle",
@@ -734,9 +735,13 @@ function capturePreferences() {
   return {
     version: 1,
     preset_file: presetFile,
-    input: Object.fromEntries(
-      Object.entries(preferenceFields).map(([key, id]) => [key, $(id).value]),
-    ),
+    input: {
+      ...Object.fromEntries(
+        Object.entries(preferenceFields).map(([key, id]) => [key, $(id).value]),
+      ),
+      bias_tee: $("bias-tee").checked,
+      wave_fast: $("wave-fast").checked,
+    },
     output: {
       enabled: recordingEnabled,
       directory: $("record-directory").value,
@@ -788,7 +793,9 @@ async function restorePreferences(initial = false) {
   recordingEnabled = saved?.output.enabled === true;
   if (saved) {
     for (const [key, id] of Object.entries(preferenceFields))
-      if (key !== "profile") $(id).value = saved.input[key];
+      if (key !== "profile") $(id).value = saved.input[key] ?? "";
+    $("bias-tee").checked = saved.input.bias_tee === true;
+    $("wave-fast").checked = saved.input.wave_fast === true;
     const args = $("args").value;
     if (args) {
       const option = el("option", "保存済みのデバイス");
@@ -866,11 +873,29 @@ $("preferences-retry").addEventListener("click", async () => {
     }
   } else await flushPreferences();
 });
+// Settings that apply while receiving: sent at once (see set_tuning).
+const liveTuning = new Set(["gain", "ppm", "bias-tee"]);
+// The settings form is locked while receiving or busy, except for the
+// live-tunable controls of a live input; some controls also depend on the
+// input kind or on the desktop app.
+function lockSettings() {
+  const kind = $("input-kind").value;
+  const wave = kind === "wave";
+  const live = running && !busy && !wave;
+  for (const control of $("settings").querySelectorAll("input, select, button")) {
+    const always =
+      ((control.id === "rate" || control.id === "gain") && wave) ||
+      ((control.id === "scan" || control.id === "browse" || control.id === "tcp-test") && !native);
+    control.disabled = always || ((running || busy) && !(live && liveTuning.has(control.id)));
+  }
+  $("live-tuning-hint").hidden = !live;
+  renderPpmSuggestion();
+}
 function setControls() {
   renderLive();
   $("route-open").disabled = busy || !presetCatalog.length;
   routePicker.setBlocked(running || busy);
-  $("settings").disabled = running || busy;
+  lockSettings();
   $("region").disabled = running || busy || !channels.length;
   $("preset-browse").disabled = !native || running || busy;
   $("preset-reload").disabled = !native || running || busy || !presetFile;
@@ -1890,11 +1915,11 @@ function updateSource() {
   $("driver-group").hidden = !(tcp && platform.android);
   $("device-group").hidden = wave || tcp || usb;
   $("tcp-group").hidden = !tcp;
-  $("ppm-group").hidden = !(tcp || usb);
+  $("ppm-group").hidden = wave;
+  $("bias-group").hidden = wave;
   $("soapy-options").hidden = wave || tcp || usb;
   $("file-group").hidden = !wave;
-  $("rate").disabled = wave;
-  $("gain").disabled = wave;
+  lockSettings();
   $("rate").title = wave ? "WAV ヘッダーから取得します" : "";
   $("gain").placeholder = tcp || usb ? "自動" : "機器の既定値";
   const host = $("host").value.trim();
@@ -2192,9 +2217,12 @@ async function startReception() {
         "args",
         "antenna",
         "rx-channel",
+        "stream-args",
       ].map((id) => [id, $(id).value]),
     );
     values.kind = $("input-kind").value;
+    values.bias_tee = $("bias-tee").checked;
+    values.wave_fast = $("wave-fast").checked;
     const activeChannels = channels.filter((c) => enabled.has(c.id));
     const input = makeInput(values, activeChannels);
     busy = true;
@@ -2342,11 +2370,83 @@ function frequencyCorrection(s) {
 }
 // Samples per second actually arriving; far from the setting means the
 // dongle is not running at the requested rate (or input is being lost).
+// Slightly fewer samples than requested, for a while, are lost upstream
+// (RTL-TCP reports no server-side loss): shown as an estimate.
 function measuredRate(s) {
   if (!s.input_rate || $("input-kind").value === "wave") return "";
-  const off = Math.abs(s.input_rate / s.sample_rate - 1) > 0.05;
-  return `　実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : ""}`;
+  const ratio = s.input_rate / s.sample_rate;
+  const off = Math.abs(ratio - 1) > 0.05;
+  const lost = !off && ratio < 0.99 ? `（推定欠落 ${((1 - ratio) * 100).toFixed(1)} %）` : "";
+  return `　実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : lost}`;
 }
+// After a session, the automatic frequency correction it settled on can be
+// kept as the tuner's ppm correction for the next start.
+function renderPpmSuggestion() {
+  const button = $("apply-ppm");
+  const suggested = Math.round(lastSnapshot?.frequency_correction_ppm ?? 0);
+  const usable =
+    !running && !busy && suggested !== 0 && $("input-kind").value !== "wave";
+  button.hidden = !usable;
+  if (usable)
+    button.textContent = `自動補正を周波数補正に反映（${suggested > 0 ? "+" : "−"}${Math.abs(suggested)} ppm）`;
+}
+$("apply-ppm").addEventListener("click", () => {
+  const suggested = Math.round(lastSnapshot?.frequency_correction_ppm ?? 0);
+  const ppm = Number($("ppm").value) || 0;
+  $("ppm").value = String(ppm + suggested);
+  lastSnapshot = { ...lastSnapshot, frequency_correction_ppm: 0 };
+  renderPpmSuggestion();
+  void persistPreferences();
+});
+// Gain, ppm and bias tee while receiving: applied without restarting. A
+// "change" event fires once a value is committed, not on every keystroke.
+async function sendTuning() {
+  if (!running || busy) return;
+  try {
+    const control = makeTuning(
+      {
+        gain: $("gain").value,
+        ppm: $("ppm").value,
+        bias_tee: $("bias-tee").checked,
+      },
+      $("input-kind").value,
+    );
+    await invoke("set_tuning", { control });
+    for (const id of ["gain", "ppm"]) $(id).removeAttribute("aria-invalid");
+  } catch (e) {
+    if (e.field) $(e.field).setAttribute("aria-invalid", "true");
+    fail(e);
+  }
+}
+for (const id of liveTuning)
+  $(id).addEventListener("change", () => {
+    void sendTuning();
+  });
+$("tcp-test").addEventListener("click", async () => {
+  const result = $("tcp-test-result");
+  result.textContent = "接続しています…";
+  $("tcp-test").disabled = true;
+  try {
+    const input = makeInput(
+      {
+        kind: "rtl_tcp",
+        host: $("host").value,
+        port: $("port").value,
+        rate: "240000",
+        center: "352.603125",
+        gain: "",
+        ppm: "0",
+      },
+      [{ frequency_hz: 352603125 }],
+    );
+    const probe = await invoke("test_rtl_tcp", { radio: input.radio });
+    result.textContent = `接続できました：${probe.address}・${probe.tuner}（ゲイン ${probe.gain_count} 段）`;
+  } catch (e) {
+    result.textContent = `接続できません：${e.message ?? e}`;
+  } finally {
+    lockSettings();
+  }
+});
 // Main page: calls in progress (with background recording and playback state)
 // and the latest recordings, playable in place.
 let liveKey = "";
@@ -2418,8 +2518,26 @@ $("volume").addEventListener("input", () => {
 });
 async function poll() {
   const started = performance.now();
+  // Hidden (screen off, app in the background): Android plays the monitor
+  // natively and needs nothing from the page; the desktop still feeds its
+  // audio but skips every render until the page is visible again.
+  const hidden = document.visibilityState === "hidden";
+  if (hidden && nativeAudio) {
+    setTimeout(poll, 1000);
+    return;
+  }
   try {
-    if (native && !busy && sessionVisible) {
+    if (native && !busy && sessionVisible && hidden) {
+      const result = await invoke("snapshot", {
+        selected,
+        automatic: $("auto-select").checked,
+      });
+      if (result) {
+        running = result.status.running;
+        if (result.status.state === "receiving" || result.status.state === "completed")
+          play(result.audio);
+      }
+    } else if (native && !busy && sessionVisible) {
       const generation = uiGeneration;
       const requestedChannel = selected;
       const revision = selectionRevision;
@@ -2520,6 +2638,8 @@ for (const id of [
   "output-audio",
   "output-raw",
   "output-data",
+  "bias-tee",
+  "wave-fast",
 ]) {
   for (const event of ["input", "change"])
     $(id).addEventListener(event, () => {
