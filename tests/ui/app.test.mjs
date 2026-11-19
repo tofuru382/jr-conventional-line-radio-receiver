@@ -84,6 +84,7 @@ async function setup(
     recordings = [],
     connectionLog = [],
     bridge = null,
+    channelClass = null,
   } = {},
 ) {
   const dom = new JSDOM(html, {
@@ -166,6 +167,7 @@ async function setup(
   w.__TAURI__ = native
     ? {
         core: {
+          ...(channelClass ? { Channel: channelClass } : {}),
           invoke: async (command, args) => {
             calls.push({ command, args });
             if (command === "load_preferences") {
@@ -2597,4 +2599,35 @@ test("gain and ppm changes while receiving are sent without restarting", async (
   assert.deepEqual(tuning[0].args.control, { gain_db: 30.5, ppm: 0, bias_tee: false });
   assert.deepEqual(tuning[1].args.control, { gain_db: 30.5, ppm: 0, bias_tee: true });
   assert.equal(ui.calls.filter((c) => c.command === "start").length, 1);
+});
+
+test("pushed monitor audio plays without polling for it and follows the automatic choice", async (t) => {
+  let channel;
+  const ui = await setup(t, {
+    channelClass: class {
+      constructor() {
+        channel = this;
+      }
+    },
+  });
+  ui.$("listen").checked = true; // the harness starts muted
+  await ui.click("start");
+  await ui.poll();
+  assert.ok(channel, "the page subscribes when the API has channels");
+  assert.ok(ui.calls.some((c) => c.command === "subscribe_monitor_audio"));
+  const push = ui.calls.filter((c) => c.command === "set_monitor_push").at(-1);
+  assert.equal(push.args.settings.enabled, true);
+  // Status polls no longer take the audio.
+  const snapshot = ui.calls.filter((c) => c.command === "snapshot").at(-1);
+  assert.equal(snapshot.args.audio, false);
+  const target = presets[2].id;
+  ui.$("auto-select").checked = true;
+  channel.onmessage({
+    channel: target,
+    frames: [{ channel: target, epoch: 0, index: 0, pcm: new Array(320).fill(1000) }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const frequency = (presets[2].frequency_hz / 1e6).toFixed(5);
+  assert.ok(ui.$("selected-frequency").textContent.includes(frequency));
+  assert.ok(ui.playback.length > 0, "the pushed frame was scheduled");
 });

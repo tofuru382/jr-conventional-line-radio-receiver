@@ -343,6 +343,10 @@ pub mod playout {
     /// Added after each underrun in the middle of a call, up to `MAX`.
     pub const STEP: usize = 300 * MS;
     pub const MAX: usize = 1600 * MS;
+    /// After this long without an underrun, the buffer gives back one `STEP`
+    /// (down to `START`): a stretch of bad reception must not leave the
+    /// latency raised for the rest of the session.
+    pub const SHRINK_AFTER: Duration = Duration::from_secs(60);
     /// Start anyway once input has paused this long: the end of a short
     /// call. Longer than the gap between RTL-TCP bursts (~0.5 s), so a burst
     /// gap does not start playback before the buffer target is reached.
@@ -377,6 +381,8 @@ pub mod playout {
         dry_at: Option<Instant>,
         /// The PCM waiting to start follows a quiet second (may be noise).
         isolated: bool,
+        /// When the target last grew or shrank.
+        resized_at: Option<Instant>,
         pub underruns: u32,
     }
     impl Default for Playout {
@@ -389,6 +395,7 @@ pub mod playout {
                 last_active: None,
                 dry_at: None,
                 isolated: false,
+                resized_at: None,
                 underruns: 0,
             }
         }
@@ -408,6 +415,7 @@ pub mod playout {
                     // Starved in the middle of a call: buffer more next time.
                     self.underruns += 1;
                     self.target = (self.target + STEP).min(MAX);
+                    self.resized_at = Some(now);
                 }
             }
             if before == 0 && !self.playing {
@@ -429,6 +437,14 @@ pub mod playout {
         pub fn step(&mut self, now: Instant, queued: i64, low_water: i64) -> Step {
             if self.playing || queued > 0 {
                 self.last_active = Some(now);
+            }
+            if self.target > START
+                && self
+                    .resized_at
+                    .is_some_and(|t| now.duration_since(t) >= SHRINK_AFTER)
+            {
+                self.target = (self.target - STEP).max(START);
+                self.resized_at = Some(now);
             }
             let paused = self
                 .last_audio
@@ -502,7 +518,9 @@ mod android {
             .and_then(|b| {
                 b.direction(AudioDirection::Output)
                     .sharing_mode(AudioSharingMode::Shared)
-                    .performance_mode(AudioPerformanceMode::None)
+                    // The playout buffers 400 ms or more anyway: let the
+                    // device batch its work to save battery.
+                    .performance_mode(AudioPerformanceMode::PowerSaving)
                     .channel_count(1)
                     .format(AudioFormat::PCM_I16)
                     .buffer_capacity_in_frames(DEVICE_CAPACITY)
@@ -790,6 +808,23 @@ mod tests {
         let before = p.underruns;
         let (after, _, _) = simulate(&mut p, &again, 55_000);
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn a_grown_buffer_shrinks_back_after_a_quiet_minute() {
+        let mut arrivals = Vec::new();
+        for k in 0..33u64 {
+            let late = if k % 3 == 2 { 500 } else { 0 };
+            arrivals.push((k * 600 + late, 4800));
+        }
+        let mut p = playout::Playout::default();
+        simulate(&mut p, &arrivals, 25_000);
+        let grown = p.target_ms();
+        assert!(grown > 400);
+        // Three minutes of steady delivery: one step back per minute.
+        let steady: Vec<(u64, usize)> = (0..300u64).map(|k| (30_000 + k * 600, 4800)).collect();
+        simulate(&mut p, &steady, 215_000);
+        assert_eq!(p.target_ms(), 400, "grown to {grown} ms");
     }
 
     #[test]

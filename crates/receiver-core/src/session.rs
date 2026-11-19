@@ -558,19 +558,30 @@ impl Session {
     /// Audio-only counterpart of [`Self::snapshot_with_monitor`] for a native
     /// player: the same channel choice, without cloning any channel status.
     pub fn take_monitor_audio(&self, selected: Option<&str>, automatic: bool) -> Vec<Audio> {
+        self.take_monitor_audio_chosen(selected, automatic).1
+    }
+    /// [`Self::take_monitor_audio`] with the channel it was taken for (the
+    /// automatic choice when `automatic`), so a pushed stream can tell the
+    /// page which channel it carries.
+    pub fn take_monitor_audio_chosen(
+        &self,
+        selected: Option<&str>,
+        automatic: bool,
+    ) -> (Option<String>, Vec<Audio>) {
         let (preferred, _) = crate::lock(&self.monitor).snapshot();
         let selected = if automatic {
             preferred.as_deref().or(selected)
         } else {
             selected
         };
+        let chosen = selected.map(String::from);
         let mut audio = Vec::new();
         for c in &self.channels {
             let mut c = crate::lock(c);
             let monitored = selected == Some(c.status.config.id.as_str());
             c.route_audio(monitored, &mut audio);
         }
-        audio
+        (chosen, audio)
     }
     /// Ask the session to stop without waiting (see [`Self::stop`]).
     pub fn request_stop(&self) {

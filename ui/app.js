@@ -18,7 +18,51 @@ const androidDriver = { host: "127.0.0.1", port: "1234" };
 let nativeAudio = false,
   nativeMonitorState = "",
   serviceReceiving = false;
+// Monitor audio pushed by the receiver as it is decoded (see
+// subscribe_monitor_audio): it keeps flowing while the page's timers are
+// throttled (Android in the background, a minimized window). Polling then
+// carries status only.
+let pushedAudio = false,
+  pushState = "";
+async function startAudioPush() {
+  const Channel = window.__TAURI__?.core?.Channel;
+  if (!native || !Channel) return;
+  const channel = new Channel();
+  channel.onmessage = (message) => {
+    const chosen = message.channel;
+    if (
+      $("auto-select").checked &&
+      chosen &&
+      chosen !== selected &&
+      channels.some((c) => c.id === chosen)
+    )
+      select(chosen);
+    if (running) play(message.frames);
+  };
+  try {
+    await invoke("subscribe_monitor_audio", { channel });
+    pushedAudio = true;
+    syncAudioPush();
+  } catch {
+    pushedAudio = false;
+  }
+}
+function syncAudioPush() {
+  if (!pushedAudio) return;
+  const settings = {
+    enabled: running && $("listen").checked && !nativeAudio,
+    selected: selected || null,
+    automatic: $("auto-select").checked,
+  };
+  const next = JSON.stringify(settings);
+  if (next === pushState) return;
+  pushState = next;
+  invoke("set_monitor_push", { settings }).catch(() => {
+    pushState = "";
+  });
+}
 function syncNativeMonitor() {
+  syncAudioPush();
   if (!nativeAudio) return;
   const settings = {
     enabled: running && $("listen").checked,
@@ -1234,11 +1278,16 @@ function renderRecording() {
   }
   // A problem with one call's WAV does not stop the saving; it shows the
   // same way, without opening the settings.
-  const error = recordingActionError || s.error || s.warning;
+  // Storage that fell behind costs a few frames, not the whole recording.
+  const dropped = s.dropped_events
+    ? `保存が追いつかず ${s.dropped_events.toLocaleString()} 件を欠落しました（音声は無音で補い、保存は続けています）。保存先の速度と空き容量を確認してください。`
+    : "";
+  const warning = s.warning || dropped;
+  const error = recordingActionError || s.error || warning;
   const message = error ? friendlyError(error) : "";
   if ($("recording-error").textContent !== message) {
     $("recording-error").textContent = message;
-    if (error && error !== s.warning) $("recording-settings").open = true;
+    if (error && error !== warning) $("recording-settings").open = true;
   }
   $("recording-error").hidden = !error;
 }
@@ -2522,7 +2571,7 @@ async function poll() {
   // natively and needs nothing from the page; the desktop still feeds its
   // audio but skips every render until the page is visible again.
   const hidden = document.visibilityState === "hidden";
-  if (hidden && nativeAudio) {
+  if (hidden && (nativeAudio || pushedAudio)) {
     setTimeout(poll, 1000);
     return;
   }
@@ -2545,7 +2594,7 @@ async function poll() {
       const result = await invoke("snapshot", {
         selected: requestedChannel,
         automatic,
-        ...(nativeAudio ? { audio: false } : {}),
+        ...(nativeAudio || pushedAudio ? { audio: false } : {}),
       });
       if (result && generation === uiGeneration) {
         const s = result.status;
@@ -2553,6 +2602,7 @@ async function poll() {
         if (s.recording) recordingStatus = s.recording;
         running = s.running;
         syncBackgroundService();
+        syncAudioPush();
         const selectionCurrent = revision === selectionRevision;
         if (
           selectionCurrent &&
@@ -2699,6 +2749,7 @@ try {
         await flushPreferences();
       });
     }
+    await startAudioPush();
     poll();
   } else {
     $("runtime-note").textContent =

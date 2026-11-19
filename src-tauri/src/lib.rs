@@ -154,6 +154,78 @@ async fn stop_recording(
     .await
     .map_err(|e| e.to_string())?
 }
+/// Monitor audio pushed to the page as it is decoded, instead of waiting for
+/// the page's next status poll: the WebView throttles timers in the
+/// background (Android) and while minimized, which made polled audio choppy.
+#[derive(Default, Clone)]
+struct AudioPush {
+    channel: Arc<Mutex<Option<tauri::ipc::Channel<PushedAudio>>>>,
+    settings: Arc<Mutex<PushSettings>>,
+    started: Arc<std::sync::OnceLock<()>>,
+}
+#[derive(Clone, Default, serde::Deserialize, PartialEq)]
+struct PushSettings {
+    enabled: bool,
+    selected: Option<String>,
+    automatic: bool,
+}
+#[derive(Clone, serde::Serialize)]
+struct PushedAudio {
+    /// The channel the frames are for (the automatic choice when enabled).
+    channel: Option<String>,
+    frames: Vec<pipeline::Audio>,
+}
+/// Every 40 ms (one radio frame) while enabled.
+const PUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(40);
+#[tauri::command]
+async fn subscribe_monitor_audio(
+    channel: tauri::ipc::Channel<PushedAudio>,
+    receiver: tauri::State<'_, Receiver>,
+    push: tauri::State<'_, AudioPush>,
+) -> Result<(), String> {
+    *receiver_core::lock(&push.channel) = Some(channel);
+    let (receiver, push) = (receiver.inner().clone(), push.inner().clone());
+    push.started.clone().get_or_init(move || {
+        let spawned = std::thread::Builder::new()
+            .name("monitor-push".into())
+            .spawn(move || loop {
+                std::thread::sleep(PUSH_EVERY);
+                let settings = receiver_core::lock(&push.settings).clone();
+                if !settings.enabled {
+                    continue;
+                }
+                let Some(session) = receiver.current() else {
+                    continue;
+                };
+                let (channel, frames) = session
+                    .take_monitor_audio_chosen(settings.selected.as_deref(), settings.automatic);
+                if frames.is_empty() {
+                    continue;
+                }
+                let mut target = receiver_core::lock(&push.channel);
+                let failed = target
+                    .as_ref()
+                    .is_some_and(|c| c.send(PushedAudio { channel, frames }).is_err());
+                if failed {
+                    // The page went away (reload): it subscribes again.
+                    *target = None;
+                }
+            });
+        if let Err(e) = spawned {
+            receiver_core::diag::note(format!("音声の送出を開始できません：{e}"));
+        }
+    });
+    Ok(())
+}
+/// What the pushed monitor audio carries; `enabled` false stops draining.
+#[tauri::command]
+async fn set_monitor_push(
+    settings: PushSettings,
+    push: tauri::State<'_, AudioPush>,
+) -> Result<(), String> {
+    *receiver_core::lock(&push.settings) = settings;
+    Ok(())
+}
 /// Gain, frequency correction or bias tee while receiving (see
 /// `receiver_core::source::Control`; absent fields stay as they are).
 #[tauri::command]
@@ -423,6 +495,7 @@ pub fn run() {
             Ok(())
         })
         .manage(receiver)
+        .manage(AudioPush::default())
         .manage(PreferencesStore::default())
         .manage(monitor)
         .plugin(tauri_plugin_dialog::init())
@@ -450,7 +523,9 @@ pub fn run() {
             stop_recording,
             snapshot,
             set_tuning,
-            test_rtl_tcp
+            test_rtl_tcp,
+            subscribe_monitor_audio,
+            set_monitor_push
         ])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
