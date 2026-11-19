@@ -74,13 +74,13 @@ fn run() -> Result<()> {
                 ppm: 0,
                 reconnect_seconds: 60,
             };
-            let mut session = Session::start(Config {
+            let session = Session::start(Config {
                 input: Input::RtlTcp { radio },
                 channels: preset.channels,
             })?;
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(seconds) {
-                if !session.snapshot(None).0.running {
+                if !session.is_running() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));

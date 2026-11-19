@@ -81,6 +81,16 @@ impl Dsp {
         {
             return Err("IQ contains non-finite samples".into());
         }
+        Ok(self.process_dual_finite(iq, bits, soft))
+    }
+    /// [`Self::process_dual`] for IQ the caller has already checked to be
+    /// finite (the receiver session checks each block once for all channels).
+    pub fn process_dual_finite(
+        &mut self,
+        iq: &[Complex32],
+        bits: &mut [Vec<u8>; 2],
+        soft: &mut [Vec<[u8; 2]>; 2],
+    ) -> Snapshot {
         for b in bits.iter_mut() {
             b.resize(iq.len() * 2 + 4, 0);
         }
@@ -96,7 +106,11 @@ impl Dsp {
         for q in soft.iter_mut() {
             q.truncate(count);
         }
-        Ok(self.0.snapshot())
+        self.0.snapshot()
+    }
+    /// Channel-filtered signal power since the last call (dB re full scale).
+    pub fn take_channel_power_db(&mut self) -> Option<f64> {
+        self.0.take_channel_power_db()
     }
     /// Differential constellation and EVM after receive filtering, timing,
     /// carrier and survivor-channel correction; preserves received scatter.

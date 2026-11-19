@@ -51,6 +51,13 @@ pub struct Status {
     pub combined_frames: u64,
     /// Whether the alternate detector runs (it pauses on idle channels).
     pub alternate_running: bool,
+    /// Power after the channel filter (dB re full-scale IQ): this channel's
+    /// own signal level, unlike `input_dbfs`, which covers the whole band.
+    pub channel_dbfs: f64,
+    /// Automatic frequency correction in effect for `frequency_error_hz`,
+    /// and whether the carrier loop has settled since it last changed.
+    pub applied_correction_hz: f64,
+    pub correction_settled: bool,
     pub carrier_locked: bool,
     pub frequency_error_hz: f64,
     pub evm_percent: f64,
@@ -73,6 +80,18 @@ pub struct FrameEvent {
     pub data: Option<[u8; 28]>,
     /// Which detector's decisions the frame was taken from.
     pub detector: Detector,
+    /// When the frame's last sample was received, from the capture time of
+    /// its IQ block (see [`BlockInfo`]); `None` without a capture clock.
+    pub received_at: Option<std::time::SystemTime>,
+}
+/// What the receiver session knows about an IQ block before the channels
+/// process it, computed once for all of them.
+#[derive(Clone, Copy, Default)]
+pub struct BlockInfo {
+    /// Mean power of the whole (wideband) block in dBFS.
+    pub dbfs: Option<f64>,
+    /// When the block's first sample was received.
+    pub captured: Option<std::time::SystemTime>,
 }
 /// Frame decoded once and reused by the merger, the voice decoder, the data
 /// decoder and the recording.
@@ -135,6 +154,15 @@ pub struct Pipeline {
     // Segment sample count until which the alternate detector keeps running
     // after the last frame lock.
     alternate_until: u64,
+    // The session checked the IQ for non-finite samples (see trust_input).
+    input_checked: bool,
+    // iq_samples when the correction last changed.
+    retuned_at: u64,
+    // Capture time of the current segment's sample 0, when known.
+    segment_time: Option<std::time::SystemTime>,
+    // Changes of `history` since the last snapshot.
+    history_revision: u64,
+    snapshot_revision: u64,
     history: VecDeque<Received>,
     events: VecDeque<Message>,
     pub status: Status,
@@ -162,13 +190,25 @@ impl Pipeline {
             last_speech: None,
             segment_samples: 0,
             alternate_until: 0,
+            input_checked: false,
+            retuned_at: 0,
+            segment_time: None,
+            history_revision: 0,
+            snapshot_revision: u64::MAX,
             history: VecDeque::new(),
             events: VecDeque::new(),
             status: Status {
                 input_dbfs: -120.0,
+                channel_dbfs: -120.0,
+                correction_settled: true,
                 ..Status::default()
             },
         })
+    }
+    /// The caller checks every IQ block for non-finite samples before it
+    /// reaches this pipeline (once for all channels), so the DSP skips it.
+    pub fn trust_input(&mut self) {
+        self.input_checked = true;
     }
     fn synchronizer() -> Synchronizer {
         Synchronizer::with_validator(|frame| Decoded::of(frame).ok())
@@ -186,6 +226,9 @@ impl Pipeline {
         self.dsp
             .retune(self.rate, self.config.frequency_hz - self.center + tuning)?;
         self.tuning = tuning;
+        self.retuned_at = self.status.iq_samples;
+        self.status.applied_correction_hz = tuning;
+        self.status.correction_settled = false;
         Ok(())
     }
     pub fn discontinuity(&mut self) -> Result<(), String> {
@@ -203,7 +246,9 @@ impl Pipeline {
         self.last_speech = None;
         self.segment_samples = 0;
         self.alternate_until = 0;
+        self.segment_time = None;
         self.history.clear();
+        self.history_revision += 1;
         self.events.clear();
         self.status.epoch += 1;
         self.status.discontinuities += 1;
@@ -219,17 +264,46 @@ impl Pipeline {
     pub fn process_observed(
         &mut self,
         iq: &[Complex32],
+        observe: impl FnMut(FrameEvent),
+    ) -> Result<Vec<Audio>, String> {
+        self.process_block(iq, BlockInfo::default(), observe)
+    }
+    /// [`Self::process_observed`] with what the session computed once for
+    /// all channels: the block's wideband power and its capture time.
+    pub fn process_block(
+        &mut self,
+        iq: &[Complex32],
+        info: BlockInfo,
         mut observe: impl FnMut(FrameEvent),
     ) -> Result<Vec<Audio>, String> {
+        if let Some(captured) = info.captured {
+            let before =
+                std::time::Duration::from_secs_f64(self.segment_samples as f64 / self.rate);
+            self.segment_time = captured.checked_sub(before);
+        }
         self.status.iq_samples += iq.len() as u64;
         // The alternate detector costs twice the primary one; run it only
         // around signals (see `alternate_until`).
         self.dsp
             .set_alternate_active(self.segment_samples < self.alternate_until);
         self.segment_samples += iq.len() as u64;
-        let snap = self
-            .dsp
-            .process_dual(iq, &mut self.dibits, &mut self.soft)?;
+        let snap = if self.input_checked {
+            self.dsp
+                .process_dual_finite(iq, &mut self.dibits, &mut self.soft)
+        } else {
+            self.dsp
+                .process_dual(iq, &mut self.dibits, &mut self.soft)?
+        };
+        if let Some(level) = self.dsp.take_channel_power_db() {
+            self.status.channel_dbfs = level;
+        }
+        // The carrier loop follows a correction step within a few hundred
+        // symbols; half a second leaves a wide margin.
+        if !self.status.correction_settled
+            && self.status.iq_samples.saturating_sub(self.retuned_at) as f64 >= 0.5 * self.rate
+        {
+            self.status.correction_settled = true;
+        }
         for (stream, sync) in [&mut self.sync, &mut self.alternate_sync]
             .into_iter()
             .enumerate()
@@ -254,13 +328,10 @@ impl Pipeline {
         self.status.carrier_locked = snap.carrier_locked != 0;
         self.status.frequency_error_hz = snap.frequency_offset_hz;
         self.status.frame_locked = self.sync.locked || self.alternate_sync.locked;
-        if !iq.is_empty() {
-            let power = iq
-                .iter()
-                .map(|s| s.real as f64 * s.real as f64 + s.imaginary as f64 * s.imaginary as f64)
-                .sum::<f64>()
-                / iq.len() as f64;
-            self.status.input_dbfs = 10.0 * power.max(1e-12).log10();
+        if let Some(dbfs) = info.dbfs {
+            self.status.input_dbfs = dbfs;
+        } else if !iq.is_empty() {
+            self.status.input_dbfs = block_dbfs(iq);
         }
         let mut audio = Vec::new();
         for (frame, detector, decoded) in frames {
@@ -312,6 +383,9 @@ impl Pipeline {
         self.last_offset = Some(frame.bit_offset);
         self.status.frames += 1;
         self.status.synchronized_frames += u64::from(frame.sync_matched);
+        let received_at = self.segment_time.map(|t| {
+            t + std::time::Duration::from_secs_f64((frame.bit_offset + 384) as f64 / 9600.0)
+        });
         let Decoded { speech, data } = decoded;
         let corrected_bits = speech.as_ref().map(|s| s.corrected_bits);
         let payload = speech.as_ref().map(|s| s.payload);
@@ -330,8 +404,10 @@ impl Pipeline {
                 OperationReception::update(
                     &mut self.status.operation_monitor,
                     &message,
-                    chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
-                        .to_rfc3339(),
+                    chrono::DateTime::<chrono::Utc>::from(
+                        received_at.unwrap_or_else(std::time::SystemTime::now),
+                    )
+                    .to_rfc3339(),
                 );
             }
             if self.events.len() == 128 {
@@ -345,6 +421,7 @@ impl Pipeline {
                         || m.message.raw_hex == message.raw_hex
                             && m.message.timestamp == message.timestamp)
             });
+            self.history_revision += 1;
             if let Some(m) = existing {
                 m.message = message;
                 m.receptions += 1;
@@ -368,6 +445,7 @@ impl Pipeline {
             speech: payload,
             data: info,
             detector,
+            received_at,
         });
         let mut audio = self.drain();
         audio.extend(self.flush_idle(bit_offset)?);
@@ -424,13 +502,46 @@ impl Pipeline {
         self.events.drain(..).collect()
     }
     pub fn snapshot(&mut self) -> Status {
+        self.refresh_status();
+        self.status.clone()
+    }
+    /// Update `target` (a copy handed out earlier) to the current status,
+    /// rebuilding the message list only when the history changed.
+    pub fn snapshot_into(&mut self, target: &mut Status) {
+        let rebuild = self.snapshot_revision != self.history_revision;
+        self.refresh_status();
+        // Clone everything but the message list, which is copied only when
+        // the history changed since the previous snapshot.
+        let messages = std::mem::take(&mut self.status.messages);
+        let kept = if rebuild {
+            messages.clone()
+        } else {
+            std::mem::take(&mut target.messages)
+        };
+        *target = self.status.clone();
+        target.messages = kept;
+        self.status.messages = messages;
+    }
+    fn refresh_status(&mut self) {
         let (points, evm) = self.dsp.signal();
         self.status.constellation = points;
         self.status.evm_percent = evm;
         self.status.data = self.data.stats.clone();
-        self.status.messages = self.history.iter().rev().cloned().collect();
-        self.status.clone()
+        if self.snapshot_revision != self.history_revision {
+            self.status.messages = self.history.iter().rev().cloned().collect();
+            self.snapshot_revision = self.history_revision;
+        }
     }
+}
+
+/// Mean power of an IQ block in dBFS.
+pub fn block_dbfs(iq: &[Complex32]) -> f64 {
+    let power = iq
+        .iter()
+        .map(|s| s.real as f64 * s.real as f64 + s.imaginary as f64 * s.imaginary as f64)
+        .sum::<f64>()
+        / iq.len().max(1) as f64;
+    10.0 * power.max(1e-12).log10()
 }
 
 /// Compatibility accessor for the built-in regional profiles.

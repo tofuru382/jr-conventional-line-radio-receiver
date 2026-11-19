@@ -576,15 +576,10 @@ mod android {
             let audio = if current.inactive {
                 Vec::new()
             } else {
-                match receiver.0.lock() {
-                    Ok(guard) => guard
-                        .as_ref()
-                        .map(|s| {
-                            s.take_monitor_audio(current.selected.as_deref(), current.automatic)
-                        })
-                        .unwrap_or_default(),
-                    Err(_) => Vec::new(),
-                }
+                receiver
+                    .current()
+                    .map(|s| s.take_monitor_audio(current.selected.as_deref(), current.automatic))
+                    .unwrap_or_default()
             };
             let now_listening = current.enabled && !current.inactive;
             if listening && !now_listening {

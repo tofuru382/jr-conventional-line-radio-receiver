@@ -14,8 +14,17 @@ use receiver_core::{
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
+/// The current session. The lock is held only to read or replace the handle:
+/// stopping, recording and status reads work on a clone of the `Arc`, so a
+/// slow stop (joining 22 workers, finalizing files) never blocks the UI
+/// thread, the notification or the audio thread waiting for this lock.
 #[derive(Default, Clone)]
-struct Receiver(Arc<Mutex<Option<Session>>>);
+struct Receiver(Arc<Mutex<Option<Arc<Session>>>>);
+impl Receiver {
+    fn current(&self) -> Option<Arc<Session>> {
+        receiver_core::lock(&self.0).clone()
+    }
+}
 #[derive(Default, Clone)]
 struct PreferencesStore(Arc<preferences::Store>);
 #[tauri::command]
@@ -66,13 +75,20 @@ async fn preset_catalog(
 async fn start(config: Config, state: tauri::State<'_, Receiver>) -> Result<(), String> {
     let receiver = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut guard = receiver.lock().map_err(|e| e.to_string())?;
-        if let Some(session) = guard.as_ref() {
-            if session.snapshot(None).0.running {
+        let previous = {
+            let guard = receiver_core::lock(&receiver);
+            if guard.as_ref().is_some_and(|s| s.is_running()) {
                 return Err("受信中です。停止してから設定を変更してください。".into());
             }
+            guard.clone()
+        };
+        // A finished session's threads have ended; joining them is quick but
+        // happens outside the lock all the same.
+        if let Some(old) = previous {
+            old.stop();
         }
-        *guard = Some(Session::start(config)?);
+        let session = Arc::new(Session::start(config)?);
+        *receiver_core::lock(&receiver) = Some(session);
         Ok(())
     })
     .await
@@ -84,8 +100,8 @@ async fn stop(
 ) -> Result<receiver_core::recording::RecordingStatus, String> {
     let receiver = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut guard = receiver.lock().map_err(|e| e.to_string())?;
-        if let Some(s) = guard.as_mut() {
+        let session = receiver_core::lock(&receiver).clone();
+        if let Some(s) = session {
             s.stop();
             return Ok(s.stop_recording());
         }
@@ -95,7 +111,7 @@ async fn stop(
     .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-fn default_recording_directory(app: tauri::AppHandle) -> Result<String, String> {
+async fn default_recording_directory(app: tauri::AppHandle) -> Result<String, String> {
     recording_directory::default_directory(&app)?
         .into_os_string()
         .into_string()
@@ -114,9 +130,8 @@ async fn start_recording(
     let receiver = state.0.clone();
     let default = recording_directory::default_directory(&app).ok();
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = receiver.lock().map_err(|e| e.to_string())?;
-        let session = guard
-            .as_ref()
+        let session = receiver_core::lock(&receiver)
+            .clone()
             .ok_or("受信を開始してから録音してください。")?;
         let directory = std::path::Path::new(&directory);
         recording_directory::prepare(directory, default.as_deref())?;
@@ -131,35 +146,36 @@ async fn stop_recording(
 ) -> Result<receiver_core::recording::RecordingStatus, String> {
     let receiver = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let guard = receiver.lock().map_err(|e| e.to_string())?;
-        Ok(guard
-            .as_ref()
-            .ok_or("録音中の受信セッションがありません。")?
-            .stop_recording())
+        let session = receiver_core::lock(&receiver)
+            .clone()
+            .ok_or("録音中の受信セッションがありません。")?;
+        Ok(session.stop_recording())
     })
     .await
     .map_err(|e| e.to_string())?
 }
+#[derive(serde::Serialize)]
+struct Snapshot {
+    status: receiver_core::session::Overview,
+    audio: Vec<pipeline::Audio>,
+}
 /// `audio: false` leaves the monitor PCM for the Android native player.
+/// Asynchronous, so it never runs on (and never blocks) the UI thread.
 #[tauri::command]
-fn snapshot(
+async fn snapshot(
     selected: Option<String>,
     automatic: Option<bool>,
     audio: Option<bool>,
     state: tauri::State<'_, Receiver>,
-) -> Result<serde_json::Value, String> {
-    let guard = state.0.lock().map_err(|e| e.to_string())?;
-    match guard.as_ref() {
-        None => Ok(serde_json::Value::Null),
-        Some(s) => {
-            let (status, audio) = s.snapshot_with_options(
-                selected.as_deref(),
-                automatic.unwrap_or(false),
-                audio.unwrap_or(true),
-            );
-            Ok(serde_json::json!({"status":status,"audio":audio}))
-        }
-    }
+) -> Result<Option<Snapshot>, String> {
+    Ok(state.current().map(|s| {
+        let (status, audio) = s.snapshot_with_options(
+            selected.as_deref(),
+            automatic.unwrap_or(false),
+            audio.unwrap_or(true),
+        );
+        Snapshot { status, audio }
+    }))
 }
 /// Folders that may hold recordings: the defaults plus the configured folder.
 fn recording_roots(app: &tauri::AppHandle, directory: Option<String>) -> Vec<std::path::PathBuf> {
@@ -210,7 +226,7 @@ async fn delete_recording(
     .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-fn set_native_monitor(
+async fn set_native_monitor(
     settings: native_audio::Settings,
     receiver: tauri::State<'_, Receiver>,
     monitor: tauri::State<'_, native_audio::NativeMonitor>,
@@ -257,7 +273,7 @@ fn previous_connection_log() -> Vec<(u64, String)> {
 /// Diagnosis: save the next 10 s of raw IQ as a WAV next to the recordings
 /// (the IQ WAV input replays it). Returns the file path.
 #[tauri::command]
-fn capture_iq(
+async fn capture_iq(
     directory: Option<String>,
     state: tauri::State<'_, Receiver>,
     app: tauri::AppHandle,
@@ -266,9 +282,8 @@ fn capture_iq(
         Some(d) => std::path::PathBuf::from(d),
         None => recording_directory::default_directory(&app)?,
     };
-    let guard = state.0.lock().map_err(|e| e.to_string())?;
-    let session = guard.as_ref().ok_or("受信中に保存してください。")?;
-    let (overview, _) = session.snapshot(None);
+    let session = state.current().ok_or("受信中に保存してください。")?;
+    let overview = session.status(None, false);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -287,7 +302,7 @@ fn native_audio_status(
     monitor.stats()
 }
 #[tauri::command]
-fn play_test_sound(
+async fn play_test_sound(
     receiver: tauri::State<'_, Receiver>,
     monitor: tauri::State<'_, native_audio::NativeMonitor>,
 ) -> Result<(), String> {
@@ -424,8 +439,12 @@ pub fn run() {
                     receiver_core::diag::note("画面が閉じられました（受信は続けます）");
                 }
                 #[cfg(not(target_os = "android"))]
-                if let Some(mut session) = window.state::<Receiver>().0.lock().unwrap().take() {
-                    session.stop();
+                {
+                    let session = receiver_core::lock(&window.state::<Receiver>().0).take();
+                    if let Some(session) = session {
+                        // Closing the app: wait so recordings are finalized.
+                        session.stop();
+                    }
                 }
             }
         })

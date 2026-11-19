@@ -212,7 +212,12 @@ impl Recorder {
         self.send(|o| {
             (o.raw_frames || o.data_messages && !event.messages.is_empty()).then(|| Event::Frame {
                 channel: channel.into(),
-                received_at: now().to_rfc3339(),
+                // The frame's own reception time when the session knows it
+                // (block capture time), not when the worker got to it.
+                received_at: event
+                    .received_at
+                    .map_or_else(now, DateTime::<Utc>::from)
+                    .to_rfc3339(),
                 event,
             })
         });
@@ -1206,6 +1211,7 @@ mod tests {
                     speech: None,
                     data: None,
                     detector: Default::default(),
+                    received_at: None,
                 },
             })
             .unwrap();
@@ -1254,6 +1260,7 @@ mod tests {
                     speech: None,
                     data: None,
                     detector: Default::default(),
+                    received_at: None,
                 },
             })
             .unwrap();
