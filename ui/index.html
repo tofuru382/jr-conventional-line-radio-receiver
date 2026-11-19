@@ -53,6 +53,9 @@
           電池の最適化がオンのため、画面を消すと Android に受信を止められることがあります。
         </p>
         <p id="background-notice-vendor" hidden></p>
+        <label id="background-resume-group" class="check-field" for="background-resume" hidden
+          ><input id="background-resume" type="checkbox" />止められた後にアプリを開いたら、自動で受信を再開する</label
+        >
         <div class="notice-actions">
           <button id="background-battery" type="button">電池の最適化をオフ</button>
           <button id="background-settings" type="button">アプリの設定</button>
@@ -168,9 +171,9 @@
             >
             <div id="tcp-group" class="tcp-fields">
               <label for="host"
-                >IP アドレス<input
+                >接続先<input
                   id="host"
-                  placeholder="IPv4 / IPv6 アドレス"
+                  placeholder="IP アドレスまたはホスト名"
                   autocomplete="off"
                   spellcheck="false" /></label
               ><label for="port"
@@ -183,6 +186,10 @@
                   step="1"
                   inputmode="numeric"
               /></label>
+              <div class="tcp-test-row">
+                <button id="tcp-test" type="button">接続テスト</button>
+                <span id="tcp-test-result" class="field-hint" role="status"></span>
+              </div>
             </div>
             <div id="device-group" hidden>
               <label for="device"
@@ -200,6 +207,9 @@
                   autocomplete="off"
                 /><button id="browse" type="button">選択</button>
               </div>
+              <label class="check-field" for="wave-fast"
+                ><input id="wave-fast" type="checkbox" />実時間より速く解析する（音声は出ません）</label
+              >
             </div>
             <label for="center"
               >中心周波数 <span class="unit">MHz</span
@@ -259,6 +269,13 @@
                   step="1" /></label
               ><label for="antenna"
                 >アンテナ<input id="antenna" placeholder="機器の既定値"
+              /></label
+              ><label for="stream-args"
+                >ストリーム引数<input
+                  id="stream-args"
+                  placeholder="自動（例: bufflen=16384）"
+                  autocomplete="off"
+                  spellcheck="false"
               /></label>
             </div>
           </details>
@@ -273,10 +290,17 @@
               step="1"
               inputmode="numeric"
           /></label>
+          <label id="bias-group" class="check-field" for="bias-tee"
+            ><input id="bias-tee" type="checkbox" />Bias-T（アンテナ・LNA に給電）</label
+          >
+          <p id="live-tuning-hint" class="field-hint" hidden>
+            受信中もゲイン・周波数補正・Bias-T は変更でき、すぐに反映されます。
+          </p>
         </fieldset>
         <div class="source-foot">
           <span id="capture-info">中心 352.603125 MHz</span
-          ><span id="progress"></span>
+          ><span id="progress"></span
+          ><button id="apply-ppm" type="button" hidden></button>
         </div>
       </details>
       <section class="card recording" aria-labelledby="recording-title">

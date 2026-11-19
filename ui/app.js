@@ -1,4 +1,4 @@
-import { makeInput } from "./config.mjs";
+import { makeInput, makeTuning } from "./config.mjs";
 import { buildCatalog } from "./presets.mjs";
 import { AudioPlayer, Leveler } from "./audio.mjs";
 import { OperationMonitorView } from "./operation-monitor.mjs";
@@ -18,7 +18,97 @@ const androidDriver = { host: "127.0.0.1", port: "1234" };
 let nativeAudio = false,
   nativeMonitorState = "",
   serviceReceiving = false;
+// Monitor audio pushed by the receiver as it is decoded (see
+// subscribe_monitor_audio): it keeps flowing while the page's timers are
+// throttled (Android in the background, a minimized window). Polling then
+// carries status only.
+let pushedAudio = false,
+  pushState = "";
+async function startAudioPush() {
+  const Channel = window.__TAURI__?.core?.Channel;
+  if (!native || !Channel) return;
+  const channel = new Channel();
+  channel.onmessage = (message) => {
+    const chosen = message.channel;
+    if (
+      $("auto-select").checked &&
+      chosen &&
+      chosen !== selected &&
+      channels.some((c) => c.id === chosen)
+    )
+      select(chosen);
+    if (running) play(message.frames);
+  };
+  try {
+    await invoke("subscribe_monitor_audio", { channel });
+    pushedAudio = true;
+    syncAudioPush();
+  } catch {
+    pushedAudio = false;
+  }
+}
+function syncAudioPush() {
+  if (!pushedAudio) return;
+  const settings = {
+    enabled: running && $("listen").checked && !nativeAudio,
+    selected: selected || null,
+    automatic: $("auto-select").checked,
+  };
+  const next = JSON.stringify(settings);
+  if (next === pushState) return;
+  pushState = next;
+  invoke("set_monitor_push", { settings }).catch(() => {
+    pushState = "";
+  });
+}
+// Android: audio focus and the media session follow "listen" while
+// receiving (see AudioRoute.kt); its counters tell the page to mute.
+let routeListening = false,
+  route = null,
+  routeMessage = "";
+function syncAudioRoute() {
+  if (!platform.android || !window.JrAndroid?.setListening) return;
+  const listening = running && $("listen").checked;
+  if (listening === routeListening) return;
+  routeListening = listening;
+  window.JrAndroid.setListening(listening);
+}
+function setListen(on, message) {
+  routeMessage = message;
+  if ($("listen").checked === on) return;
+  $("listen").checked = on;
+  $("listen").dispatchEvent(new Event("change"));
+}
+// Whether audio may play now. Unplugged headphones and another app taking the
+// audio for good turn "listen" off; a phone call pauses until it ends; a
+// headset button or the lock screen toggles "listen".
+function audioRouteOpen() {
+  if (!platform.android || !window.JrAndroid?.audioRoute) return true;
+  let next;
+  try {
+    next = JSON.parse(window.JrAndroid.audioRoute());
+  } catch {
+    return true;
+  }
+  const previous = route;
+  route = next;
+  if (previous) {
+    if (next.noisy > previous.noisy)
+      setListen(false, "イヤホンの接続が切れたため消音しました");
+    else if (next.toggles > previous.toggles)
+      setListen(!$("listen").checked, "");
+    else if (next.focus === "lost" && previous.focus !== "lost")
+      setListen(false, "ほかのアプリが音声を使い始めたため消音しました");
+  }
+  if (next.focus === "transient") {
+    resetAudio();
+    return false;
+  }
+  return true;
+}
 function syncNativeMonitor() {
+  syncAudioPush();
+  syncAudioRoute();
   if (!nativeAudio) return;
   const settings = {
     enabled: running && $("listen").checked,
@@ -408,6 +498,7 @@ const preferenceFields = {
   rx_channel: "rx-channel",
   antenna: "antenna",
   path: "path",
+  stream_args: "stream-args",
 };
 const emptyRecording = () => ({
   state: "idle",
@@ -646,6 +737,8 @@ function showBackgroundNotice({ killed = null, starting = false } = {}) {
     $("background-notice-killed").textContent = `前回は ${at} ごろ、受信中に Android がアプリを止めました。`;
   }
   $("background-notice-killed").hidden = !killed;
+  $("background-resume-group").hidden = !killed;
+  $("background-resume").checked = autoResume();
   $("background-notice-battery").hidden = !restricted;
   $("background-battery").hidden = !restricted;
   const vendor = bridgeText("manufacturer").toLowerCase();
@@ -660,6 +753,35 @@ function showBackgroundNotice({ killed = null, starting = false } = {}) {
   $("background-notice-vendor").hidden = !help;
   $("background-notice").hidden = false;
 }
+let resumeAfterKill = false;
+// Files written by path reach MediaStore (music and file apps) only when
+// indexed: ask Android to, once a recording is complete.
+function noteRecording(next) {
+  const finished =
+    next?.state === "completed" &&
+    next.directory &&
+    !next.discarded &&
+    recordingStatus?.state !== "completed";
+  recordingStatus = next;
+  if (finished && platform.android) window.JrAndroid?.scanRecordings?.(next.directory);
+}
+// Opt-in: reopening the app after Android stopped it while receiving starts
+// reception again with the saved settings.
+const autoResumeKey = "jr-clrr-auto-resume";
+function autoResume() {
+  try {
+    return localStorage.getItem(autoResumeKey) === "on";
+  } catch {
+    return false;
+  }
+}
+$("background-resume").addEventListener("change", () => {
+  try {
+    localStorage.setItem(autoResumeKey, $("background-resume").checked ? "on" : "off");
+  } catch {
+    // Asked again next time.
+  }
+});
 $("background-battery").addEventListener("click", () => {
   try {
     window.JrAndroid?.requestBatteryExemption?.();
@@ -734,9 +856,13 @@ function capturePreferences() {
   return {
     version: 1,
     preset_file: presetFile,
-    input: Object.fromEntries(
-      Object.entries(preferenceFields).map(([key, id]) => [key, $(id).value]),
-    ),
+    input: {
+      ...Object.fromEntries(
+        Object.entries(preferenceFields).map(([key, id]) => [key, $(id).value]),
+      ),
+      bias_tee: $("bias-tee").checked,
+      wave_fast: $("wave-fast").checked,
+    },
     output: {
       enabled: recordingEnabled,
       directory: $("record-directory").value,
@@ -788,7 +914,9 @@ async function restorePreferences(initial = false) {
   recordingEnabled = saved?.output.enabled === true;
   if (saved) {
     for (const [key, id] of Object.entries(preferenceFields))
-      if (key !== "profile") $(id).value = saved.input[key];
+      if (key !== "profile") $(id).value = saved.input[key] ?? "";
+    $("bias-tee").checked = saved.input.bias_tee === true;
+    $("wave-fast").checked = saved.input.wave_fast === true;
     const args = $("args").value;
     if (args) {
       const option = el("option", "保存済みのデバイス");
@@ -866,11 +994,29 @@ $("preferences-retry").addEventListener("click", async () => {
     }
   } else await flushPreferences();
 });
+// Settings that apply while receiving: sent at once (see set_tuning).
+const liveTuning = new Set(["gain", "ppm", "bias-tee"]);
+// The settings form is locked while receiving or busy, except for the
+// live-tunable controls of a live input; some controls also depend on the
+// input kind or on the desktop app.
+function lockSettings() {
+  const kind = $("input-kind").value;
+  const wave = kind === "wave";
+  const live = running && !busy && !wave;
+  for (const control of $("settings").querySelectorAll("input, select, button")) {
+    const always =
+      ((control.id === "rate" || control.id === "gain") && wave) ||
+      ((control.id === "scan" || control.id === "browse" || control.id === "tcp-test") && !native);
+    control.disabled = always || ((running || busy) && !(live && liveTuning.has(control.id)));
+  }
+  $("live-tuning-hint").hidden = !live;
+  renderPpmSuggestion();
+}
 function setControls() {
   renderLive();
   $("route-open").disabled = busy || !presetCatalog.length;
   routePicker.setBlocked(running || busy);
-  $("settings").disabled = running || busy;
+  lockSettings();
   $("region").disabled = running || busy || !channels.length;
   $("preset-browse").disabled = !native || running || busy;
   $("preset-reload").disabled = !native || running || busy || !presetFile;
@@ -886,7 +1032,11 @@ function setControls() {
   $("preferences-retry").disabled = busy || (preferencesLoadFailed && running);
   $("total-enabled").textContent = enabled.size;
   renderMute();
-  $("audio-state").textContent = !$("listen").checked
+  $("audio-state").textContent = routeMessage && !$("listen").checked
+    ? routeMessage
+    : route?.focus === "transient" && $("listen").checked
+      ? "通話中のため一時的に消音しています"
+      : !$("listen").checked
     ? "消音中"
     : nativeAudio
       ? "音声オン"
@@ -1209,11 +1359,16 @@ function renderRecording() {
   }
   // A problem with one call's WAV does not stop the saving; it shows the
   // same way, without opening the settings.
-  const error = recordingActionError || s.error || s.warning;
+  // Storage that fell behind costs a few frames, not the whole recording.
+  const dropped = s.dropped_events
+    ? `保存が追いつかず ${s.dropped_events.toLocaleString()} 件を欠落しました（音声は無音で補い、保存は続けています）。保存先の速度と空き容量を確認してください。`
+    : "";
+  const warning = s.warning || dropped;
+  const error = recordingActionError || s.error || warning;
   const message = error ? friendlyError(error) : "";
   if ($("recording-error").textContent !== message) {
     $("recording-error").textContent = message;
-    if (error && error !== s.warning) $("recording-settings").open = true;
+    if (error && error !== warning) $("recording-settings").open = true;
   }
   $("recording-error").hidden = !error;
 }
@@ -1298,7 +1453,7 @@ async function stopSaving(fromCard = false) {
     if (active) recordingStatus = { ...recordingStatus, state: "stopping" };
     setControls();
     await flushPreferences();
-    if (active) recordingStatus = await invoke("stop_recording");
+    if (active) noteRecording(await invoke("stop_recording"));
   } catch (e) {
     recordingActionError = String(e.message ?? e);
   } finally {
@@ -1349,6 +1504,7 @@ async function prepareAudio() {
 }
 function play(frames) {
   if (nativeAudio) return;
+  if (!audioRouteOpen()) return;
   if (!context || context.state !== "running" || !$("listen").checked) return;
   audioPlayer.enqueue(frames, selected);
 }
@@ -1890,11 +2046,11 @@ function updateSource() {
   $("driver-group").hidden = !(tcp && platform.android);
   $("device-group").hidden = wave || tcp || usb;
   $("tcp-group").hidden = !tcp;
-  $("ppm-group").hidden = !(tcp || usb);
+  $("ppm-group").hidden = wave;
+  $("bias-group").hidden = wave;
   $("soapy-options").hidden = wave || tcp || usb;
   $("file-group").hidden = !wave;
-  $("rate").disabled = wave;
-  $("gain").disabled = wave;
+  lockSettings();
   $("rate").title = wave ? "WAV ヘッダーから取得します" : "";
   $("gain").placeholder = tcp || usb ? "自動" : "機器の既定値";
   const host = $("host").value.trim();
@@ -2192,9 +2348,12 @@ async function startReception() {
         "args",
         "antenna",
         "rx-channel",
+        "stream-args",
       ].map((id) => [id, $(id).value]),
     );
     values.kind = $("input-kind").value;
+    values.bias_tee = $("bias-tee").checked;
+    values.wave_fast = $("wave-fast").checked;
     const activeChannels = channels.filter((c) => enabled.has(c.id));
     const input = makeInput(values, activeChannels);
     busy = true;
@@ -2263,7 +2422,7 @@ async function stopReception() {
       recordingStatus = { ...recordingStatus, state: "stopping" };
       renderRecording();
     }
-    recordingStatus = await invoke("stop");
+    noteRecording(await invoke("stop"));
     running = false;
     syncBackgroundService();
     syncNativeMonitor();
@@ -2278,6 +2437,7 @@ async function stopReception() {
   }
 }
 $("listen").addEventListener("change", () => {
+  if ($("listen").checked) routeMessage = "";
   syncNativeMonitor();
   resetAudio();
   prepareAudio().catch(fail);
@@ -2342,11 +2502,83 @@ function frequencyCorrection(s) {
 }
 // Samples per second actually arriving; far from the setting means the
 // dongle is not running at the requested rate (or input is being lost).
+// Slightly fewer samples than requested, for a while, are lost upstream
+// (RTL-TCP reports no server-side loss): shown as an estimate.
 function measuredRate(s) {
   if (!s.input_rate || $("input-kind").value === "wave") return "";
-  const off = Math.abs(s.input_rate / s.sample_rate - 1) > 0.05;
-  return `　実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : ""}`;
+  const ratio = s.input_rate / s.sample_rate;
+  const off = Math.abs(ratio - 1) > 0.05;
+  const lost = !off && ratio < 0.99 ? `（推定欠落 ${((1 - ratio) * 100).toFixed(1)} %）` : "";
+  return `　実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : lost}`;
 }
+// After a session, the automatic frequency correction it settled on can be
+// kept as the tuner's ppm correction for the next start.
+function renderPpmSuggestion() {
+  const button = $("apply-ppm");
+  const suggested = Math.round(lastSnapshot?.frequency_correction_ppm ?? 0);
+  const usable =
+    !running && !busy && suggested !== 0 && $("input-kind").value !== "wave";
+  button.hidden = !usable;
+  if (usable)
+    button.textContent = `自動補正を周波数補正に反映（${suggested > 0 ? "+" : "−"}${Math.abs(suggested)} ppm）`;
+}
+$("apply-ppm").addEventListener("click", () => {
+  const suggested = Math.round(lastSnapshot?.frequency_correction_ppm ?? 0);
+  const ppm = Number($("ppm").value) || 0;
+  $("ppm").value = String(ppm + suggested);
+  lastSnapshot = { ...lastSnapshot, frequency_correction_ppm: 0 };
+  renderPpmSuggestion();
+  void persistPreferences();
+});
+// Gain, ppm and bias tee while receiving: applied without restarting. A
+// "change" event fires once a value is committed, not on every keystroke.
+async function sendTuning() {
+  if (!running || busy) return;
+  try {
+    const control = makeTuning(
+      {
+        gain: $("gain").value,
+        ppm: $("ppm").value,
+        bias_tee: $("bias-tee").checked,
+      },
+      $("input-kind").value,
+    );
+    await invoke("set_tuning", { control });
+    for (const id of ["gain", "ppm"]) $(id).removeAttribute("aria-invalid");
+  } catch (e) {
+    if (e.field) $(e.field).setAttribute("aria-invalid", "true");
+    fail(e);
+  }
+}
+for (const id of liveTuning)
+  $(id).addEventListener("change", () => {
+    void sendTuning();
+  });
+$("tcp-test").addEventListener("click", async () => {
+  const result = $("tcp-test-result");
+  result.textContent = "接続しています…";
+  $("tcp-test").disabled = true;
+  try {
+    const input = makeInput(
+      {
+        kind: "rtl_tcp",
+        host: $("host").value,
+        port: $("port").value,
+        rate: "240000",
+        center: "352.603125",
+        gain: "",
+        ppm: "0",
+      },
+      [{ frequency_hz: 352603125 }],
+    );
+    const probe = await invoke("test_rtl_tcp", { radio: input.radio });
+    result.textContent = `接続できました：${probe.address}・${probe.tuner}（ゲイン ${probe.gain_count} 段）`;
+  } catch (e) {
+    result.textContent = `接続できません：${e.message ?? e}`;
+  } finally {
+    lockSettings();
+  }
+});
 // Main page: calls in progress (with background recording and playback state)
 // and the latest recordings, playable in place.
 let liveKey = "";
@@ -2418,8 +2650,26 @@ $("volume").addEventListener("input", () => {
 });
 async function poll() {
   const started = performance.now();
+  // Hidden (screen off, app in the background): Android plays the monitor
+  // natively and needs nothing from the page; the desktop still feeds its
+  // audio but skips every render until the page is visible again.
+  const hidden = document.visibilityState === "hidden";
+  if (hidden && (nativeAudio || pushedAudio)) {
+    setTimeout(poll, 1000);
+    return;
+  }
   try {
-    if (native && !busy && sessionVisible) {
+    if (native && !busy && sessionVisible && hidden) {
+      const result = await invoke("snapshot", {
+        selected,
+        automatic: $("auto-select").checked,
+      });
+      if (result) {
+        running = result.status.running;
+        if (result.status.state === "receiving" || result.status.state === "completed")
+          play(result.audio);
+      }
+    } else if (native && !busy && sessionVisible) {
       const generation = uiGeneration;
       const requestedChannel = selected;
       const revision = selectionRevision;
@@ -2427,14 +2677,15 @@ async function poll() {
       const result = await invoke("snapshot", {
         selected: requestedChannel,
         automatic,
-        ...(nativeAudio ? { audio: false } : {}),
+        ...(nativeAudio || pushedAudio ? { audio: false } : {}),
       });
       if (result && generation === uiGeneration) {
         const s = result.status;
         lastSnapshot = s;
-        if (s.recording) recordingStatus = s.recording;
+        if (s.recording) noteRecording(s.recording);
         running = s.running;
         syncBackgroundService();
+        syncAudioPush();
         const selectionCurrent = revision === selectionRevision;
         if (
           selectionCurrent &&
@@ -2520,6 +2771,8 @@ for (const id of [
   "output-audio",
   "output-raw",
   "output-data",
+  "bias-tee",
+  "wave-fast",
 ]) {
   for (const event of ["input", "change"])
     $(id).addEventListener(event, () => {
@@ -2547,7 +2800,10 @@ try {
       addTestSound();
       addRecordingsBrowser();
       const kill = bridgeText("lastKill");
-      if (kill) showBackgroundNotice({ killed: Number(kill.split("\t")[1]) });
+      if (kill) {
+        showBackgroundNotice({ killed: Number(kill.split("\t")[1]) });
+        resumeAfterKill = autoResume();
+      }
     }
   }
   bundledCatalog = native
@@ -2579,7 +2835,12 @@ try {
         await flushPreferences();
       });
     }
+    await startAudioPush();
     poll();
+    if (resumeAfterKill && !running) {
+      resumeAfterKill = false;
+      $("start").click();
+    }
   } else {
     $("runtime-note").textContent =
       "ブラウザプレビュー　受信にはデスクトップアプリを起動してください";

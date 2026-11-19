@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
-import { makeInput } from "../../ui/config.mjs";
+import { makeInput, makeTuning } from "../../ui/config.mjs";
 import { buildCatalog } from "../../ui/presets.mjs";
 import { AudioPlayer, Leveler } from "../../ui/audio.mjs";
 import { OperationMonitorView } from "../../ui/operation-monitor.mjs";
@@ -84,6 +84,7 @@ async function setup(
     recordings = [],
     connectionLog = [],
     bridge = null,
+    channelClass = null,
   } = {},
 ) {
   const dom = new JSDOM(html, {
@@ -135,7 +136,7 @@ async function setup(
   let snapshot = { status: status(), audio: [] };
   let recording = { state: "idle", files: 0, pcm_samples: 0, error: null };
   let closeHandler;
-  w.testDependencies = { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError };
+  w.testDependencies = { makeInput, makeTuning, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError };
   w.structuredClone = structuredClone;
   // jsdom has no native modal behavior. Exercise our handlers, not a focus trap
   // or Escape key implementation; those belong to the browser's dialog element.
@@ -166,6 +167,7 @@ async function setup(
   w.__TAURI__ = native
     ? {
         core: {
+          ...(channelClass ? { Channel: channelClass } : {}),
           invoke: async (command, args) => {
             calls.push({ command, args });
             if (command === "load_preferences") {
@@ -276,7 +278,7 @@ async function setup(
     };
   };
   await w.eval(
-    `(async () => {const { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError } = window.testDependencies;\n${source}\n})()`,
+    `(async () => {const { makeInput, makeTuning, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError } = window.testDependencies;\n${source}\n})()`,
   );
   const $ = (id) => w.document.getElementById(id);
   if (!catalogError)
@@ -2146,7 +2148,12 @@ test("default source requires a user endpoint; filtering never removes active ch
   assert.equal(config.input.kind, "rtl_tcp");
   assert.equal(config.input.radio.host, "127.0.0.1");
   assert.equal(config.input.radio.port, 1234);
-  assert.equal(ui.$("settings").disabled, true);
+  // Locked while receiving, except what applies live (gain, ppm, bias tee).
+  for (const id of ["host", "port", "rate", "center", "input-kind", "tcp-test"])
+    assert.equal(ui.$(id).disabled, true, id);
+  await ui.poll();
+  for (const id of ["gain", "ppm", "bias-tee"]) assert.equal(ui.$(id).disabled, false, id);
+  assert.equal(ui.$("live-tuning-hint").hidden, false);
   assert.equal(ui.w.document.activeElement.id, "start");
   await ui.poll();
   assert.equal(ui.$("total-locked").textContent, "3");
@@ -2157,7 +2164,7 @@ test("default source requires a user endpoint; filtering never removes active ch
   });
   await ui.click("start");
   await ui.poll();
-  assert.equal(ui.$("settings").disabled, false);
+  for (const id of ["host", "port", "rate", "gain"]) assert.equal(ui.$(id).disabled, false, id);
   assert.equal(ui.$("state").textContent, "停止中");
   assert.equal(ui.$("channels").querySelectorAll("td.locked").length, 0);
 });
@@ -2577,4 +2584,86 @@ test("the version dialog credits the dongle drivers", async (t) => {
   assert.match($("about-driver").textContent, /librtlsdr/);
   assert.match($("about-driver").textContent, /Rtl-sdr driver/);
   assert.match($("about-font").textContent, /DotGothic16（Fontworks、SIL OFL 1\.1）/);
+});
+
+test("gain and ppm changes while receiving are sent without restarting", async (t) => {
+  const ui = await setup(t);
+  await ui.click("start");
+  await ui.poll();
+  await ui.change("gain", "30.5");
+  ui.$("bias-tee").checked = true;
+  ui.$("bias-tee").dispatchEvent(new ui.w.Event("change"));
+  await new Promise((resolve) => setImmediate(resolve));
+  const tuning = ui.calls.filter((c) => c.command === "set_tuning");
+  assert.equal(tuning.length, 2);
+  assert.deepEqual(tuning[0].args.control, { gain_db: 30.5, ppm: 0, bias_tee: false });
+  assert.deepEqual(tuning[1].args.control, { gain_db: 30.5, ppm: 0, bias_tee: true });
+  assert.equal(ui.calls.filter((c) => c.command === "start").length, 1);
+});
+
+test("pushed monitor audio plays without polling for it and follows the automatic choice", async (t) => {
+  let channel;
+  const ui = await setup(t, {
+    channelClass: class {
+      constructor() {
+        channel = this;
+      }
+    },
+  });
+  ui.$("listen").checked = true; // the harness starts muted
+  await ui.click("start");
+  await ui.poll();
+  assert.ok(channel, "the page subscribes when the API has channels");
+  assert.ok(ui.calls.some((c) => c.command === "subscribe_monitor_audio"));
+  const push = ui.calls.filter((c) => c.command === "set_monitor_push").at(-1);
+  assert.equal(push.args.settings.enabled, true);
+  // Status polls no longer take the audio.
+  const snapshot = ui.calls.filter((c) => c.command === "snapshot").at(-1);
+  assert.equal(snapshot.args.audio, false);
+  const target = presets[2].id;
+  ui.$("auto-select").checked = true;
+  channel.onmessage({
+    channel: target,
+    frames: [{ channel: target, epoch: 0, index: 0, pcm: new Array(320).fill(1000) }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const frequency = (presets[2].frequency_hz / 1e6).toFixed(5);
+  assert.ok(ui.$("selected-frequency").textContent.includes(frequency));
+  assert.ok(ui.playback.length > 0, "the pushed frame was scheduled");
+});
+
+test("Android mutes when headphones are unplugged and pauses during a call", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const listening = [];
+  let route = { noisy: 0, focus: "held", toggles: 0 };
+  app.w.JrAndroid = {
+    setReceiving() {},
+    setListening: (on) => listening.push(on),
+    audioRoute: () => JSON.stringify(route),
+  };
+  app.$("listen").checked = true;
+  await app.click("start");
+  const frame = (index) => ({
+    status: status(),
+    audio: [{ channel: presets[0].id, epoch: 0, index, pcm: new Array(320).fill(1000) }],
+  });
+  app.setSnapshot(frame(0));
+  await app.poll();
+  assert.deepEqual(listening, [true]);
+  const played = app.playback.length;
+  assert.ok(played > 0);
+  // A phone call: nothing plays until it ends, "listen" stays on.
+  route = { ...route, focus: "transient" };
+  app.setSnapshot(frame(1));
+  await app.poll();
+  assert.equal(app.playback.length, played);
+  assert.equal(app.$("listen").checked, true);
+  assert.equal(app.$("audio-state").textContent, "通話中のため一時的に消音しています");
+  // Headphones unplugged: "listen" turns off with the reason shown.
+  route = { ...route, focus: "held", noisy: 1 };
+  app.setSnapshot(frame(2));
+  await app.poll();
+  assert.equal(app.$("listen").checked, false);
+  assert.equal(app.$("audio-state").textContent, "イヤホンの接続が切れたため消音しました");
+  assert.equal(listening.at(-1), false);
 });

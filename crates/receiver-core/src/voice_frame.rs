@@ -289,14 +289,30 @@ pub(crate) fn encode(payload: &[u8; 20], alternate: bool) -> [u8; 48] {
 /// requires CRC-8 over the protected payload and the re-encoded tail
 /// (CRC-16 and Reed–Solomon parity, 64 bits) to match the received tail.
 const SOFT_DISTANCE: u16 = 24;
+/// With [`crate::tuning::WEIGHTED_DISTANCE`]: at most this many disagreeing
+/// bits, whose summed reliabilities may not exceed [`SOFT_WEIGHT_LIMIT`]
+/// (correct frames stay below about 1450 in the synthetic benchmark).
+///
+/// Beyond the convolutional code, a soft-decoded voice frame is checked only
+/// by its CRC-8 (the tail CRC-16 and Reed–Solomon parity cover just the last
+/// bytes), so a wrong path through a deep fade passes 1 time in 256. With
+/// SOVA reliabilities, 30 seeds of four fading conditions in crates/demod-eval
+/// (about 30,000 frames) accepted 8 frames never sent at 32 bits, 8 at 24 and
+/// 4 at 20; the previous receiver accepted 1. Twenty keeps nearly all of
+/// SOVA's gain (2 to 10 points more frames than before, depending on the
+/// channel) at about one false 40 ms frame per 7,500 in weak fading signals.
+const SOFT_DISTANCE_WEIGHTED: u16 = 20;
+const SOFT_WEIGHT_LIMIT: u32 = 1500;
 
 /// [`decode`], then, if that fails and per-bit reliabilities are available,
 /// soft-decision Viterbi decoding and errors-and-erasures repair of the
 /// Reed–Solomon tail with its least reliable bytes erased.
 pub fn decode_soft(envelope: &[u8; 48], confidence: &[u8]) -> Option<Speech> {
-    if let Some(speech) = decode(envelope) {
-        return Some(speech);
-    }
+    decode(envelope).or_else(|| decode_soft_only(envelope, confidence))
+}
+/// The soft-decision part of [`decode_soft`], for callers that already ran
+/// [`decode`] on the same envelope.
+pub fn decode_soft_only(envelope: &[u8; 48], confidence: &[u8]) -> Option<Speech> {
     if confidence.len() != 384 {
         return None;
     }
@@ -329,12 +345,34 @@ pub fn decode_soft(envelope: &[u8; 48], confidence: &[u8]) -> Option<Speech> {
             candidates.push(repaired);
         }
     }
+    let weighted = crate::tuning::on(crate::tuning::WEIGHTED_DISTANCE);
+    let (hamming_limit, weight_limit) = soft_limits(weighted);
     candidates.into_iter().find_map(|c| {
         if !mode(&c) || crc16(&c[28..34]) != u16::from_be_bytes([c[34], c[35]]) {
             return None;
         }
-        checked(&c, &received, &decoded, SOFT_DISTANCE)
+        let speech = checked(&c, &received, &decoded, hamming_limit)?;
+        if weighted {
+            // Disagreements on reliable bits are evidence against the
+            // candidate; on unreliable ones they are expected noise.
+            let encoded = convolution(&decoded);
+            let weight: u32 = (0..176)
+                .filter(|&i| encoded[i] != received[i])
+                .map(|i| weights[i] as u32)
+                .sum();
+            if weight > weight_limit {
+                return None;
+            }
+        }
+        Some(speech)
     })
+}
+fn soft_limits(weighted: bool) -> (u16, u32) {
+    if weighted {
+        (SOFT_DISTANCE_WEIGHTED, SOFT_WEIGHT_LIMIT)
+    } else {
+        (SOFT_DISTANCE, u32::MAX)
+    }
 }
 pub fn decode(envelope: &[u8; 48]) -> Option<Speech> {
     let word = descramble(envelope);

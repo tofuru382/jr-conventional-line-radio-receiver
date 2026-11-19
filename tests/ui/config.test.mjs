@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   makeInput,
+  makeTuning,
   InputError,
   requiredRate,
   rtlTcpRateSupported,
+  validHost,
 } from "../../ui/config.mjs";
 import { buildCatalog } from "../../ui/presets.mjs";
 const catalog = buildCatalog(
@@ -38,6 +40,7 @@ test("all 22 frequencies fit the requested RTL-TCP capture", () => {
       center_hz: 352603125,
       gain_db: null,
       ppm: 0,
+      bias_tee: false,
     },
   });
 });
@@ -70,7 +73,11 @@ test("wave and Soapy inputs keep their own settings", () => {
       { ...values, kind: "wave", path: "/tmp/a.wav", rate: "" },
       channels,
     ),
-    { kind: "wave", path: "/tmp/a.wav", center_hz: 352603125 },
+    { kind: "wave", path: "/tmp/a.wav", center_hz: 352603125, fast: false },
+  );
+  assert.equal(
+    makeInput({ ...values, kind: "wave", path: "/tmp/a.wav", wave_fast: true }, channels).fast,
+    true,
   );
   const sdr = makeInput(
     { ...values, kind: "sdr", args: "driver=rtlsdr", gain: "19.7" },
@@ -78,9 +85,38 @@ test("wave and Soapy inputs keep their own settings", () => {
   );
   assert.equal(sdr.radio.gain_db, 19.7);
   assert.equal(sdr.radio.channel, 0);
+  assert.equal(sdr.radio.ppm, 0);
+  assert.equal(sdr.radio.stream_args, "");
+  assert.equal(sdr.radio.bias_tee, false);
   assert.throws(
     () => makeInput({ ...values, kind: "sdr" }, channels),
     (e) => e.field === "args",
+  );
+});
+test("host names and scoped IPv6 addresses are accepted, URLs are not", () => {
+  for (const host of ["raspberrypi.local", "rtl-tcp.example.org", "fe80::1%wlan0", "192.168.1.20"])
+    assert.equal(validHost(host), true, host);
+  for (const host of ["https://example.com", "bad host", "", "256.1.1.1", "-a.example", "a..b"])
+    assert.equal(validHost(host), false, host);
+  assert.equal(
+    makeInput({ ...values, host: "raspberrypi.local", bias_tee: true }, channels).radio.bias_tee,
+    true,
+  );
+});
+test("live tuning sends automatic or manual gain, ppm and bias tee", () => {
+  assert.deepEqual(makeTuning({ gain: "", ppm: "-4", bias_tee: true }, "rtl_tcp"), {
+    gain_db: null,
+    ppm: -4,
+    bias_tee: true,
+  });
+  assert.equal(makeTuning({ gain: "30.5", ppm: "0" }, "sdr").gain_db, 30.5);
+  assert.throws(
+    () => makeTuning({ gain: "60", ppm: "0" }, "usb"),
+    (e) => e instanceof InputError && e.field === "gain",
+  );
+  assert.throws(
+    () => makeTuning({ gain: "", ppm: "1.5" }, "rtl_tcp"),
+    (e) => e.field === "ppm",
   );
 });
 test("IPv6 and edge rates are accepted consistently with the backend", () => {
@@ -110,7 +146,13 @@ test("all bundled profiles fit RTL-TCP at their recommended centers and rates", 
 test("the built-in USB driver gets rate, center, gain and correction only", () => {
   assert.deepEqual(makeInput({ ...values, kind: "usb", gain: "20", ppm: "-3" }, channels), {
     kind: "usb",
-    radio: { sample_rate: 240000, center_hz: 352603125, gain_db: 20, ppm: -3 },
+    radio: {
+      sample_rate: 240000,
+      center_hz: 352603125,
+      gain_db: 20,
+      ppm: -3,
+      bias_tee: false,
+    },
   });
   for (const [field, patch] of [
     ["rate", { rate: "320000" }],

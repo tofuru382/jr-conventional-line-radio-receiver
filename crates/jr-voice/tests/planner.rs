@@ -67,7 +67,9 @@ fn short_calls_emit_every_accepted_frame_at_eof() {
 }
 
 #[test]
-fn missing_slots_and_gaps_preserve_only_accepted_indices() {
+fn missing_slots_are_concealed_and_gaps_keep_only_accepted_indices() {
+    // Undecodable slots right after a received frame repeat it
+    // (concealment); a slot that does not follow, or a gap, does not.
     let events = [
         (0, Some(payload(0))),
         (1, Some(payload(1))),
@@ -80,7 +82,7 @@ fn missing_slots_and_gaps_preserve_only_accepted_indices() {
         (10, Some(payload(4))),
         (11, None),
     ];
-    assert_eq!(decode_indices(&events), [0, 1, 6, 7, 10]);
+    assert_eq!(decode_indices(&events), [0, 1, 2, 6, 7, 8, 9, 10, 11]);
 }
 
 #[test]
@@ -111,4 +113,19 @@ fn maximum_u32_index_survives_gap_and_flush() {
 fn missing_only_stream_has_no_output() {
     let events: Vec<_> = (0..8).map(|i| (i, None)).collect();
     assert!(decode_indices(&events).is_empty());
+}
+
+#[test]
+fn concealment_stops_after_three_slots_and_resumes_after_a_received_frame() {
+    let events = [
+        (0, Some(payload(0))),
+        (1, None),
+        (2, None),
+        (3, None),
+        (4, None),
+        (5, Some(payload(1))),
+        (6, None),
+        (7, Some(payload(2))),
+    ];
+    assert_eq!(decode_indices(&events), [0, 1, 2, 3, 5, 6, 7]);
 }

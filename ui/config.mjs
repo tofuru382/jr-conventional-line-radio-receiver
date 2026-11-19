@@ -21,6 +21,44 @@ export const RATE_CANDIDATES = {
 export function rtlTcpRateSupported(rate) {
   return (rate > 225000 && rate <= 300000) || (rate > 900000 && rate <= 3200000);
 }
+// An IPv4/IPv6 address (with an optional IPv6 scope such as %wlan0) or a
+// host name; the receiver resolves names when it connects.
+export function validHost(host) {
+  if (!host || host.length > 253 || !/^[A-Za-z0-9.\-:%_]+$/.test(host))
+    return false;
+  if (host.includes(":")) {
+    try {
+      return new URL(`http://[${host.split("%")[0]}]/`).hostname.includes(":");
+    } catch {
+      return false;
+    }
+  }
+  if (/^[\d.]+$/.test(host))
+    return (
+      /^(\d{1,3}\.){3}\d{1,3}$/.test(host) &&
+      host.split(".").every((n) => Number(n) <= 255 && String(Number(n)) === n)
+    );
+  return host
+    .split(".")
+    .every((label) => /^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$/.test(label));
+}
+// Gain, ppm and bias tee, as a change to send while receiving
+// (receiver_core::source::Control). Throws InputError like makeInput.
+export function makeTuning(values, kind) {
+  const bad = (field, message) => {
+    throw new InputError(field, message);
+  };
+  const gainText = String(values.gain ?? "").trim();
+  const gain = gainText === "" ? null : Number(gainText);
+  const [low, high] = kind === "usb" ? [0, 52.5] : [-10, 100];
+  if (gain !== null && (!Number.isFinite(gain) || gain < low || gain > high))
+    bad("gain", `ゲインは ${low}–${high} dB を指定するか、空欄で自動にしてください。`);
+  const ppm = Number(values.ppm);
+  const ppmLimit = kind === "usb" ? 488 : 1000;
+  if (!Number.isInteger(ppm) || Math.abs(ppm) > ppmLimit)
+    bad("ppm", `周波数補正は −${ppmLimit}–${ppmLimit} の整数を入力してください。`);
+  return { gain_db: gain, ppm, bias_tee: values.bias_tee === true };
+}
 export function makeInput(values, channels) {
   const bad = (field, message) => {
     throw new InputError(field, message);
@@ -45,7 +83,12 @@ export function makeInput(values, channels) {
   const center_hz = Math.round(number("center", 0.000001, 4294.967295) * 1e6);
   if (values.kind === "wave") {
     if (!values.path.trim()) bad("path", "IQ WAV ファイルを選択してください。");
-    return { kind: "wave", path: values.path.trim(), center_hz };
+    return {
+      kind: "wave",
+      path: values.path.trim(),
+      center_hz,
+      fast: values.wave_fast === true,
+    };
   }
   const sample_rate = number("rate", 9600, 20000000, true);
   if (requiredRate(channels, center_hz) >= sample_rate)
@@ -67,23 +110,21 @@ export function makeInput(values, channels) {
       bad("gain", "USB 直結のゲインは 0–52.5 dB を指定するか、空欄で自動にしてください。");
     return {
       kind: "usb",
-      radio: { sample_rate, center_hz, gain_db, ppm: number("ppm", -488, 488, true) },
+      radio: {
+        sample_rate,
+        center_hz,
+        gain_db,
+        ppm: number("ppm", -488, 488, true),
+        bias_tee: values.bias_tee === true,
+      },
     };
   }
   if (values.kind === "rtl_tcp") {
     const host = values.host.trim();
-    let validIp =
-      /^(\d{1,3}\.){3}\d{1,3}$/.test(host) &&
-      host.split(".").every((n) => Number(n) <= 255 && String(Number(n)) === n);
-    if (host.includes(":")) {
-      try {
-        validIp = new URL(`http://[${host}]/`).hostname.includes(":");
-      } catch {}
-    }
-    if (!validIp)
+    if (!validHost(host))
       bad(
         "host",
-        "利用する RTL-TCP サーバーの IPv4 / IPv6 アドレスを入力してください。",
+        "利用する RTL-TCP サーバーの IPv4 / IPv6 アドレスかホスト名（例: raspberrypi.local）を入力してください。",
       );
     const port = number("port", 1, 65535, true),
       ppm = number("ppm", -1000, 1000, true);
@@ -106,6 +147,7 @@ export function makeInput(values, channels) {
         center_hz,
         gain_db,
         ppm,
+        bias_tee: values.bias_tee === true,
       },
     };
   }
@@ -120,6 +162,9 @@ export function makeInput(values, channels) {
       gain_db,
       antenna: values.antenna,
       channel: number("rx-channel", 0, 255, true),
+      ppm: number("ppm", -1000, 1000, true),
+      stream_args: (values["stream-args"] ?? "").trim(),
+      bias_tee: values.bias_tee === true,
     },
   };
 }

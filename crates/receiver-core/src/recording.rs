@@ -90,6 +90,10 @@ pub struct RecordingStatus {
     /// Nothing was saved (no call, no selected JSONL rows): the session
     /// folder was removed instead of being kept empty.
     pub discarded: bool,
+    /// Audio frames and frame records dropped because the storage fell
+    /// behind; saving went on (audio gaps are filled with silence).
+    #[serde(default)]
+    pub dropped_events: u64,
 }
 impl Default for RecordingStatus {
     fn default() -> Self {
@@ -106,6 +110,7 @@ impl Default for RecordingStatus {
             error: None,
             warning: None,
             discarded: false,
+            dropped_events: 0,
         }
     }
 }
@@ -178,7 +183,11 @@ impl Recorder {
                     s.warning.clone_from(&writer.warning);
                     if let Err(e) = written { error = Some(e); break; }
                 }
-                let previous = state.lock().unwrap().error.clone();
+                let (previous, dropped) = {
+                    let s = state.lock().unwrap();
+                    (s.error.clone(), s.dropped_events)
+                };
+                writer.dropped_events = dropped;
                 writer.finish(error.or(previous))
             }));
             let mut s = state.lock().unwrap();
@@ -212,30 +221,43 @@ impl Recorder {
         self.send(|o| {
             (o.raw_frames || o.data_messages && !event.messages.is_empty()).then(|| Event::Frame {
                 channel: channel.into(),
-                received_at: now().to_rfc3339(),
+                // The frame's own reception time when the session knows it
+                // (block capture time), not when the worker got to it.
+                received_at: event
+                    .received_at
+                    .map_or_else(now, DateTime::<Utc>::from)
+                    .to_rfc3339(),
                 event,
             })
         });
     }
     fn send(&self, make: impl FnOnce(OutputOptions) -> Option<Event>) {
-        let mut sender = self.sender.lock().unwrap();
+        let mut sender = crate::lock(&self.sender);
         let Some(sending) = sender.as_ref() else {
             return;
         };
         let Some(event) = make(sending.options) else {
             return;
         };
-        if let Err(e) = sending.tx.try_send(event) {
-            let message = match e {
-                TrySendError::Full(_) => "保存処理が追いつかず保存を終了しました。保存先の速度と空き容量を確認してください。",
-                TrySendError::Disconnected(_) => "保存処理が停止しました。保存先とエラー内容を確認してください。",
-            };
-            let mut s = self.status.lock().unwrap();
-            s.error.get_or_insert_with(|| message.into());
-            if s.state == "recording" {
-                s.state = "stopping".into();
+        match sending.tx.try_send(event) {
+            Ok(()) => {}
+            // The storage fell behind for a moment (a slow card, another app
+            // writing): drop this event and keep saving. The WAV writer fills
+            // the missing frames with silence; the count goes to result.json.
+            Err(TrySendError::Full(_)) => {
+                let mut s = crate::lock(&self.status);
+                s.dropped_events += 1;
             }
-            sender.take();
+            Err(TrySendError::Disconnected(_)) => {
+                let mut s = crate::lock(&self.status);
+                s.error.get_or_insert_with(|| {
+                    "保存処理が停止しました。保存先とエラー内容を確認してください。".into()
+                });
+                if s.state == "recording" {
+                    s.state = "stopping".into();
+                }
+                sender.take();
+            }
         }
     }
 
@@ -295,6 +317,8 @@ struct Writer {
     data_messages: u64,
     last_flush: std::time::Instant,
     warning: Option<String>,
+    /// Events the recorder dropped because this writer fell behind.
+    dropped_events: u64,
 }
 fn create_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let mut file = OpenOptions::new()
@@ -476,6 +500,7 @@ impl Writer {
             pcm_samples: 0,
             segment_samples: SEGMENT_SAMPLES,
             warning: None,
+            dropped_events: 0,
         })
     }
     fn event(&mut self, event: Event) -> Result<(), String> {
@@ -735,7 +760,7 @@ impl Writer {
                 error.get_or_insert(e.to_string());
             }
         }
-        let result = serde_json::json!({"raw_frames":self.raw_frames,"data_messages":self.data_messages,"finished_at":now().to_rfc3339(),"files":self.files,"pcm_samples":self.pcm_samples,"error":error});
+        let result = serde_json::json!({"raw_frames":self.raw_frames,"data_messages":self.data_messages,"finished_at":now().to_rfc3339(),"files":self.files,"pcm_samples":self.pcm_samples,"dropped_events":self.dropped_events,"error":error});
         if let Err(e) = create_json(&self.directory.join("result.json"), &result) {
             error.get_or_insert(e);
         }
@@ -1047,7 +1072,7 @@ mod tests {
         assert!(result["error"].is_string());
     }
     #[test]
-    fn writer_overrun_disconnects_without_blocking_or_silently_claiming_success() {
+    fn writer_overrun_drops_and_counts_without_blocking_or_stopping() {
         let r = Recorder::default();
         let (tx, rx) = mpsc::sync_channel(1);
         *r.sender.lock().unwrap() = Some(Sender {
@@ -1059,14 +1084,26 @@ mod tests {
         r.push(&pcm(&c, 0, 0, 1));
         r.push(&pcm(&c, 0, 1, 2));
         let s = r.snapshot();
-        assert_eq!(s.state, "stopping");
-        assert!(s.error.unwrap().contains("追いつかず"));
-        assert!(r.sender.lock().unwrap().is_none());
+        // Still saving: the dropped frame is counted, not fatal.
+        assert_eq!(s.state, "recording");
+        assert!(s.error.is_none());
+        assert_eq!(s.dropped_events, 1);
         assert!(matches!(
             rx.recv().unwrap(),
             Event::Audio(Audio { index: 0, .. })
         ));
-        assert!(rx.recv().is_err());
+        r.push(&pcm(&c, 0, 2, 3));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            Event::Audio(Audio { index: 2, .. })
+        ));
+        // A writer that stopped still ends the saving.
+        drop(rx);
+        r.push(&pcm(&c, 0, 3, 4));
+        let s = r.snapshot();
+        assert_eq!(s.state, "stopping");
+        assert!(s.error.unwrap().contains("停止"));
+        assert!(r.sender.lock().unwrap().is_none());
     }
     #[test]
     fn drop_finalizes_audio_and_invalid_order_preserves_the_accepted_pcm() {
@@ -1203,6 +1240,10 @@ mod tests {
                     },
                     corrected_bits: None,
                     messages: vec![message],
+                    speech: None,
+                    data: None,
+                    detector: Default::default(),
+                    received_at: None,
                 },
             })
             .unwrap();
@@ -1248,6 +1289,10 @@ mod tests {
                     },
                     corrected_bits: None,
                     messages: vec![],
+                    speech: None,
+                    data: None,
+                    detector: Default::default(),
+                    received_at: None,
                 },
             })
             .unwrap();

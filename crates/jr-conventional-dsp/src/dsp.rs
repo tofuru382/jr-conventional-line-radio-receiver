@@ -74,13 +74,44 @@ fn arms(taps: &[f32], phases: usize) -> Vec<Vec<f32>> {
     result
 }
 
+type Arms = std::sync::Arc<Vec<Vec<f32>>>;
+
+/// Resampler arms for one input rate, computed once per process: every
+/// channel (and every restart after a discontinuity) at that rate shares them.
+fn resampler_arms(input_rate: f64, count: usize, rate: f64) -> Arms {
+    use std::{
+        collections::HashMap,
+        sync::{Mutex, OnceLock},
+    };
+    static CACHE: OnceLock<Mutex<HashMap<u64, Arms>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache
+        .entry(input_rate.to_bits())
+        .or_insert_with(|| {
+            let mut prototype = low_pass(
+                32 * count + 1,
+                4200.0_f64.min(0.45 * rate.min(19200.0)),
+                32.0 * rate,
+            );
+            prototype.pop();
+            for tap in &mut prototype {
+                *tap *= 32.0;
+            }
+            std::sync::Arc::new(arms(&prototype, 32))
+        })
+        .clone()
+}
+
 struct Resampler {
     decimation: usize,
     integrators: [i64; 6],
     delays: [i64; 6],
     cic_scale: f64,
     counter: usize,
-    arms: Vec<Vec<f32>>,
+    arms: Arms,
     ring: Vec<Complex32>,
     half: i64,
     step: f64,
@@ -96,22 +127,13 @@ impl Resampler {
         let rate = input_rate / d;
         let count = ((0.0015 * rate).round() as usize).max(8);
         let half = count / 2;
-        let mut prototype = low_pass(
-            32 * count + 1,
-            4200.0_f64.min(0.45 * rate.min(19200.0)),
-            32.0 * rate,
-        );
-        prototype.pop();
-        for tap in &mut prototype {
-            *tap *= 32.0;
-        }
         Self {
             decimation,
             integrators: [0; 6],
             delays: [0; 6],
             cic_scale: 1.0 / (32768.0 * d * d * d),
             counter: 0,
-            arms: arms(&prototype, 32),
+            arms: resampler_arms(input_rate, count, rate),
             ring: vec![Complex32::default(); count + 16],
             half: half as i64,
             step: rate / 19200.0,
@@ -180,8 +202,8 @@ impl Resampler {
 }
 
 struct ClockRecovery {
-    arms: Vec<Vec<f32>>,
-    derivatives: Vec<Vec<f32>>,
+    arms: Arms,
+    derivatives: Arms,
     ring: [Complex32; 256],
     start: usize,
     count: usize,
@@ -193,19 +215,27 @@ struct ClockRecovery {
 
 impl ClockRecovery {
     fn new() -> Self {
-        let taps = root_raised_cosine(1024, 128.0, 32.0);
-        let mut derivatives = vec![0.0_f32; taps.len()];
-        let mut sum = 0.0_f32;
-        for i in 0..taps.len() - 2 {
-            derivatives[i + 1] = taps[i + 2] - taps[i];
-            sum += derivatives[i + 1].abs();
-        }
-        for value in &mut derivatives {
-            *value *= 32.0 / sum;
-        }
+        // The matched filter does not depend on the input rate: build it once.
+        static FILTERS: std::sync::OnceLock<(Arms, Arms)> = std::sync::OnceLock::new();
+        let (taps, derivatives) = FILTERS.get_or_init(|| {
+            let taps = root_raised_cosine(1024, 128.0, 32.0);
+            let mut derivatives = vec![0.0_f32; taps.len()];
+            let mut sum = 0.0_f32;
+            for i in 0..taps.len() - 2 {
+                derivatives[i + 1] = taps[i + 2] - taps[i];
+                sum += derivatives[i + 1].abs();
+            }
+            for value in &mut derivatives {
+                *value *= 32.0 / sum;
+            }
+            (
+                std::sync::Arc::new(arms(&taps, 32)),
+                std::sync::Arc::new(arms(&derivatives, 32)),
+            )
+        });
         Self {
-            arms: arms(&taps, 32),
-            derivatives: arms(&derivatives, 32),
+            arms: taps.clone(),
+            derivatives: derivatives.clone(),
             ring: [Complex32::default(); 256],
             start: 0,
             count: 0,
@@ -297,6 +327,7 @@ impl ClockRecovery {
 // time-varying simulcast ISI) see the same matched-filter output; each loop
 // follows its own channel estimate. Both decision streams leave at the same
 // latency and the frame decoders use whichever passes their checks.
+#[derive(Clone)]
 struct Carrier {
     phase: f64,
     frequency: f64,
@@ -435,6 +466,10 @@ pub struct Demodulator {
     step_imaginary: f64,
     renormalize: usize,
     pub failed: bool,
+    alternate_wanted: bool,
+    alternate_active: bool,
+    // Summed power and count of channel-filtered samples since last read.
+    channel_power: (f64, u64),
 }
 
 #[repr(C)]
@@ -460,7 +495,17 @@ impl Demodulator {
             step_imaginary: angle.sin(),
             renormalize: 0,
             failed: false,
+            alternate_wanted: false,
+            alternate_active: false,
+            channel_power: (0.0, 0),
         }
+    }
+
+    /// Mean power of the channel-filtered signal since the last call (dB
+    /// relative to full-scale IQ), or `None` if no sample was filtered.
+    pub fn take_channel_power_db(&mut self) -> Option<f64> {
+        let (sum, count) = std::mem::take(&mut self.channel_power);
+        (count > 0).then(|| 10.0 * (sum / count as f64).max(1e-12).log10())
     }
 
     /// JR-CLRR: moves the mixer to `offset` Hz without resetting anything.
@@ -474,9 +519,39 @@ impl Demodulator {
 
     /// Also run the alternate (drift RLS) detector; see [`Self::process_dual`].
     pub fn enable_alternate(&mut self) {
+        self.alternate_wanted = true;
         if self.symbols.alternate.is_none() {
             self.symbols.alternate = Some(Carrier::new(Tracking::Drift));
         }
+        self.alternate_active = true;
+    }
+
+    /// With [`crate::tuning::Alternate::Gated`], run the enabled alternate
+    /// detector only while `active` (the caller sees a signal). While idle,
+    /// the alternate stream repeats the primary one, which keeps both on the
+    /// same symbols; on resuming, the alternate detector starts as a copy of
+    /// the primary one (its survivors and channel estimates), so it needs no
+    /// training and its decisions stay aligned.
+    pub fn set_alternate_active(&mut self, active: bool) {
+        let active = match crate::tuning::alternate() {
+            crate::tuning::Alternate::Always => true,
+            crate::tuning::Alternate::Off => false,
+            crate::tuning::Alternate::Gated => active,
+        };
+        if !self.alternate_wanted || active == self.alternate_active {
+            return;
+        }
+        self.alternate_active = active;
+        self.symbols.alternate = active.then(|| {
+            let mut copy = self.symbols.carrier.clone();
+            copy.sequence = copy.sequence.retracked(Tracking::Drift);
+            copy
+        });
+    }
+
+    /// Whether the alternate detector currently runs.
+    pub fn alternate_running(&self) -> bool {
+        self.symbols.alternate.is_some()
     }
 
     pub fn process(&mut self, input: &[Complex32], output: &mut [u8]) -> usize {
@@ -551,7 +626,11 @@ impl Demodulator {
                 }) as f32,
             };
             let symbols = &mut self.symbols;
+            let power = &mut self.channel_power;
             self.resampler.process(sample, &mut |value| {
+                power.0 += value.real as f64 * value.real as f64
+                    + value.imaginary as f64 * value.imaginary as f64;
+                power.1 += 1;
                 if let Some(streams) = symbols.process(value) {
                     sink(written, streams);
                     written += 1;

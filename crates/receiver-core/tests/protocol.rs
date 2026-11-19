@@ -1,6 +1,6 @@
 use receiver_core::{
     data::Format,
-    frame::{Frame, Merger, Synchronizer},
+    frame::{combine, Detector, Frame, Merger, Synchronizer},
     pipeline::{presets, validate_channels},
 };
 
@@ -120,9 +120,12 @@ fn merger_prefers_the_primary_frame_and_falls_back_to_the_alternate() {
     let out = m.release([Some(1000), Some(1000)], false, |f| f.received[0] != 0);
     let picked: Vec<_> = out
         .iter()
-        .map(|(f, alt)| (f.bit_offset, f.received[0], *alt))
+        .map(|(f, detector, _)| (f.bit_offset, f.received[0], *detector))
         .collect();
-    assert_eq!(picked, vec![(0, 1, false), (384, 2, true)]);
+    assert_eq!(
+        picked,
+        vec![(0, 1, Detector::Primary), (384, 2, Detector::Alternate)]
+    );
 }
 
 #[test]
@@ -137,8 +140,46 @@ fn merger_waits_for_a_stream_that_may_still_deliver_a_position() {
     let out = m.release([Some(1152), Some(1244)], false, |f| f.received[0] == 5);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].0.received[0], 5);
-    assert!(out[0].1);
+    assert_eq!(out[0].1, Detector::Alternate);
     // Frames older than the last released position are dropped.
     m.push(0, frame(400, 9));
     assert!(m.release([None, None], true, |_| true).is_empty());
+}
+
+#[test]
+fn combined_frames_take_each_bit_from_the_more_reliable_detector() {
+    let mut primary = frame(0, 0b1010_0000);
+    primary.confidence = vec![10; 384];
+    let mut alternate = frame(0, 0b0110_0000);
+    alternate.confidence = vec![10; 384];
+    // Bit 0 disagrees: the alternate is surer. Bit 1 disagrees: the primary.
+    alternate.confidence[0] = 50;
+    primary.confidence[1] = 40;
+    // Bits 2 and 3 agree (both 1 then 0): the larger reliability is kept.
+    alternate.confidence[2] = 30;
+    let c = combine(&primary, &alternate).unwrap();
+    assert_eq!(c.received[0] >> 4, 0b0010);
+    assert_eq!(&c.confidence[..4], &[40, 30, 30, 10]);
+    // Different alignments or no soft decisions: nothing to combine.
+    assert!(combine(&primary, &frame(2, 0)).is_none());
+    assert!(combine(&frame(0, 0), &frame(0, 0)).is_none());
+}
+
+#[test]
+fn merger_tries_the_combination_only_when_neither_detector_decodes() {
+    let mut m = Merger::default();
+    let mut p = frame(0, 0x0f);
+    p.confidence = vec![9; 384];
+    let mut a = frame(0, 0xf0);
+    a.confidence = vec![9; 384];
+    a.confidence[0] = 200;
+    m.push(0, p);
+    m.push(1, a);
+    // Only a frame whose first byte differs from both inputs "decodes".
+    let out = m.release([None, None], true, |f| {
+        f.received[0] != 0x0f && f.received[0] != 0xf0
+    });
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].1, Detector::Combined);
+    assert_eq!(out[0].0.received[0], 0x8f);
 }

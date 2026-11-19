@@ -118,6 +118,27 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun requestUsb(): String = UsbDongle.request(this@MainActivity, user = true)
 
+    /** "Listen" turned on or off while receiving: audio focus, media session. */
+    @JavascriptInterface
+    fun setListening(on: Boolean) {
+      runOnUiThread { AudioRoute.setListening(this@MainActivity, on) }
+    }
+
+    /** Headphone, audio focus and media button counters (see [AudioRoute.state]). */
+    @JavascriptInterface fun audioRoute(): String = AudioRoute.state()
+
+    /**
+     * A finished recording folder: index its files so music and file apps
+     * show them at once (files written by path are not in MediaStore yet).
+     */
+    @JavascriptInterface
+    fun scanRecordings(path: String) {
+      val files =
+        java.io.File(path).listFiles()?.filter { it.isFile }?.map { it.absolutePath }?.toTypedArray()
+          ?: return
+      if (files.isNotEmpty()) android.media.MediaScannerConnection.scanFile(this@MainActivity, files, null, null)
+    }
+
     /** The notification's band map layout (see [NativeBand.layout]). */
     @JavascriptInterface
     fun setBandLayout(json: String) {

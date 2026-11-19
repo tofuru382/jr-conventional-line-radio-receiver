@@ -76,13 +76,23 @@ pub fn decode_frame(envelope: &[u8; 48]) -> Option<([u8; 28], usize)> {
 /// Most bytes erased in one soft retry. Twelve roots allow twelve erasures;
 /// stopping at eight keeps four roots of detection on top of CRC-16.
 const MAX_ERASURES: usize = 8;
+/// With eight erasures the remaining four roots still correct two errors, so
+/// that retry would be checked by the CRC-16 alone: about 1.3e-7 of random
+/// frames pass it, nearly all of the soft decoder's false accepts. With
+/// [`crate::tuning::CONSERVATIVE_ERASURES`] its corrections must lie among
+/// the next [`SUSPECT_BYTES`] least reliable bytes, where genuine errors are:
+/// random corrections pass that with C(10,2)/C(34,2), about 8 % (some 1e-8
+/// overall), while the synthetic benchmark loses at most 0.2 % of frames.
+const SUSPECT_BYTES: usize = 10;
 
 /// [`decode_frame`], then, if that fails and per-bit reliabilities are
 /// available, errors-and-erasures retries with the least reliable bytes erased.
 pub fn decode_frame_soft(envelope: &[u8; 48], confidence: &[u8]) -> Option<([u8; 28], usize)> {
-    if let Some(result) = decode_frame(envelope) {
-        return Some(result);
-    }
+    decode_frame(envelope).or_else(|| decode_frame_soft_only(envelope, confidence))
+}
+/// The soft-decision part of [`decode_frame_soft`], for callers that already
+/// ran [`decode_frame`] on the same envelope.
+pub fn decode_frame_soft_only(envelope: &[u8; 48], confidence: &[u8]) -> Option<([u8; 28], usize)> {
     if confidence.len() != 384 {
         return None;
     }
@@ -99,11 +109,24 @@ pub fn decode_frame_soft(envelope: &[u8; 48], confidence: &[u8]) -> Option<([u8;
     let mut order: Vec<usize> = (0..42).collect();
     order.sort_by_key(|&b| byte_reliability(b));
     let gf = Galois::get();
+    let conservative = crate::tuning::on(crate::tuning::CONSERVATIVE_ERASURES);
     (2..=MAX_ERASURES).step_by(2).find_map(|erased| {
         let mut repaired = word;
         let mut positions = order[..erased].to_vec();
         positions.sort_unstable();
         let corrections = gf.correct_with_erasures(&mut repaired, 12, &positions)?;
+        if conservative && erased == MAX_ERASURES {
+            // Errors beyond the erasures must sit among the next least
+            // reliable bytes, as genuine errors do; random corrections
+            // would land anywhere among the 34 other bytes.
+            let suspects = &order[erased..erased + SUSPECT_BYTES];
+            let outside = (0..42)
+                .filter(|b| repaired[*b] != word[*b] && positions.binary_search(b).is_err())
+                .all(|b| suspects.contains(&b));
+            if !outside {
+                return None;
+            }
+        }
         (crc16(&repaired[..28]) == u16::from_be_bytes([repaired[28], repaired[29]]))
             .then(|| (repaired[..28].try_into().unwrap(), corrections))
     })
@@ -130,7 +153,17 @@ impl Decoder {
         self.operation = operation::Assembler::default();
     }
     pub fn decode(&mut self, frame: &Frame) -> Vec<Message> {
-        let Some((info, corrected)) = decode_frame_soft(&frame.received, &frame.confidence) else {
+        let decoded = decode_frame_soft(&frame.received, &frame.confidence);
+        self.decode_with(frame, decoded)
+    }
+    /// [`Self::decode`] with the frame-level result already computed
+    /// ([`decode_frame_soft`] of the same frame).
+    pub fn decode_with(
+        &mut self,
+        frame: &Frame,
+        decoded: Option<([u8; 28], usize)>,
+    ) -> Vec<Message> {
+        let Some((info, corrected)) = decoded else {
             self.stats.rejected_frames += 1;
             self.reset_assembly();
             return Vec::new();

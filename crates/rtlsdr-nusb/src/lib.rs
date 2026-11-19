@@ -46,7 +46,7 @@ pub use config::{
     Config, ConfigBuilder, DirectSampling, F32Iq, GainConfig, RawIq, SampleFormat, SampleMode,
 };
 pub use device::{Device, DeviceBuilder, DeviceInfo};
-pub use discovery::DeviceDescriptor;
+pub use discovery::{DeviceDescriptor, KNOWN_DEVICES};
 pub use errors::{Error, ErrorKind, Result};
 pub use num_complex::Complex32;
 pub use nusb::MaybeFuture;

@@ -6,6 +6,7 @@ const HELP: &str = "jr-demod-eval: demodulator evaluation with synthetic signals
   jr-demod-eval [--es-n0 DB,…|none] [--doppler HZ] [--paths US:DB[:HZ],…] [--rician-k DB]
                 [--offset HZ] [--rate S/s] [--frames N] [--seeds N]
                 [--receiver dsp|differential] [--traffic voice|data] [--hard] [--single]
+                [--pipeline] [--burst ON:OFF] [--features all|none|NAME,…|-NAME,…]
 
 Synthesizes frames, a fading/simulcast channel and noise, receives them with the
 production DSP and decoders, and reports symbol errors and frame acceptance per
@@ -38,6 +39,11 @@ fn evaluate(args: &[String]) -> Result<()> {
         }
         if args[i] == "--single" {
             base.alternate = false;
+            i += 1;
+            continue;
+        }
+        if args[i] == "--pipeline" {
+            base.pipeline = true;
             i += 1;
             continue;
         }
@@ -81,6 +87,15 @@ fn evaluate(args: &[String]) -> Result<()> {
             "--rate" => base.sample_rate = value.parse()?,
             "--frames" => base.frames = value.parse()?,
             "--seeds" => seeds = value.parse()?,
+            "--burst" => {
+                let (on, off) = value
+                    .split_once(':')
+                    .ok_or("--burst uses ON_FRAMES:OFF_FRAMES")?;
+                base.burst_on = on.trim().parse()?;
+                base.burst_off = off.trim().parse()?;
+            }
+            "--features" => receiver_core::tuning::set(jr_demod_eval::parse_features(value)?),
+            "--dsp" => jr_conventional_dsp::tuning::parse(value)?,
             "--traffic" => {
                 base.traffic = match value.as_str() {
                     "voice" => Traffic::Voice,
@@ -130,6 +145,13 @@ fn evaluate(args: &[String]) -> Result<()> {
             total.clock_slips,
             total.alternate_accepted,
         );
+        if base.pipeline {
+            eprintln!(
+                "    pipeline  combined {}  cpu {:.1} % of real time",
+                total.combined_accepted,
+                100.0 * total.cpu_seconds / total.signal_seconds.max(1e-9)
+            );
+        }
         if total
             .fade_bins
             .iter()

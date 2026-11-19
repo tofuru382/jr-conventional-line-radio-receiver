@@ -106,11 +106,14 @@ The decoder supports the verified `0x22 / C9` common-channel form: an 11-byte pr
 
 ### RTL-TCP
 
-RTL-TCP accepts IPv4 or IPv6 addresses and requested rates of 225001–300000 or 900001–3200000 S/s.
-An empty gain field selects automatic gain: the app starts at the tuner's highest gain and steps it down while the 8-bit ADC clips. It never steps back up. rtl_tcp's own tuner AGC is not used, because it clips the wideband input and loses frame sync. A number sets manual gain. The ppm correction must be an integer.
+RTL-TCP accepts IPv4 or IPv6 addresses (scoped ones such as `fe80::1%wlan0` too) or host names such as `raspberrypi.local`. “接続テスト” (Test connection) checks the server and its tuner without starting reception. Requested rates are 225001–300000 or 900001–3200000 S/s.
+An empty gain field selects automatic gain: the app starts at the tuner's highest gain, steps it down while the 8-bit ADC clips, and raises it again gradually after a long stretch with headroom. rtl_tcp's own tuner AGC is not used, because it clips the wideband input and loses frame sync. A number sets manual gain. The ppm correction must be an integer.
+Gain, ppm correction and bias tee can be changed while receiving and take effect without a restart. Turn the bias tee (power for an antenna or LNA over the coax) on only for equipment built for it; with a dongle on a phone, the phone supplies that current as well.
 RTL-TCP is an extra Rust TCP input alongside SoapySDR, not a replacement.
 The protocol does not report server-side IQ loss or rejected settings. “処理欠落” (Dropped blocks) counts drops in the app's own worker queues only;
-it does not prove the server delivered every sample.
+it does not prove the server delivered every sample. When fewer samples arrive than requested for a while, an estimated loss (“推定欠落”) is shown.
+
+rtl_tcp traffic is neither encrypted nor authenticated (about 3.8 Mbit/s at 240 kS/s, 16 Mbit/s at 1.024 MS/s). Outside your own LAN, do not expose the port to the internet: use SSH port forwarding (for example `ssh -N -L 1234:localhost:1234 pi@raspberrypi.local`, then connect to `127.0.0.1`, port `1234`) or a VPN such as WireGuard or Tailscale.
 
 ## Persistent settings
 

@@ -23,9 +23,57 @@ import androidx.core.content.ContextCompat
 object UsbDongle {
   private const val TAG = "UsbDongle"
   private const val ACTION_PERMISSION = "io.jrradio.receiver.USB_PERMISSION"
-  // RTL2832U dongles (RTL-SDR Blog V3/V4 and most others).
-  private const val VENDOR = 0x0bda
-  private val PRODUCTS = setOf(0x2832, 0x2838)
+  // RTL2832U dongles by USB ID: librtlsdr's list of known devices (RTL-SDR
+  // Blog V3/V4 and most others use 0x0bda). The built-in driver needs an
+  // R820T/R828D tuner and says so when a dongle has another one. Keep in step
+  // with rtlsdr-nusb's KNOWN_DEVICES and res/xml/rtl_sdr_devices.xml.
+  private val KNOWN =
+    setOf(
+      0x0bda to 0x2832,
+      0x0bda to 0x2838,
+      0x0413 to 0x6680,
+      0x0413 to 0x6f0f,
+      0x0458 to 0x707f,
+      0x0ccd to 0x00a9,
+      0x0ccd to 0x00b3,
+      0x0ccd to 0x00b4,
+      0x0ccd to 0x00b5,
+      0x0ccd to 0x00b7,
+      0x0ccd to 0x00b8,
+      0x0ccd to 0x00b9,
+      0x0ccd to 0x00c0,
+      0x0ccd to 0x00c6,
+      0x0ccd to 0x00d3,
+      0x0ccd to 0x00d7,
+      0x0ccd to 0x00e0,
+      0x1554 to 0x5020,
+      0x15f4 to 0x0131,
+      0x15f4 to 0x0133,
+      0x185b to 0x0620,
+      0x185b to 0x0650,
+      0x185b to 0x0680,
+      0x1b80 to 0xd393,
+      0x1b80 to 0xd394,
+      0x1b80 to 0xd395,
+      0x1b80 to 0xd397,
+      0x1b80 to 0xd398,
+      0x1b80 to 0xd39d,
+      0x1b80 to 0xd3a4,
+      0x1b80 to 0xd3a8,
+      0x1b80 to 0xd3af,
+      0x1b80 to 0xd3b0,
+      0x1d19 to 0x1101,
+      0x1d19 to 0x1102,
+      0x1d19 to 0x1103,
+      0x1d19 to 0x1104,
+      0x1f4d to 0xa803,
+      0x1f4d to 0xb803,
+      0x1f4d to 0xc803,
+      0x1f4d to 0xd286,
+      0x1f4d to 0xd803,
+    )
+
+  private fun isDongle(device: UsbDevice) = (device.vendorId to device.productId) in KNOWN
 
   private var connection: UsbDeviceConnection? = null
   private var receiverRegistered = false
@@ -71,19 +119,25 @@ object UsbDongle {
       ""
     }
 
+  // File writes happen here, in order, off the caller's thread: notes come
+  // from the main thread (USB watch, notification) every second, and the
+  // occasional trim rewrites the whole file.
+  private val logWriter = java.util.concurrent.Executors.newSingleThreadExecutor()
+
   fun note(text: String) {
     Log.i(TAG, text)
     val line = "${System.currentTimeMillis()}\t${text.replace('\n', ' ')}"
     synchronized(notes) {
       if (notes.size == 200) notes.removeFirst()
       notes.addLast(line)
-      logFile?.let { file ->
-        try {
-          if (file.length() > 256 * 1024) file.writeText(file.readLines().takeLast(500).joinToString("\n", postfix = "\n"))
-          file.appendText(line + "\n")
-        } catch (e: Exception) {
-          Log.w(TAG, "connection log not written", e)
-        }
+    }
+    val file = logFile ?: return
+    logWriter.execute {
+      try {
+        if (file.length() > 256 * 1024) file.writeText(file.readLines().takeLast(500).joinToString("\n", postfix = "\n"))
+        file.appendText(line + "\n")
+      } catch (e: Exception) {
+        Log.w(TAG, "connection log not written", e)
       }
     }
   }
@@ -145,7 +199,7 @@ object UsbDongle {
     val attached = manager(context).deviceList.values
     val now =
       when {
-        attached.any { it.vendorId == VENDOR && it.productId in PRODUCTS } -> "今はドングルあり"
+        attached.any { isDongle(it) } -> "今はドングルあり"
         attached.isEmpty() -> "今は USB 機器なし"
         else -> "今はドングルなし（ほかの USB 機器 ${attached.size} 台）"
       }
@@ -193,7 +247,7 @@ object UsbDongle {
               detaches.addLast(now)
               while (detaches.isNotEmpty() && now - detaches.first() > BOUNCE_WINDOW_MS) detaches.removeFirst()
             }
-          } else if (device == null || (device.vendorId == VENDOR && device.productId in PRODUCTS)) {
+          } else if (device == null || isDongle(device)) {
             attachedAt = now
           }
           val what = if (detached) "外れました" else "つながりました"
@@ -228,9 +282,7 @@ object UsbDongle {
   private fun manager(context: Context) = context.getSystemService(Context.USB_SERVICE) as UsbManager
 
   fun find(context: Context): UsbDevice? =
-    manager(context).deviceList.values.firstOrNull {
-      it.vendorId == VENDOR && it.productId in PRODUCTS
-    }
+    manager(context).deviceList.values.firstOrNull { isDongle(it) }
 
   /**
    * Makes the dongle available to the driver: "ok" (handed over), "asking"
@@ -244,7 +296,7 @@ object UsbDongle {
   fun request(context: Context, user: Boolean = false): String {
     val usb = manager(context)
     val attached = usb.deviceList.values
-    val device = attached.firstOrNull { it.vendorId == VENDOR && it.productId in PRODUCTS }
+    val device = attached.firstOrNull { isDongle(it) }
     if (device == null) {
       val result = if (attached.isEmpty()) "none" else "other:${attached.size}"
       // Asked every second while a session waits: note changes, and every 10 s.
