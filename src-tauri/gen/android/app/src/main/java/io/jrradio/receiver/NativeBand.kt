@@ -30,6 +30,9 @@ object NativeBand {
   /** Implemented in Rust: stops reception and saving (notification button). */
   @JvmStatic external fun stop()
 
+  /** The phone is hot: run every channel with its primary detector only. */
+  @JvmStatic external fun setPowerSaving(on: Boolean)
+
   /** `{"channels": [{"id", "hz", "label"}], "enabled": [id]}` from ui/app.js. */
   @Volatile var layout: String? = null
 

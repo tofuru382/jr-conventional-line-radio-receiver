@@ -119,19 +119,25 @@ object UsbDongle {
       ""
     }
 
+  // File writes happen here, in order, off the caller's thread: notes come
+  // from the main thread (USB watch, notification) every second, and the
+  // occasional trim rewrites the whole file.
+  private val logWriter = java.util.concurrent.Executors.newSingleThreadExecutor()
+
   fun note(text: String) {
     Log.i(TAG, text)
     val line = "${System.currentTimeMillis()}\t${text.replace('\n', ' ')}"
     synchronized(notes) {
       if (notes.size == 200) notes.removeFirst()
       notes.addLast(line)
-      logFile?.let { file ->
-        try {
-          if (file.length() > 256 * 1024) file.writeText(file.readLines().takeLast(500).joinToString("\n", postfix = "\n"))
-          file.appendText(line + "\n")
-        } catch (e: Exception) {
-          Log.w(TAG, "connection log not written", e)
-        }
+    }
+    val file = logFile ?: return
+    logWriter.execute {
+      try {
+        if (file.length() > 256 * 1024) file.writeText(file.readLines().takeLast(500).joinToString("\n", postfix = "\n"))
+        file.appendText(line + "\n")
+      } catch (e: Exception) {
+        Log.w(TAG, "connection log not written", e)
       }
     }
   }

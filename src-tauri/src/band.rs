@@ -88,6 +88,23 @@ mod jni_entry {
     ) {
         super::stop();
     }
+    /// The phone overheats (Android thermal status severe or worse): every
+    /// channel runs its primary detector only, about a third of the CPU.
+    #[no_mangle]
+    pub extern "system" fn Java_io_jrradio_receiver_NativeBand_setPowerSaving<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        on: jni::sys::jboolean,
+    ) {
+        use receiver_core::dsp_tuning::{set_alternate, Alternate};
+        let on = on != 0;
+        set_alternate(if on { Alternate::Off } else { Alternate::Gated });
+        receiver_core::diag::note(if on {
+            "端末が高温のため、第 2 検出器を止めて処理を軽くします"
+        } else {
+            "端末の温度が戻ったため、第 2 検出器を再開します"
+        });
+    }
     #[no_mangle]
     pub extern "system" fn Java_io_jrradio_receiver_NativeBand_state<'local>(
         env: JNIEnv<'local>,

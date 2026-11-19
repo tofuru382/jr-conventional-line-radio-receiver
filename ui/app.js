@@ -61,8 +61,54 @@ function syncAudioPush() {
     pushState = "";
   });
 }
+// Android: audio focus and the media session follow "listen" while
+// receiving (see AudioRoute.kt); its counters tell the page to mute.
+let routeListening = false,
+  route = null,
+  routeMessage = "";
+function syncAudioRoute() {
+  if (!platform.android || !window.JrAndroid?.setListening) return;
+  const listening = running && $("listen").checked;
+  if (listening === routeListening) return;
+  routeListening = listening;
+  window.JrAndroid.setListening(listening);
+}
+function setListen(on, message) {
+  routeMessage = message;
+  if ($("listen").checked === on) return;
+  $("listen").checked = on;
+  $("listen").dispatchEvent(new Event("change"));
+}
+// Whether audio may play now. Unplugged headphones and another app taking the
+// audio for good turn "listen" off; a phone call pauses until it ends; a
+// headset button or the lock screen toggles "listen".
+function audioRouteOpen() {
+  if (!platform.android || !window.JrAndroid?.audioRoute) return true;
+  let next;
+  try {
+    next = JSON.parse(window.JrAndroid.audioRoute());
+  } catch {
+    return true;
+  }
+  const previous = route;
+  route = next;
+  if (previous) {
+    if (next.noisy > previous.noisy)
+      setListen(false, "イヤホンの接続が切れたため消音しました");
+    else if (next.toggles > previous.toggles)
+      setListen(!$("listen").checked, "");
+    else if (next.focus === "lost" && previous.focus !== "lost")
+      setListen(false, "ほかのアプリが音声を使い始めたため消音しました");
+  }
+  if (next.focus === "transient") {
+    resetAudio();
+    return false;
+  }
+  return true;
+}
 function syncNativeMonitor() {
   syncAudioPush();
+  syncAudioRoute();
   if (!nativeAudio) return;
   const settings = {
     enabled: running && $("listen").checked,
@@ -691,6 +737,8 @@ function showBackgroundNotice({ killed = null, starting = false } = {}) {
     $("background-notice-killed").textContent = `前回は ${at} ごろ、受信中に Android がアプリを止めました。`;
   }
   $("background-notice-killed").hidden = !killed;
+  $("background-resume-group").hidden = !killed;
+  $("background-resume").checked = autoResume();
   $("background-notice-battery").hidden = !restricted;
   $("background-battery").hidden = !restricted;
   const vendor = bridgeText("manufacturer").toLowerCase();
@@ -705,6 +753,35 @@ function showBackgroundNotice({ killed = null, starting = false } = {}) {
   $("background-notice-vendor").hidden = !help;
   $("background-notice").hidden = false;
 }
+let resumeAfterKill = false;
+// Files written by path reach MediaStore (music and file apps) only when
+// indexed: ask Android to, once a recording is complete.
+function noteRecording(next) {
+  const finished =
+    next?.state === "completed" &&
+    next.directory &&
+    !next.discarded &&
+    recordingStatus?.state !== "completed";
+  recordingStatus = next;
+  if (finished && platform.android) window.JrAndroid?.scanRecordings?.(next.directory);
+}
+// Opt-in: reopening the app after Android stopped it while receiving starts
+// reception again with the saved settings.
+const autoResumeKey = "jr-clrr-auto-resume";
+function autoResume() {
+  try {
+    return localStorage.getItem(autoResumeKey) === "on";
+  } catch {
+    return false;
+  }
+}
+$("background-resume").addEventListener("change", () => {
+  try {
+    localStorage.setItem(autoResumeKey, $("background-resume").checked ? "on" : "off");
+  } catch {
+    // Asked again next time.
+  }
+});
 $("background-battery").addEventListener("click", () => {
   try {
     window.JrAndroid?.requestBatteryExemption?.();
@@ -955,7 +1032,11 @@ function setControls() {
   $("preferences-retry").disabled = busy || (preferencesLoadFailed && running);
   $("total-enabled").textContent = enabled.size;
   renderMute();
-  $("audio-state").textContent = !$("listen").checked
+  $("audio-state").textContent = routeMessage && !$("listen").checked
+    ? routeMessage
+    : route?.focus === "transient" && $("listen").checked
+      ? "通話中のため一時的に消音しています"
+      : !$("listen").checked
     ? "消音中"
     : nativeAudio
       ? "音声オン"
@@ -1372,7 +1453,7 @@ async function stopSaving(fromCard = false) {
     if (active) recordingStatus = { ...recordingStatus, state: "stopping" };
     setControls();
     await flushPreferences();
-    if (active) recordingStatus = await invoke("stop_recording");
+    if (active) noteRecording(await invoke("stop_recording"));
   } catch (e) {
     recordingActionError = String(e.message ?? e);
   } finally {
@@ -1423,6 +1504,7 @@ async function prepareAudio() {
 }
 function play(frames) {
   if (nativeAudio) return;
+  if (!audioRouteOpen()) return;
   if (!context || context.state !== "running" || !$("listen").checked) return;
   audioPlayer.enqueue(frames, selected);
 }
@@ -2340,7 +2422,7 @@ async function stopReception() {
       recordingStatus = { ...recordingStatus, state: "stopping" };
       renderRecording();
     }
-    recordingStatus = await invoke("stop");
+    noteRecording(await invoke("stop"));
     running = false;
     syncBackgroundService();
     syncNativeMonitor();
@@ -2355,6 +2437,7 @@ async function stopReception() {
   }
 }
 $("listen").addEventListener("change", () => {
+  if ($("listen").checked) routeMessage = "";
   syncNativeMonitor();
   resetAudio();
   prepareAudio().catch(fail);
@@ -2599,7 +2682,7 @@ async function poll() {
       if (result && generation === uiGeneration) {
         const s = result.status;
         lastSnapshot = s;
-        if (s.recording) recordingStatus = s.recording;
+        if (s.recording) noteRecording(s.recording);
         running = s.running;
         syncBackgroundService();
         syncAudioPush();
@@ -2717,7 +2800,10 @@ try {
       addTestSound();
       addRecordingsBrowser();
       const kill = bridgeText("lastKill");
-      if (kill) showBackgroundNotice({ killed: Number(kill.split("\t")[1]) });
+      if (kill) {
+        showBackgroundNotice({ killed: Number(kill.split("\t")[1]) });
+        resumeAfterKill = autoResume();
+      }
     }
   }
   bundledCatalog = native
@@ -2751,6 +2837,10 @@ try {
     }
     await startAudioPush();
     poll();
+    if (resumeAfterKill && !running) {
+      resumeAfterKill = false;
+      $("start").click();
+    }
   } else {
     $("runtime-note").textContent =
       "ブラウザプレビュー　受信にはデスクトップアプリを起動してください";

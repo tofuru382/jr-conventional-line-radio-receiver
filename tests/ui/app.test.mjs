@@ -2631,3 +2631,39 @@ test("pushed monitor audio plays without polling for it and follows the automati
   assert.ok(ui.$("selected-frequency").textContent.includes(frequency));
   assert.ok(ui.playback.length > 0, "the pushed frame was scheduled");
 });
+
+test("Android mutes when headphones are unplugged and pauses during a call", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const listening = [];
+  let route = { noisy: 0, focus: "held", toggles: 0 };
+  app.w.JrAndroid = {
+    setReceiving() {},
+    setListening: (on) => listening.push(on),
+    audioRoute: () => JSON.stringify(route),
+  };
+  app.$("listen").checked = true;
+  await app.click("start");
+  const frame = (index) => ({
+    status: status(),
+    audio: [{ channel: presets[0].id, epoch: 0, index, pcm: new Array(320).fill(1000) }],
+  });
+  app.setSnapshot(frame(0));
+  await app.poll();
+  assert.deepEqual(listening, [true]);
+  const played = app.playback.length;
+  assert.ok(played > 0);
+  // A phone call: nothing plays until it ends, "listen" stays on.
+  route = { ...route, focus: "transient" };
+  app.setSnapshot(frame(1));
+  await app.poll();
+  assert.equal(app.playback.length, played);
+  assert.equal(app.$("listen").checked, true);
+  assert.equal(app.$("audio-state").textContent, "通話中のため一時的に消音しています");
+  // Headphones unplugged: "listen" turns off with the reason shown.
+  route = { ...route, focus: "held", noisy: 1 };
+  app.setSnapshot(frame(2));
+  await app.poll();
+  assert.equal(app.$("listen").checked, false);
+  assert.equal(app.$("audio-state").textContent, "イヤホンの接続が切れたため消音しました");
+  assert.equal(listening.at(-1), false);
+});

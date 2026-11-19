@@ -533,10 +533,12 @@ impl Demodulator {
     /// the primary one (its survivors and channel estimates), so it needs no
     /// training and its decisions stay aligned.
     pub fn set_alternate_active(&mut self, active: bool) {
-        if !self.alternate_wanted
-            || crate::tuning::alternate() == crate::tuning::Alternate::Always
-            || active == self.alternate_active
-        {
+        let active = match crate::tuning::alternate() {
+            crate::tuning::Alternate::Always => true,
+            crate::tuning::Alternate::Off => false,
+            crate::tuning::Alternate::Gated => active,
+        };
+        if !self.alternate_wanted || active == self.alternate_active {
             return;
         }
         self.alternate_active = active;
