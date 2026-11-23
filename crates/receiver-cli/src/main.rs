@@ -74,6 +74,7 @@ fn run() -> Result<()> {
                 ppm: 0,
                 reconnect_seconds: 60,
                 bias_tee: false,
+                gain_optimize: false,
             };
             let session = Session::start(Config {
                 input: Input::RtlTcp { radio },

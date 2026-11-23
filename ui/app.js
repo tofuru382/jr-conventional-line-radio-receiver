@@ -82,6 +82,35 @@ function setListen(on, message) {
 // Whether audio may play now. Unplugged headphones and another app taking the
 // audio for good turn "listen" off; a phone call pauses until it ends; a
 // headset button or the lock screen toggles "listen".
+// The recordings player plays in this same WebView, yet Android hands it the
+// audio focus as if it were another app. That loss must neither mute nor
+// pause the live audio, which keeps playing as it is; the focus is taken
+// back once the recording stops (so another app taking it later still
+// mutes). A recording paused while the app is in the background was most
+// likely paused by another app taking the audio: that one mutes.
+const OWN_PLAYBACK_GRACE_MS = 3000;
+let ownPlayback = false,
+  ownPlaybackEnded = -Infinity;
+function ownPlaybackRecent() {
+  return ownPlayback || performance.now() - ownPlaybackEnded < OWN_PLAYBACK_GRACE_MS;
+}
+function ownPlaybackStopped(event) {
+  if (!ownPlayback) return;
+  ownPlayback = false;
+  ownPlaybackEnded = performance.now();
+  if (!platform.android) return;
+  if (event.type === "pause" && document.visibilityState === "hidden") {
+    ownPlaybackEnded = -Infinity;
+    setListen(false, "ほかのアプリが音声を使い始めたため消音しました");
+    return;
+  }
+  window.JrAndroid?.reclaimAudioFocus?.();
+}
+$("recordings-player").addEventListener("play", () => {
+  ownPlayback = true;
+});
+for (const type of ["pause", "ended", "emptied", "error"])
+  $("recordings-player").addEventListener(type, ownPlaybackStopped);
 function audioRouteOpen() {
   if (!platform.android || !window.JrAndroid?.audioRoute) return true;
   let next;
@@ -97,10 +126,10 @@ function audioRouteOpen() {
       setListen(false, "イヤホンの接続が切れたため消音しました");
     else if (next.toggles > previous.toggles)
       setListen(!$("listen").checked, "");
-    else if (next.focus === "lost" && previous.focus !== "lost")
+    else if (next.focus === "lost" && previous.focus !== "lost" && !ownPlaybackRecent())
       setListen(false, "ほかのアプリが音声を使い始めたため消音しました");
   }
-  if (next.focus === "transient") {
+  if (next.focus === "transient" && !ownPlaybackRecent()) {
     resetAudio();
     return false;
   }
@@ -454,6 +483,178 @@ $("recordings-sort").addEventListener("change", () => {
   resetRecordingsPaging();
   renderRecordings();
 });
+// Diagnostic IQ captures: the raw band for 10 or 30 s, saved to the
+// recordings folder's IQ subfolder; the IQ WAV input replays them.
+let iqCapture = null,
+  iqFiles = [],
+  iqMessage = "",
+  iqDeleteArmed = null;
+const IQ_SHOWN = 5;
+function iqDirectory() {
+  return $("record-directory").value.trim() || null;
+}
+function megabytes(bytes) {
+  return bytes >= 100e6 ? `${Math.round(bytes / 1e6)} MB` : `${(bytes / 1e6).toFixed(1)} MB`;
+}
+function iqRate() {
+  return (running && lastSnapshot?.sample_rate) || Number($("rate").value) || 0;
+}
+function renderIqCapture() {
+  const receiving = running && lastSnapshot?.state === "receiving";
+  const saving = iqCapture?.state === "saving";
+  $("iq-capture").disabled = !native || busy || !receiving || saving;
+  $("iq-seconds").disabled = !native || saving;
+  $("iq-capture").textContent = saving ? "保存中…" : "IQ を保存";
+  const bytes = iqRate() * Number($("iq-seconds").value) * 4;
+  const size = bytes ? `約 ${megabytes(bytes)}` : "";
+  const hint = !native
+    ? ""
+    : `受信中の電波をそのまま保存します${size ? `（${size}）` : ""}。入力方式「IQ WAV ファイル」で再生できます。${
+        bytes > 100e6 ? "サンプルレートが高いため大きなファイルになります。" : ""
+      }`;
+  if ($("iq-capture-hint").textContent !== hint) $("iq-capture-hint").textContent = hint;
+  const c = iqCapture;
+  const status = iqMessage
+    ? iqMessage
+    : !c
+      ? ""
+      : c.state === "saving"
+        ? `保存中… 残り ${Math.max(0, Math.ceil(c.seconds - c.written_seconds))} 秒`
+        : c.state === "saved"
+          ? `保存しました（${c.written_seconds.toFixed(0)} 秒・${megabytes(c.bytes)}）${c.message ? `：${c.message}` : ""}`
+          : c.message || "IQ を保存できませんでした";
+  if ($("iq-capture-status").textContent !== status) $("iq-capture-status").textContent = status;
+  for (const replay of $("iq-files").querySelectorAll(".iq-replay")) {
+    replay.disabled = running || busy;
+    replay.title = running ? "受信を停止してから選んでください" : "";
+  }
+}
+// From each snapshot: progress, and the file list once a capture ends.
+function noteIqCapture(next) {
+  const finished = iqCapture?.state === "saving" && next && next.state !== "saving";
+  iqCapture = next ?? iqCapture;
+  if (finished) {
+    if (platform.android) window.JrAndroid?.scanRecordings?.(next.path.replace(/[/\\][^/\\]*$/, ""));
+    void refreshIqFiles();
+  }
+}
+$("iq-seconds").addEventListener("change", renderIqCapture);
+$("iq-capture").addEventListener("click", async () => {
+  iqMessage = "";
+  $("iq-capture").disabled = true;
+  try {
+    const path = await invoke("capture_iq", {
+      directory: iqDirectory(),
+      seconds: Number($("iq-seconds").value),
+    });
+    iqCapture = {
+      state: "saving",
+      path,
+      message: null,
+      seconds: Number($("iq-seconds").value),
+      written_seconds: 0,
+      bytes: 0,
+    };
+  } catch (e) {
+    iqMessage = friendlyError(e);
+  }
+  renderIqCapture();
+});
+// "20261123T061112Z" in the name, as Japan time.
+function iqTime(file) {
+  const m = /^iq-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(file.name);
+  const date = m
+    ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]))
+    : file.modified
+      ? new Date(file.modified * 1000)
+      : null;
+  return date ? jstTime.format(date) : file.name;
+}
+function iqCenterHz(file) {
+  const m = /-(\d+)Hz-(\d+)\.wav$/i.exec(file.name);
+  return m ? { center: Number(m[1]), rate: Number(m[2]) } : null;
+}
+function renderIqFiles() {
+  const list = $("iq-files");
+  list.replaceChildren();
+  for (const file of iqFiles.slice(0, IQ_SHOWN)) {
+    const info = iqCenterHz(file);
+    const row = el("div", undefined, "iq-file");
+    row.append(
+      el(
+        "span",
+        `${iqTime(file)}　${info ? `${(info.center / 1e6).toFixed(6)} MHz・${(info.rate / 1000).toLocaleString()} kS/s・` : ""}${megabytes(file.bytes)}`,
+        "iq-file-name",
+      ),
+    );
+    if (platform.android && window.JrAndroid?.shareFile) {
+      const share = el("button", "共有");
+      share.type = "button";
+      share.addEventListener("click", () => {
+        iqMessage = window.JrAndroid.shareFile(file.path)
+          ? ""
+          : "このファイルは共有できません（保存先を端末の Download 以下にしてください）";
+        renderIqCapture();
+      });
+      row.append(share);
+    }
+    const replay = el("button", "この IQ で受信", "iq-replay");
+    replay.type = "button";
+    replay.disabled = running || busy;
+    replay.title = running ? "受信を停止してから選んでください" : "";
+    replay.addEventListener("click", () => {
+      $("input-kind").value = "wave";
+      $("input-kind").dispatchEvent(new Event("change"));
+      $("path").value = file.path;
+      $("path").dispatchEvent(new Event("input"));
+      $("path").dispatchEvent(new Event("change"));
+      if (info) {
+        $("center").value = (info.center / 1e6).toFixed(6);
+        $("center").dispatchEvent(new Event("input"));
+        $("center").dispatchEvent(new Event("change"));
+      }
+      iqMessage = "入力を「IQ WAV ファイル」に切り替えました。受信を開始すると再生します。";
+      renderIqCapture();
+    });
+    row.append(replay);
+    const remove = el("button", iqDeleteArmed === file.path ? "もう一度押すと削除" : "削除");
+    remove.type = "button";
+    remove.addEventListener("click", async () => {
+      if (iqDeleteArmed !== file.path) {
+        iqDeleteArmed = file.path;
+        renderIqFiles();
+        setTimeout(() => {
+          if (iqDeleteArmed !== file.path) return;
+          iqDeleteArmed = null;
+          renderIqFiles();
+        }, 4000);
+        return;
+      }
+      iqDeleteArmed = null;
+      try {
+        await invoke("delete_iq_capture", { path: file.path, directory: iqDirectory() });
+        iqMessage = "削除しました";
+      } catch (e) {
+        iqMessage = friendlyError(e);
+      }
+      await refreshIqFiles();
+      renderIqCapture();
+    });
+    row.append(remove);
+    list.append(row);
+  }
+  if (iqFiles.length > IQ_SHOWN)
+    list.append(el("p", `ほか ${iqFiles.length - IQ_SHOWN} 件（保存先の IQ フォルダーにあります）`, "field-hint"));
+}
+async function refreshIqFiles() {
+  if (!native) return;
+  try {
+    iqFiles = (await invoke("list_iq_captures", { directory: iqDirectory() })) ?? [];
+  } catch {
+    iqFiles = [];
+  }
+  renderIqFiles();
+}
 function addRecordingsBrowser() {
   $("recordings-browser").hidden = false;
   $("recordings-browser").addEventListener("toggle", () => {
@@ -499,6 +700,7 @@ const preferenceFields = {
   antenna: "antenna",
   path: "path",
   stream_args: "stream-args",
+  gain_auto: "gain-auto",
 };
 const emptyRecording = () => ({
   state: "idle",
@@ -917,6 +1119,7 @@ async function restorePreferences(initial = false) {
       if (key !== "profile") $(id).value = saved.input[key] ?? "";
     $("bias-tee").checked = saved.input.bias_tee === true;
     $("wave-fast").checked = saved.input.wave_fast === true;
+    if (!$("gain-auto").value) $("gain-auto").value = "clip";
     const args = $("args").value;
     if (args) {
       const option = el("option", "保存済みのデバイス");
@@ -995,7 +1198,7 @@ $("preferences-retry").addEventListener("click", async () => {
   } else await flushPreferences();
 });
 // Settings that apply while receiving: sent at once (see set_tuning).
-const liveTuning = new Set(["gain", "ppm", "bias-tee"]);
+const liveTuning = new Set(["gain", "ppm", "bias-tee", "gain-auto"]);
 // The settings form is locked while receiving or busy, except for the
 // live-tunable controls of a live input; some controls also depend on the
 // input kind or on the desktop app.
@@ -1009,8 +1212,11 @@ function lockSettings() {
       ((control.id === "scan" || control.id === "browse" || control.id === "tcp-test") && !native);
     control.disabled = always || ((running || busy) && !(live && liveTuning.has(control.id)));
   }
+  // The automatic method only matters with the gain left automatic.
+  if ($("gain").value.trim() !== "") $("gain-auto").disabled = true;
   $("live-tuning-hint").hidden = !live;
   renderPpmSuggestion();
+  renderGainStatus(lastSnapshot?.gain);
 }
 function setControls() {
   renderLive();
@@ -1034,7 +1240,7 @@ function setControls() {
   renderMute();
   $("audio-state").textContent = routeMessage && !$("listen").checked
     ? routeMessage
-    : route?.focus === "transient" && $("listen").checked
+    : route?.focus === "transient" && $("listen").checked && !ownPlaybackRecent()
       ? "通話中のため一時的に消音しています"
       : !$("listen").checked
     ? "消音中"
@@ -1309,6 +1515,7 @@ function renderRecording() {
   $("output-options").disabled = busy || active;
   $("record-browse").disabled = !native || busy || active;
   $("record-start").disabled = !native || busy || !receiving || active;
+  renderIqCapture();
   $("record-stop").disabled = !native || busy || (!active && !recordingEnabled);
   $("record-stop").textContent = active ? "保存を停止" : "保存を無効にする";
   // Top bar toggle: on = saving now, or from the next reception.
@@ -1381,6 +1588,7 @@ $("record-directory").addEventListener("input", () => {
   clearRecordingError();
   renderRecording();
 });
+$("record-directory").addEventListener("change", () => void refreshIqFiles());
 $("record-browse").addEventListener("click", async () => {
   try {
     const path = await invoke("plugin:dialog|open", {
@@ -1394,6 +1602,7 @@ $("record-browse").addEventListener("click", async () => {
       $("record-directory").value = path;
       clearRecordingError();
       void persistPreferences();
+      void refreshIqFiles();
     }
   } catch (e) {
     recordingActionError = String(e.message ?? e);
@@ -2048,6 +2257,7 @@ function updateSource() {
   $("tcp-group").hidden = !tcp;
   $("ppm-group").hidden = wave;
   $("bias-group").hidden = wave;
+  $("gain-auto-group").hidden = !(tcp || usb);
   $("soapy-options").hidden = wave || tcp || usb;
   $("file-group").hidden = !wave;
   lockSettings();
@@ -2349,6 +2559,7 @@ async function startReception() {
         "antenna",
         "rx-channel",
         "stream-args",
+        "gain-auto",
       ].map((id) => [id, $(id).value]),
     );
     values.kind = $("input-kind").value;
@@ -2513,6 +2724,17 @@ function measuredRate(s) {
 }
 // After a session, the automatic frequency correction it settled on can be
 // kept as the tuner's ppm correction for the next start.
+// Automatic gain by the noise floor (自動ゲインの方式): what it is doing.
+function renderGainStatus(g) {
+  const shown = running && !$("gain-auto-group").hidden && $("gain").value.trim() === "" && g;
+  const text = !shown
+    ? ""
+    : g.phase === "sweeping"
+      ? `${g.note ?? "最適なゲインを探しています"}…（15 秒ほど受信が乱れることがあります）`
+      : g.note ?? (g.gain_db != null ? `ゲイン ${g.gain_db.toFixed(1)} dB` : "");
+  if ($("gain-status").textContent !== text) $("gain-status").textContent = text;
+}
+$("gain").addEventListener("input", lockSettings);
 function renderPpmSuggestion() {
   const button = $("apply-ppm");
   const suggested = Math.round(lastSnapshot?.frequency_correction_ppm ?? 0);
@@ -2540,6 +2762,7 @@ async function sendTuning() {
         gain: $("gain").value,
         ppm: $("ppm").value,
         bias_tee: $("bias-tee").checked,
+        gain_auto: $("gain-auto").value,
       },
       $("input-kind").value,
     );
@@ -2683,6 +2906,8 @@ async function poll() {
         const s = result.status;
         lastSnapshot = s;
         if (s.recording) noteRecording(s.recording);
+        noteIqCapture(s.iq_capture);
+        renderGainStatus(s.gain);
         running = s.running;
         syncBackgroundService();
         syncAudioPush();
@@ -2815,6 +3040,8 @@ try {
         }),
       );
   await restorePreferences(true);
+  $("iq-capture-group").hidden = !native;
+  void refreshIqFiles();
   if (platform.android) adoptAndroidDefaults();
   else if (platform.simple) adoptMacDefaults();
   busy = false;

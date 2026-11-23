@@ -32,6 +32,10 @@ pub struct Config {
     /// command 0x0e; servers without it ignore the command).
     #[serde(default)]
     pub bias_tee: bool,
+    /// Automatic gain (no `gain_db`) chosen by the noise floor instead of
+    /// the highest gain that does not clip (see `crate::gain`).
+    #[serde(default)]
+    pub gain_optimize: bool,
 }
 fn default_reconnect_seconds() -> u32 {
     RECONNECT_LIMIT.as_secs() as u32
@@ -589,6 +593,16 @@ impl Reconnecting {
         Some(info)
     }
     /// Applies a tuning change now and to every later reconnection.
+    /// The tuner's gain table (0.1 dB) when the server's tuner uses
+    /// librtlsdr's R820T/R828D one (for [`crate::gain`]).
+    pub fn gain_table(&self) -> Option<&'static [u16]> {
+        self.inner
+            .as_ref()
+            .filter(|i| {
+                matches!(i.tuner_type, 5 | 6) && i.gain_count as usize == GAINS_TENTH_DB.len()
+            })
+            .map(|_| &GAINS_TENTH_DB[..])
+    }
     pub fn apply(&mut self, control: &Control) -> Result<(), String> {
         control.update_rtl_tcp(&mut self.config);
         if control.gain_db.is_some() {
@@ -664,6 +678,7 @@ mod tests {
             ppm: -12,
             reconnect_seconds: 60,
             bias_tee: false,
+            gain_optimize: false,
         }
     }
     fn header(s: &mut TcpStream) {
@@ -735,6 +750,7 @@ mod tests {
                 gain_db: Some(Some(30.5)),
                 ppm: Some(7),
                 bias_tee: Some(true),
+                gain_optimize: None,
             })
             .unwrap();
         let live = server.join().unwrap();

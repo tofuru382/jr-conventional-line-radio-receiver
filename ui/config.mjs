@@ -57,7 +57,12 @@ export function makeTuning(values, kind) {
   const ppmLimit = kind === "usb" ? 488 : 1000;
   if (!Number.isInteger(ppm) || Math.abs(ppm) > ppmLimit)
     bad("ppm", `周波数補正は −${ppmLimit}–${ppmLimit} の整数を入力してください。`);
-  return { gain_db: gain, ppm, bias_tee: values.bias_tee === true };
+  return {
+    gain_db: gain,
+    ppm,
+    bias_tee: values.bias_tee === true,
+    gain_optimize: values.gain_auto === "optimize",
+  };
 }
 export function makeInput(values, channels) {
   const bad = (field, message) => {
@@ -116,6 +121,7 @@ export function makeInput(values, channels) {
         gain_db,
         ppm: number("ppm", -488, 488, true),
         bias_tee: values.bias_tee === true,
+        gain_optimize: values["gain-auto"] === "optimize",
       },
     };
   }
@@ -148,6 +154,7 @@ export function makeInput(values, channels) {
         gain_db,
         ppm,
         bias_tee: values.bias_tee === true,
+        gain_optimize: values["gain-auto"] === "optimize",
       },
     };
   }

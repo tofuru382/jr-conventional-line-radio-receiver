@@ -41,8 +41,10 @@ test("all 22 frequencies fit the requested RTL-TCP capture", () => {
       gain_db: null,
       ppm: 0,
       bias_tee: false,
+      gain_optimize: false,
     },
   });
+  assert.equal(makeInput({ ...values, "gain-auto": "optimize" }, channels).radio.gain_optimize, true);
 });
 test("field validation identifies the recoverable control before connecting", () => {
   for (const [field, value] of [
@@ -108,7 +110,9 @@ test("live tuning sends automatic or manual gain, ppm and bias tee", () => {
     gain_db: null,
     ppm: -4,
     bias_tee: true,
+    gain_optimize: false,
   });
+  assert.equal(makeTuning({ gain: "", ppm: "0", gain_auto: "optimize" }, "usb").gain_optimize, true);
   assert.equal(makeTuning({ gain: "30.5", ppm: "0" }, "sdr").gain_db, 30.5);
   assert.throws(
     () => makeTuning({ gain: "60", ppm: "0" }, "usb"),
@@ -152,6 +156,7 @@ test("the built-in USB driver gets rate, center, gain and correction only", () =
       gain_db: 20,
       ppm: -3,
       bias_tee: false,
+      gain_optimize: false,
     },
   });
   for (const [field, patch] of [

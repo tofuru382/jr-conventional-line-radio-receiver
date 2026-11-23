@@ -52,6 +52,9 @@ pub struct InputSettings {
     pub bias_tee: bool,
     /// Decode IQ WAV files faster than real time.
     pub wave_fast: bool,
+    /// Automatic gain: "clip" (highest gain that does not clip) or
+    /// "optimize" (by the noise floor).
+    pub gain_auto: String,
 }
 impl Default for InputSettings {
     fn default() -> Self {
@@ -71,6 +74,7 @@ impl Default for InputSettings {
             stream_args: String::new(),
             bias_tee: false,
             wave_fast: false,
+            gain_auto: "clip".into(),
         }
     }
 }

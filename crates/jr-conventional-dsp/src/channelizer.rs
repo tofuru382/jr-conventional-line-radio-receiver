@@ -70,6 +70,11 @@ pub struct Channelizer {
     frames: Vec<Complex<f32>>,
     fft: Arc<dyn Fft<f32>>,
     scratch: Vec<Complex<f32>>,
+    /// Mean power of every bin (not only those in use), summed since the
+    /// last [`Channelizer::take_bin_power`], while measuring.
+    measuring: bool,
+    power: Vec<f64>,
+    power_outputs: u64,
 }
 struct Bin {
     k: usize,
@@ -141,6 +146,9 @@ impl Channelizer {
             frames: Vec::new(),
             fft,
             scratch,
+            measuring: false,
+            power: vec![0.0; m],
+            power_outputs: 0,
         })
     }
     pub fn output_rate(&self) -> f64 {
@@ -149,6 +157,33 @@ impl Channelizer {
     /// Input samples per output sample.
     pub fn decimation(&self) -> usize {
         self.d
+    }
+    /// Number of bins (the FFT size) and their spacing in Hz.
+    pub fn bins(&self) -> usize {
+        self.m
+    }
+    pub fn bin_spacing(&self) -> f64 {
+        self.rate / self.m as f64
+    }
+    /// Starts or stops summing every bin's power (costs one pass over the
+    /// FFT output; needs the FFT, see [`Bins`]).
+    pub fn set_measuring(&mut self, on: bool) {
+        self.measuring = on;
+        self.power.fill(0.0);
+        self.power_outputs = 0;
+    }
+    /// Mean power per bin (index k: k bins above the centre, wrapping; a
+    /// full-scale tone at a bin centre reads 1) since the last call, or None
+    /// when nothing was measured.
+    pub fn take_bin_power(&mut self) -> Option<Vec<f64>> {
+        if self.power_outputs == 0 {
+            return None;
+        }
+        let n = self.power_outputs as f64;
+        let mean = self.power.iter().map(|p| p / n).collect();
+        self.power.fill(0.0);
+        self.power_outputs = 0;
+        Some(mean)
     }
     /// Forgets the input so far (after lost samples).
     pub fn reset(&mut self) {
@@ -214,6 +249,14 @@ impl Channelizer {
         if fft {
             self.fft
                 .process_with_scratch(&mut self.frames, &mut self.scratch);
+            if self.measuring && count > 0 {
+                for frame in self.frames.chunks_exact(m) {
+                    for (sum, v) in self.power.iter_mut().zip(frame) {
+                        *sum += f64::from(v.norm_sqr());
+                    }
+                }
+                self.power_outputs += count as u64;
+            }
         }
         for j in 0..count {
             let frame = &self.frames[j * m..(j + 1) * m];
@@ -267,6 +310,29 @@ mod tests {
             .map(|s| (s.real as f64).powi(2) + (s.imaginary as f64).powi(2))
             .sum::<f64>()
             / x.len() as f64
+    }
+
+    #[test]
+    fn bin_power_shows_a_tone_in_its_bin_at_full_scale() {
+        let rate = 240_000.0;
+        let mut c = Channelizer::new(rate).unwrap();
+        c.set_measuring(true);
+        let mut out = Vec::new();
+        // 5 bins below the centre (bin 35 of 40), after the filter filled.
+        let x = tone(rate, -5.0 * c.bin_spacing(), 48_000);
+        c.process(&x[..2400], &mut out);
+        c.take_bin_power();
+        c.process(&x[2400..], &mut out);
+        let power = c.take_bin_power().unwrap();
+        assert_eq!(power.len(), 40);
+        assert!((power[35] - 1.0).abs() < 0.02, "{}", power[35]);
+        // Bins overlap (each passes ±12 kHz): one bin away the tone is
+        // still there, three away it is gone.
+        assert!(power[34] > 0.5 && power[36] > 0.5);
+        for k in [0, 5, 31, 39] {
+            assert!(power[k] < 1e-9, "bin {k}: {}", power[k]);
+        }
+        assert_eq!(c.take_bin_power(), None);
     }
 
     #[test]

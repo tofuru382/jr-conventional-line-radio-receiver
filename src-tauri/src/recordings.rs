@@ -101,6 +101,66 @@ pub fn list(roots: &[PathBuf]) -> Vec<RecordingSession> {
     sessions
 }
 
+/// Folder of diagnostic IQ captures inside a recordings root.
+pub const IQ_FOLDER: &str = "IQ";
+const MAX_IQ_FILES: usize = 50;
+
+/// Diagnostic IQ captures (`IQ/iq-*.wav` in each root), newest first.
+pub fn list_iq(roots: &[PathBuf]) -> Vec<RecordingFile> {
+    let mut files: Vec<RecordingFile> = roots
+        .iter()
+        .filter_map(|root| std::fs::read_dir(root.join(IQ_FOLDER)).ok())
+        .flatten()
+        .flatten()
+        .filter_map(|f| {
+            let path = f.path();
+            let name = path.file_name()?.to_str()?.to_string();
+            let meta = f.metadata().ok()?;
+            (is_iq_name(&name) && meta.is_file()).then(|| RecordingFile {
+                modified: meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs()),
+                bytes: meta.len(),
+                path: path.to_string_lossy().into_owned(),
+                name,
+            })
+        })
+        .collect();
+    files.sort_by(|a, b| b.name.cmp(&a.name));
+    files.truncate(MAX_IQ_FILES);
+    files
+}
+fn is_iq_name(name: &str) -> bool {
+    name.starts_with("iq-") && name.to_ascii_lowercase().ends_with(".wav")
+}
+/// An `iq-*.wav` directly in the IQ folder of a known root, or None.
+fn iq_file(roots: &[PathBuf], path: &str) -> Result<Option<PathBuf>, String> {
+    let file = Path::new(path)
+        .canonicalize()
+        .map_err(|e| format!("ファイルが見つかりません。{e}"))?;
+    let named = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_iq_name);
+    let allowed = named
+        && file.is_file()
+        && file.parent().is_some_and(|folder| {
+            roots
+                .iter()
+                .any(|r| r.join(IQ_FOLDER).canonicalize().is_ok_and(|f| f == folder))
+        });
+    Ok(allowed.then_some(file))
+}
+/// Deletes one IQ capture.
+pub fn delete_iq(roots: &[PathBuf], path: &str) -> Result<(), String> {
+    let Some(file) = iq_file(roots, path)? else {
+        return Err("この場所のファイルは削除できません。".into());
+    };
+    std::fs::remove_file(&file).map_err(|e| format!("IQ ファイルを削除できませんでした。{e}"))
+}
+
 /// A WAV in a `recording-*` folder directly inside a known root, or None.
 fn recording_file(roots: &[PathBuf], path: &str) -> Result<Option<PathBuf>, String> {
     let file = Path::new(path)
@@ -164,6 +224,48 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn lists_and_deletes_only_iq_captures_of_the_iq_folder() {
+        let temp = Temp::new("iq");
+        let iq = temp.0.join(IQ_FOLDER);
+        std::fs::create_dir_all(&iq).unwrap();
+        std::fs::write(
+            iq.join("iq-20261101T000000Z-352603125Hz-240000.wav"),
+            b"RIFF1",
+        )
+        .unwrap();
+        std::fs::write(
+            iq.join("iq-20261102T000000Z-352603125Hz-240000.wav"),
+            b"RIFF22",
+        )
+        .unwrap();
+        std::fs::write(iq.join("notes.wav"), b"RIFF").unwrap();
+        std::fs::write(temp.0.join("iq-20261103T000000Z-1Hz-1.wav"), b"RIFF").unwrap();
+        let roots = roots([temp.0.clone()]);
+        let list = list_iq(&roots);
+        let names: Vec<_> = list.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "iq-20261102T000000Z-352603125Hz-240000.wav",
+                "iq-20261101T000000Z-352603125Hz-240000.wav"
+            ]
+        );
+        assert_eq!(list[0].bytes, 6);
+        // Only captures in the IQ folder can be deleted.
+        assert!(delete_iq(&roots, &iq.join("notes.wav").to_string_lossy()).is_err());
+        assert!(delete_iq(
+            &roots,
+            &temp
+                .0
+                .join("iq-20261103T000000Z-1Hz-1.wav")
+                .to_string_lossy()
+        )
+        .is_err());
+        delete_iq(&roots, &list[1].path).unwrap();
+        assert_eq!(list_iq(&roots).len(), 1);
     }
 
     #[test]

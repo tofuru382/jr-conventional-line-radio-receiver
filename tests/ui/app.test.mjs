@@ -82,6 +82,7 @@ async function setup(
     platformInfo = null,
     driverError = null,
     recordings = [],
+    iqFiles = [],
     connectionLog = [],
     bridge = null,
     channelClass = null,
@@ -245,7 +246,12 @@ async function setup(
               if (w.__failDelete) throw new Error(w.__failDelete);
               return null;
             }
-            if (command === "capture_iq") return "/sdcard/Download/JR-CLRR/Recordings/iq-1-352603125Hz-240000.wav";
+            if (command === "capture_iq") return "/sdcard/Download/JR-CLRR/Recordings/IQ/iq-20261123T061112Z-352603125Hz-240000.wav";
+            if (command === "list_iq_captures") return structuredClone(iqFiles);
+            if (command === "delete_iq_capture") {
+              iqFiles = iqFiles.filter((f) => f.path !== args.path);
+              return null;
+            }
             if (command === "native_audio_status")
               return { underruns: 2, buffer_ms: 1000, rate: 48000 };
             if (command === "connection_log") return structuredClone(connectionLog);
@@ -844,10 +850,118 @@ test("the measured input rate is shown and flagged when it differs from the sett
   await app.poll();
   assert.match($("capture-info").textContent, /　周波数 自動補正 \+120 Hz　入力/);
 });
-test("no diagnosis panels: IQ capture and the connection log are gone", async (t) => {
+test("no diagnosis panels besides the IQ capture: the connection log is gone", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
-  for (const id of ["iq-group", "iq-capture", "log-group", "connection-log", "recent-block"])
+  for (const id of ["iq-group", "log-group", "connection-log", "recent-block"])
     assert.equal(app.$(id), null, id);
+  assert.notEqual(app.$("iq-capture"), null);
+});
+test("IQ capture saves for the chosen length with progress, then lists, shares, replays and deletes captures", async (t) => {
+  const root = "/sdcard/Download/JR-CLRR/Recordings/IQ";
+  const iq = (stamp, seconds) => ({
+    name: `iq-${stamp}-352603125Hz-240000.wav`,
+    path: `${root}/iq-${stamp}-352603125Hz-240000.wav`,
+    bytes: 44 + 240000 * 4 * seconds,
+    modified: 0,
+  });
+  const shared = [],
+    scanned = [];
+  const app = await setup(t, {
+    platformInfo: { android: true, soapy: false },
+    iqFiles: [iq("20261123T061112Z", 10)],
+    bridge: {
+      shareFile: (path) => (shared.push(path), true),
+      scanRecordings: (path) => scanned.push(path),
+    },
+  });
+  const { $ } = app;
+  // Listed at start, newest first, in Japan time with frequency, rate and size.
+  const rows = () => [...$("iq-files").querySelectorAll(".iq-file")];
+  assert.equal(rows().length, 1);
+  assert.equal(rows()[0].querySelector(".iq-file-name").textContent, "11/23 15:11:12　352.603125 MHz・240 kS/s・9.6 MB");
+  // Only while receiving; the hint gives the size for the chosen length.
+  assert.equal($("iq-capture").disabled, true);
+  assert.match($("iq-capture-hint").textContent, /約 9\.6 MB/);
+  await app.change("iq-seconds", "30");
+  assert.match($("iq-capture-hint").textContent, /約 28\.8 MB/);
+  await app.click("start");
+  await app.poll();
+  assert.equal($("iq-capture").disabled, false);
+  // Replaying needs reception stopped.
+  assert.equal(rows()[0].querySelector(".iq-replay").disabled, true);
+  await app.click("iq-capture");
+  const request = app.calls.filter((c) => c.command === "capture_iq").at(-1).args;
+  assert.equal(request.seconds, 30);
+  assert.equal($("iq-capture").disabled, true);
+  assert.equal($("iq-capture").textContent, "保存中…");
+  const path = `${root}/iq-20261123T061200Z-352603125Hz-240000.wav`;
+  const capture = (state, written, extra = {}) => ({
+    status: { ...status(), iq_capture: { state, path, message: null, seconds: 30, written_seconds: written, bytes: 44 + 960000 * written, ...extra } },
+    audio: [],
+  });
+  app.setSnapshot(capture("saving", 12.4));
+  await app.poll();
+  assert.equal($("iq-capture-status").textContent, "保存中… 残り 18 秒");
+  // Finished: Android indexes the folder and the list refreshes.
+  app.setSnapshot(capture("saved", 30));
+  await app.poll();
+  assert.equal($("iq-capture-status").textContent, "保存しました（30 秒・28.8 MB）");
+  assert.deepEqual(scanned, [root]);
+  assert.equal($("iq-capture").disabled, false);
+  assert.ok(app.calls.filter((c) => c.command === "list_iq_captures").length >= 2);
+  // Share opens Android's share sheet for that file.
+  rows()[0].querySelector("button").click();
+  assert.deepEqual(shared, [iq("20261123T061112Z", 10).path]);
+  // Stopped: replay switches the input to that file at its centre frequency.
+  await app.click("start");
+  app.setSnapshot({ status: { ...status(), running: false, state: "stopped" }, audio: [] });
+  await app.poll();
+  assert.equal(rows()[0].querySelector(".iq-replay").disabled, false);
+  $("center").value = "350";
+  rows()[0].querySelector(".iq-replay").click();
+  assert.equal($("input-kind").value, "wave");
+  assert.equal($("path").value, iq("20261123T061112Z", 10).path);
+  assert.equal($("center").value, "352.603125");
+  assert.match($("iq-capture-status").textContent, /IQ WAV ファイル/);
+  // Delete asks for a second press.
+  const remove = () => [...rows()[0].querySelectorAll("button")].at(-1);
+  remove().click();
+  assert.equal(remove().textContent, "もう一度押すと削除");
+  assert.equal(app.calls.some((c) => c.command === "delete_iq_capture"), false);
+  remove().click();
+  await tick();
+  await tick();
+  assert.equal(app.calls.filter((c) => c.command === "delete_iq_capture").at(-1).args.path, iq("20261123T061112Z", 10).path);
+  assert.equal(rows().length, 0);
+  assert.equal($("iq-capture-status").textContent, "削除しました");
+});
+test("a failed or cut-short IQ capture says why", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const { $ } = app;
+  await app.click("start");
+  await app.poll();
+  await app.click("iq-capture");
+  const at = (state, extra) => ({
+    status: { ...status(), iq_capture: { state, path: "/x/IQ/iq-a.wav", message: null, seconds: 10, written_seconds: 0, bytes: 0, ...extra } },
+    audio: [],
+  });
+  app.setSnapshot(at("saved", { written_seconds: 4, bytes: 44 + 960000 * 4, message: "保存先への書き込みが追いつかないため途中で止めました" }));
+  await app.poll();
+  assert.equal($("iq-capture-status").textContent, "保存しました（4 秒・3.8 MB）：保存先への書き込みが追いつかないため途中で止めました");
+  await app.click("iq-capture");
+  app.setSnapshot(at("failed", { message: "IQ を保存できません：Permission denied" }));
+  await app.poll();
+  assert.equal($("iq-capture-status").textContent, "IQ を保存できません：Permission denied");
+});
+test("desktop and the browser preview: no share button, and no IQ section without the app", async (t) => {
+  const desktop = await setup(t, {
+    platformInfo: { android: false, soapy: true },
+    iqFiles: [{ name: "iq-20261123T061112Z-352603125Hz-240000.wav", path: "/r/IQ/iq-20261123T061112Z-352603125Hz-240000.wav", bytes: 9600044, modified: 0 }],
+  });
+  assert.equal(desktop.$("iq-capture-group").hidden, false);
+  assert.deepEqual([...desktop.$("iq-files").querySelectorAll("button")].map((b) => b.textContent), ["この IQ で受信", "削除"]);
+  const preview = await setup(t, { native: false });
+  assert.equal(preview.$("iq-capture-group").hidden, true);
 });
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -2596,9 +2710,41 @@ test("gain and ppm changes while receiving are sent without restarting", async (
   await new Promise((resolve) => setImmediate(resolve));
   const tuning = ui.calls.filter((c) => c.command === "set_tuning");
   assert.equal(tuning.length, 2);
-  assert.deepEqual(tuning[0].args.control, { gain_db: 30.5, ppm: 0, bias_tee: false });
-  assert.deepEqual(tuning[1].args.control, { gain_db: 30.5, ppm: 0, bias_tee: true });
+  assert.deepEqual(tuning[0].args.control, { gain_db: 30.5, ppm: 0, bias_tee: false, gain_optimize: false });
+  assert.deepEqual(tuning[1].args.control, { gain_db: 30.5, ppm: 0, bias_tee: true, gain_optimize: false });
   assert.equal(ui.calls.filter((c) => c.command === "start").length, 1);
+});
+
+test("the automatic gain method is offered for RTL-TCP and USB, sent live and saved, and shows what the optimizer does", async (t) => {
+  const ui = await setup(t);
+  const { $ } = ui;
+  assert.equal($("gain-auto-group").hidden, false);
+  assert.equal($("gain-auto").value, "clip");
+  await ui.change("gain-auto", "optimize");
+  await ui.click("start");
+  const started = ui.calls.filter((c) => c.command === "start").at(-1).args;
+  assert.equal(JSON.stringify(started).includes('"gain_optimize":true'), true, JSON.stringify(started));
+  const at = (gain) => ({ status: { ...status(), gain }, audio: [] });
+  ui.setSnapshot(at({ phase: "sweeping", gain_db: 7.7, note: "最適なゲインを探しています", floor_rise_db: null }));
+  await ui.poll();
+  assert.equal($("gain-status").textContent, "最適なゲインを探しています…（15 秒ほど受信が乱れることがあります）");
+  ui.setSnapshot(at({ phase: "tracking", gain_db: 37.2, note: "雑音の量から 37.2 dB を選びました（ADC の雑音より 8.1 dB 上）", floor_rise_db: 8.1 }));
+  await ui.poll();
+  assert.match($("gain-status").textContent, /^雑音の量から 37\.2 dB を選びました/);
+  // Switching back while receiving is sent at once.
+  await ui.change("gain-auto", "clip");
+  const tuning = ui.calls.filter((c) => c.command === "set_tuning").at(-1).args.control;
+  assert.deepEqual(tuning, { gain_db: null, ppm: 0, bias_tee: false, gain_optimize: false });
+  // A manual gain makes the method irrelevant.
+  ui.input("gain", "20");
+  assert.equal($("gain-auto").disabled, true);
+  assert.equal($("gain-status").textContent, "");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ui.preferences.value.input.gain_auto, "clip");
+  // Not for SoapySDR or IQ files.
+  await ui.click("start");
+  await ui.change("input-kind", "wave");
+  assert.equal($("gain-auto-group").hidden, true);
 });
 
 test("pushed monitor audio plays without polling for it and follows the automatic choice", async (t) => {
@@ -2666,4 +2812,78 @@ test("Android mutes when headphones are unplugged and pauses during a call", asy
   assert.equal(app.$("listen").checked, false);
   assert.equal(app.$("audio-state").textContent, "イヤホンの接続が切れたため消音しました");
   assert.equal(listening.at(-1), false);
+});
+
+test("Android keeps live audio playing while a saved recording plays, then takes the audio focus back", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const reclaimed = [];
+  let route = { noisy: 0, focus: "held", toggles: 0 };
+  app.w.JrAndroid = {
+    setReceiving() {},
+    setListening() {},
+    audioRoute: () => JSON.stringify(route),
+    reclaimAudioFocus: () => {
+      reclaimed.push(true);
+      route = { ...route, focus: "held" };
+    },
+  };
+  let now = 1000;
+  app.w.performance.now = () => now;
+  app.$("listen").checked = true;
+  await app.click("start");
+  const frame = (index) => ({
+    status: status(),
+    audio: [{ channel: presets[0].id, epoch: 0, index, pcm: new Array(320).fill(1000) }],
+  });
+  app.setSnapshot(frame(0));
+  await app.poll();
+  const player = app.$("recordings-player");
+  // Our own player takes the focus for good: live audio keeps playing.
+  player.dispatchEvent(new app.w.Event("play"));
+  route = { ...route, focus: "lost" };
+  const before = app.playback.length;
+  app.setSnapshot(frame(1));
+  await app.poll();
+  assert.equal(app.$("listen").checked, true);
+  assert.ok(app.playback.length > before, "live audio still plays");
+  // A short clip asks for the focus only for a while: still no pause.
+  route = { ...route, focus: "transient" };
+  app.setSnapshot(frame(2));
+  const during = app.playback.length;
+  await app.poll();
+  assert.ok(app.playback.length > during);
+  assert.notEqual(app.$("audio-state").textContent, "通話中のため一時的に消音しています");
+  // The recording ends: the focus is taken back.
+  player.dispatchEvent(new app.w.Event("ended"));
+  assert.equal(reclaimed.length, 1);
+  app.setSnapshot(frame(3));
+  await app.poll();
+  assert.equal(app.$("listen").checked, true);
+  // Later, another app taking the audio still mutes.
+  now += 5000;
+  route = { ...route, focus: "lost" };
+  app.setSnapshot(frame(4));
+  await app.poll();
+  assert.equal(app.$("listen").checked, false);
+  assert.equal(app.$("audio-state").textContent, "ほかのアプリが音声を使い始めたため消音しました");
+});
+
+test("Android mutes when another app pauses a recording playing in the background", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const reclaimed = [];
+  app.w.JrAndroid = {
+    setReceiving() {},
+    setListening() {},
+    audioRoute: () => JSON.stringify({ noisy: 0, focus: "lost", toggles: 0 }),
+    reclaimAudioFocus: () => reclaimed.push(true),
+  };
+  app.$("listen").checked = true;
+  await app.click("start");
+  await app.poll();
+  const player = app.$("recordings-player");
+  player.dispatchEvent(new app.w.Event("play"));
+  Object.defineProperty(app.w.document, "visibilityState", { value: "hidden", configurable: true });
+  player.dispatchEvent(new app.w.Event("pause"));
+  assert.equal(reclaimed.length, 0);
+  assert.equal(app.$("listen").checked, false);
 });

@@ -43,6 +43,10 @@ pub struct Config {
     /// The phone supplies that current too.
     #[serde(default)]
     pub bias_tee: bool,
+    /// Automatic gain (no `gain_db`) chosen by the noise floor instead of
+    /// the highest gain that does not clip (see `crate::gain`).
+    #[serde(default)]
+    pub gain_optimize: bool,
 }
 /// Ten minutes: a dongle the phone stopped powering only returns once it is
 /// replugged, and a person needs longer than a minute to notice and do that.
@@ -680,6 +684,7 @@ mod tests {
             ppm: 0,
             reconnect_seconds: 60,
             bias_tee: false,
+            gain_optimize: false,
         }
     }
 

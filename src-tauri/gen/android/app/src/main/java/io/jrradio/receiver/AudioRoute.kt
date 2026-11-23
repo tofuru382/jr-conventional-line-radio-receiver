@@ -111,6 +111,22 @@ object AudioRoute {
     }
   }
 
+  /**
+   * The page's own recording player took the focus (it plays in the same
+   * WebView, which Android treats like another app): take it back once that
+   * playback stopped, so another app taking it later still mutes.
+   */
+  @Synchronized
+  fun reclaim(context: Context) {
+    val held = request ?: return
+    if (!listening || focus == "held") return
+    val audio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    focus =
+      if (audio.requestAudioFocus(held) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) "held"
+      else "transient"
+    UsbDongle.note("Android: 録音の再生が終わったので音声フォーカスを取り直しました（$focus）")
+  }
+
   private fun mediaSession(context: Context): MediaSession =
     session
       ?: MediaSession(context.applicationContext, "jrradio-monitor").also { created ->

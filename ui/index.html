@@ -243,6 +243,13 @@
                 step="0.1"
                 inputmode="decimal"
             /></label>
+            <label id="gain-auto-group" for="gain-auto"
+              >自動ゲインの方式<select id="gain-auto">
+                <option value="clip" selected>飽和しない最大（従来）</option>
+                <option value="optimize">雑音の量から最適化</option>
+              </select></label
+            >
+            <p id="gain-status" class="field-hint gain-status" role="status"></p>
           </div>
           <div id="driver-group" class="driver-row" hidden>
             <button id="driver-start" type="button">
@@ -356,6 +363,21 @@
             <p id="recording-output" hidden></p>
           </div>
         </details>
+        <div id="iq-capture-group" class="iq-capture">
+          <div class="iq-capture-bar">
+            <span class="iq-capture-title">IQ 録音（診断用）</span>
+            <label for="iq-seconds"
+              >長さ<select id="iq-seconds">
+                <option value="10" selected>10 秒</option>
+                <option value="30">30 秒</option>
+              </select></label
+            >
+            <button id="iq-capture" type="button" disabled>IQ を保存</button>
+          </div>
+          <p id="iq-capture-hint" class="field-hint"></p>
+          <p id="iq-capture-status" class="field-hint" role="status"></p>
+          <div id="iq-files" class="iq-files"></div>
+        </div>
         <p id="recording-error" class="field-error" role="alert" hidden></p>
       </section>
       <details id="recordings-browser" class="card recordings-browser" hidden>

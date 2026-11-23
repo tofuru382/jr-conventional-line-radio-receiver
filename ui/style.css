@@ -339,6 +339,14 @@ fieldset {
 .tcp-test-row .field-hint {
   margin-block-start: 0;
 }
+.gain-status {
+  grid-column: 1 / -1;
+  margin-block-start: 0;
+}
+.gain-status:empty,
+#gain-auto-group[hidden] {
+  display: none;
+}
 .check-field {
   display: flex;
   align-items: center;
@@ -830,6 +838,49 @@ figcaption {
   margin: 0;
   padding: 0 22px 16px;
   overflow-wrap: anywhere;
+}
+.iq-capture {
+  padding: 4px 22px 16px;
+  border-block-start: 1px solid var(--line);
+}
+.iq-capture[hidden] {
+  display: none;
+}
+.iq-capture-bar,
+.iq-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-block-start: 12px;
+}
+.iq-capture-title {
+  font-weight: 600;
+  margin-inline-end: auto;
+}
+.iq-capture-bar label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.iq-capture-bar select {
+  width: auto;
+}
+.iq-capture .field-hint {
+  margin-block-start: 8px;
+  overflow-wrap: anywhere;
+}
+.iq-capture .field-hint:empty {
+  display: none;
+}
+.iq-file-name {
+  flex: 1 1 16rem;
+  min-width: 0;
+  font-size: var(--text-caption);
+  overflow-wrap: anywhere;
+}
+.iq-file button {
+  flex: 0 0 auto;
 }
 .recording-controls {
   display: flex;

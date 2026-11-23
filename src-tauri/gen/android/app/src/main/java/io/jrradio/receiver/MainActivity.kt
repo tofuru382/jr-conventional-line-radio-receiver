@@ -124,6 +124,12 @@ class MainActivity : TauriActivity() {
       runOnUiThread { AudioRoute.setListening(this@MainActivity, on) }
     }
 
+    /** The page's recording player stopped: take the audio focus back (see [AudioRoute.reclaim]). */
+    @JavascriptInterface
+    fun reclaimAudioFocus() {
+      runOnUiThread { AudioRoute.reclaim(this@MainActivity) }
+    }
+
     /** Headphone, audio focus and media button counters (see [AudioRoute.state]). */
     @JavascriptInterface fun audioRoute(): String = AudioRoute.state()
 
@@ -137,6 +143,38 @@ class MainActivity : TauriActivity() {
         java.io.File(path).listFiles()?.filter { it.isFile }?.map { it.absolutePath }?.toTypedArray()
           ?: return
       if (files.isNotEmpty()) android.media.MediaScannerConnection.scanFile(this@MainActivity, files, null, null)
+    }
+
+    /**
+     * Opens the share sheet for a saved IQ capture (an `iq-*.wav`), e.g. to
+     * send it for analysis. Returns false when the file cannot be shared.
+     */
+    @JavascriptInterface
+    fun shareFile(path: String): Boolean {
+      val file = java.io.File(path)
+      if (!file.isFile || !file.name.startsWith("iq-") || !file.name.endsWith(".wav", ignoreCase = true)) {
+        return false
+      }
+      val uri =
+        try {
+          androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file)
+        } catch (e: IllegalArgumentException) {
+          UsbDongle.note("Android: 共有できない場所のファイルです（${file.name}）")
+          return false
+        }
+      runOnUiThread {
+        val send =
+          Intent(Intent.ACTION_SEND)
+            .setType("audio/wav")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+          startActivity(Intent.createChooser(send, file.name))
+        } catch (e: Exception) {
+          UsbDongle.note("Android: 共有メニューを開けませんでした（${e.javaClass.simpleName}）")
+        }
+      }
+      return true
     }
 
     /** The notification's band map layout (see [NativeBand.layout]). */

@@ -62,6 +62,10 @@ pub struct Control {
     pub ppm: Option<i32>,
     #[serde(default)]
     pub bias_tee: Option<bool>,
+    /// Automatic gain by the noise floor (see `crate::gain`); the session
+    /// handles it, sources ignore it.
+    #[serde(default)]
+    pub gain_optimize: Option<bool>,
 }
 impl Control {
     pub fn validate(&self) -> Result<(), String> {
@@ -88,10 +92,16 @@ impl Control {
         if later.bias_tee.is_some() {
             self.bias_tee = later.bias_tee;
         }
+        if later.gain_optimize.is_some() {
+            self.gain_optimize = later.gain_optimize;
+        }
     }
     pub fn update_rtl_tcp(&self, config: &mut crate::rtl_tcp::Config) {
         if let Some(gain) = self.gain_db {
             config.gain_db = gain;
+        }
+        if let Some(optimize) = self.gain_optimize {
+            config.gain_optimize = optimize;
         }
         if let Some(ppm) = self.ppm {
             config.ppm = ppm;

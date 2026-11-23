@@ -365,30 +365,53 @@ fn connection_log() -> Vec<(u64, String)> {
 fn previous_connection_log() -> Vec<(u64, String)> {
     receiver_core::diag::previous()
 }
-/// Diagnosis: save the next 10 s of raw IQ as a WAV next to the recordings
-/// (the IQ WAV input replays it). Returns the file path.
+/// Diagnosis: save the next `seconds` (10 by default) of raw IQ as a WAV in
+/// the recordings folder's IQ subfolder (the IQ WAV input replays it).
+/// Returns the file path; progress is in the snapshot's `iq_capture`.
 #[tauri::command]
 async fn capture_iq(
     directory: Option<String>,
+    seconds: Option<f64>,
     state: tauri::State<'_, Receiver>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     let folder = match directory.filter(|d| !d.trim().is_empty()) {
-        Some(d) => std::path::PathBuf::from(d),
+        Some(d) => std::path::PathBuf::from(d.trim()),
         None => recording_directory::default_directory(&app)?,
-    };
+    }
+    .join(recordings::IQ_FOLDER);
+    std::fs::create_dir_all(&folder).map_err(|e| format!("IQ の保存先を作れませんでした。{e}"))?;
     let session = state.current().ok_or("受信中に保存してください。")?;
     let overview = session.status(None, false);
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let path = folder.join(format!(
-        "iq-{stamp}-{}Hz-{}.wav",
-        overview.center_hz.round() as u64,
-        overview.sample_rate.round() as u64
+    let path = folder.join(receiver_core::session::iq_capture_file_name(
+        overview.center_hz,
+        overview.sample_rate,
     ));
-    session.capture_iq(path.clone(), 10.0)?;
+    session.capture_iq(path.clone(), seconds.unwrap_or(10.0))?;
     Ok(path.to_string_lossy().into_owned())
+}
+#[tauri::command]
+async fn list_iq_captures(
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<Vec<recordings::RecordingFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(recordings::list_iq(&recording_roots(&app, directory)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn delete_iq_capture(
+    path: String,
+    directory: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        recordings::delete_iq(&recording_roots(&app, directory), &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 fn native_audio_status(
@@ -506,6 +529,8 @@ pub fn run() {
             play_test_sound,
             native_audio_status,
             capture_iq,
+            list_iq_captures,
+            delete_iq_capture,
             connection_log,
             previous_connection_log,
             list_recordings,

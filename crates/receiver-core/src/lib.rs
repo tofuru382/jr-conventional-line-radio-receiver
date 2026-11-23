@@ -3,6 +3,7 @@ mod coding;
 pub mod data;
 pub mod diag;
 pub mod frame;
+pub mod gain;
 mod monitor;
 pub mod pipeline;
 pub mod presets;
