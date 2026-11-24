@@ -76,6 +76,8 @@ object UsbDongle {
   private fun isDongle(device: UsbDevice) = (device.vendorId to device.productId) in KNOWN
 
   private var connection: UsbDeviceConnection? = null
+  /** The device [connection] belongs to ([UsbDevice.getDeviceName]). */
+  private var connectedTo: String? = null
   private var receiverRegistered = false
   private var watching = false
 
@@ -247,6 +249,7 @@ object UsbDongle {
               detaches.addLast(now)
               while (detaches.isNotEmpty() && now - detaches.first() > BOUNCE_WINDOW_MS) detaches.removeFirst()
             }
+            release("ドングルが外れた", device?.deviceName)
           } else if (device == null || isDongle(device)) {
             attachedAt = now
           }
@@ -298,6 +301,8 @@ object UsbDongle {
     val attached = usb.deviceList.values
     val device = attached.firstOrNull { isDongle(it) }
     if (device == null) {
+      // Also when the detach broadcast was missed.
+      release("ドングルが見当たらない")
       val result = if (attached.isEmpty()) "none" else "other:${attached.size}"
       // Asked every second while a session waits: note changes, and every 10 s.
       val now = SystemClock.elapsedRealtime()
@@ -362,6 +367,7 @@ object UsbDongle {
         }
     connection?.close()
     connection = opened
+    connectedTo = device.deviceName
     val identity =
       try {
         val manufacturer = device.manufacturerName
@@ -390,6 +396,26 @@ object UsbDongle {
     if (connection != null) note("Android: 受信を止めたのでドングルを放します")
     connection?.close()
     connection = null
+    connectedTo = null
+  }
+
+  /**
+   * The dongle the connection belongs to left USB: close the connection at
+   * once instead of when the next one replaces it. Kept open, it holds the
+   * kernel's handle on the departed device, and a phone did not see the
+   * dongle again for minutes, replugged or not, until the app let go of it
+   * (it came back a second after reception was stopped, and after an app
+   * restart). The driver closed its own duplicate when the link failed.
+   */
+  @Synchronized
+  private fun release(why: String, departed: String? = null) {
+    // Another USB device leaving leaves the dongle's connection alone.
+    if (departed != null && departed != connectedTo) return
+    val open = connection ?: return
+    open.close()
+    connection = null
+    connectedTo = null
+    note("Android: ${why}ので、外れたドングルへの接続を閉じました")
   }
 
   private fun registerPermissionReceiver(context: Context) {
