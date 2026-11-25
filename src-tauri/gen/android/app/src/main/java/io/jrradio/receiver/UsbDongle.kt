@@ -191,11 +191,41 @@ object UsbDongle {
     return "電池 ${degrees}℃ ${percent}%"
   }
 
+  // Android's own view of the USB port, a sticky broadcast any app may read:
+  // "host_connected" while the phone runs the port as a USB host (OTG on: it
+  // powers the bus and looks for devices), "connected" while it is plugged
+  // into a PC as a device. A dongle missing while the port is not a host
+  // means the phone turned OTG off or no longer sees the OTG cable; missing
+  // while it is one, the phone is looking but the dongle does not answer
+  // (contact, power, or the dongle). Added for a vivo X200 Pro that found
+  // no dongle after a drop, through app restarts and replugging.
+  private const val ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE"
+  @Volatile private var lastPort: String? = null
+
+  private fun portState(state: Intent?): String =
+    when {
+      state == null -> "スマホの USB 状態 不明"
+      state.getBooleanExtra("host_connected", false) -> "スマホの USB: ホスト（OTG 動作中）"
+      state.getBooleanExtra("connected", false) -> "スマホの USB: ホストではない（PC などにつながっている）"
+      else -> "スマホの USB: ホストではない（OTG が止まっているか、ケーブルを認識していない）"
+    }
+
+  /** The port as Android reports it now (see [ACTION_USB_STATE]). */
+  private fun port(context: Context): String =
+    portState(
+      try {
+        context.applicationContext.registerReceiver(null, IntentFilter(ACTION_USB_STATE))
+      } catch (e: Exception) {
+        null
+      }
+    )
+
   /**
    * What the phone saw, for the diagnosis shown with a lost-dongle error:
    * whether Android itself reported the USB device detached (power or
    * contact; nothing an app can undo) or the dongle is still attached (it
-   * stopped answering), and the battery state.
+   * stopped answering), whether the port is still a USB host, and the
+   * battery state.
    */
   fun diagnosis(context: Context): String {
     val attached = manager(context).deviceList.values
@@ -208,7 +238,7 @@ object UsbDongle {
     val detached =
       if (detachedAt == 0L) "スマホは USB の切断を検出していない"
       else "スマホが USB の切断を検出（${(SystemClock.elapsedRealtime() - detachedAt) / 1000} 秒前）"
-    return "$detached · $now · ${battery(context)}"
+    return "$detached · $now · ${port(context)} · ${battery(context)}"
   }
 
   /** One note per line: "<unix ms>\t<text>". */
@@ -261,8 +291,26 @@ object UsbDongle {
       // Both are protected system broadcasts.
       ContextCompat.RECEIVER_EXPORTED,
     )
+    note("Android: 端末 ${Build.MANUFACTURER} ${Build.MODEL}（Android ${Build.VERSION.RELEASE}）")
     val attached = manager(context).deviceList.values
     note("Android: アプリ起動時の USB 機器 ${attached.size} 台 ${attached.joinToString { describe(it) }}")
+    // Sticky: also delivered at once with the state at start. Noted when the
+    // host role changes, e.g. when the phone turns OTG off minutes after a
+    // drop.
+    ContextCompat.registerReceiver(
+      context.applicationContext,
+      object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+          val state = portState(intent)
+          if (state == lastPort) return
+          lastPort = state
+          note("Android: $state")
+        }
+      },
+      IntentFilter(ACTION_USB_STATE),
+      // A protected system broadcast.
+      ContextCompat.RECEIVER_EXPORTED,
+    )
   }
 
   /**
@@ -304,12 +352,14 @@ object UsbDongle {
       // Also when the detach broadcast was missed.
       release("ドングルが見当たらない")
       val result = if (attached.isEmpty()) "none" else "other:${attached.size}"
+      val portNow = port(context)
       // Asked every second while a session waits: note changes, and every 10 s.
       val now = SystemClock.elapsedRealtime()
-      if (result != lastMissing || now - lastMissingNoted >= 10000) {
-        lastMissing = result
+      val seen = "$result $portNow"
+      if (seen != lastMissing || now - lastMissingNoted >= 10000) {
+        lastMissing = seen
         lastMissingNoted = now
-        note("Android: ドングルを探しました: USB 機器 ${attached.size} 台 ${attached.joinToString { describe(it) }} → $result")
+        note("Android: ドングルを探しました: USB 機器 ${attached.size} 台 ${attached.joinToString { describe(it) }} → $result · $portNow")
       }
       return result
     }
