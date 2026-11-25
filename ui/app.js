@@ -2603,6 +2603,15 @@ async function startReception() {
     $("state").textContent = "接続中";
     $("source-panel").open = false;
   } catch (e) {
+    // Android may already have opened the dongle for a session that did not
+    // start: let go of it (the phone counts it as in use until then).
+    if (platform.android && !running) {
+      try {
+        window.JrAndroid?.releaseUsb?.();
+      } catch {
+        // The bridge only exists in the Android app.
+      }
+    }
     fail(e);
     if (e.field) {
       invalidField = $(e.field);

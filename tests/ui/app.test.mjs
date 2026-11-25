@@ -83,6 +83,7 @@ async function setup(
     driverError = null,
     recordings = [],
     iqFiles = [],
+    startError = null,
     connectionLog = [],
     bridge = null,
     channelClass = null,
@@ -216,6 +217,7 @@ async function setup(
                 ? presetFiles.path
                 : folder;
             if (command === "start") {
+              if (startError) throw new Error(startError);
               recording = { state: "idle", files: 0, pcm_samples: 0, error: null };
               return null;
             }
@@ -535,6 +537,14 @@ test("Android built-in driver asks for the dongle before starting", async (t) =>
   assert.equal(start.args.config.input.kind, "usb");
   assert.equal(start.args.config.input.radio.sample_rate, 240000);
   assert.ok(!("host" in start.args.config.input.radio));
+});
+test("Android lets go of the dongle when reception fails to start after it was opened", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false }, startError: "受信を開始できません" });
+  const released = [];
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "ok", releaseUsb: () => released.push(1) };
+  await app.click("start");
+  assert.equal(released.length, 1);
+  assert.match(app.$("error").textContent, /受信を開始できません/);
 });
 test("Android starts without the dongle and waits for it to be plugged in", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });

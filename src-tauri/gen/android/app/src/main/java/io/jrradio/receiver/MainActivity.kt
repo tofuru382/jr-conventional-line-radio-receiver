@@ -118,6 +118,10 @@ class MainActivity : TauriActivity() {
     @JavascriptInterface
     fun requestUsb(): String = UsbDongle.request(this@MainActivity, user = true)
 
+    /** Reception did not start after [requestUsb]: let go of the dongle. */
+    @JavascriptInterface
+    fun releaseUsb() = UsbDongle.close()
+
     /** "Listen" turned on or off while receiving: audio focus, media session. */
     @JavascriptInterface
     fun setListening(on: Boolean) {

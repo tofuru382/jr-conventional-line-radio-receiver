@@ -101,8 +101,17 @@ impl Identity {
         }
     }
 }
-/// The descriptor most recently handed over by the Java side.
-static OFFERED: Mutex<Option<(OwnedFd, Identity)>> = Mutex::new(None);
+/// The descriptor most recently handed over by the Java side, and its
+/// number (see [`OFFER_TTL`]).
+static OFFERED: Mutex<Option<(OwnedFd, Identity, u64)>> = Mutex::new(None);
+static OFFERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// A descriptor nobody took this long after it was offered is closed. The
+/// Java side opens the dongle just before a session starts, and a waiting
+/// session takes it within 0.2 s; one left over (reception did not start,
+/// was stopped just then, or gave up) would otherwise keep the departed or
+/// idle dongle open until the next session, and the phone counts it as in
+/// use: its OTG setting stayed locked while the app found no dongle.
+const OFFER_TTL: Duration = Duration::from_secs(15);
 /// A session is waiting for a dongle.
 static WANTED: AtomicBool = AtomicBool::new(false);
 
@@ -119,7 +128,9 @@ pub fn offer_fd(fd: i32, identity: Identity) {
             note(format!(
                 "ドライバー: ドングルを受け取りました（{identity:?}）"
             ));
-            *OFFERED.lock().unwrap() = Some((owned, identity));
+            let number = OFFERS.fetch_add(1, Ordering::Relaxed) + 1;
+            *OFFERED.lock().unwrap() = Some((owned, identity, number));
+            expire_offer(number, OFFER_TTL);
         }
         Err(e) => note(format!("ドライバー: 受け取った接続を複製できません（{e}）")),
     }
@@ -129,7 +140,30 @@ pub fn wants_device() -> bool {
     WANTED.load(Ordering::Relaxed)
 }
 fn take_offered() -> Option<(OwnedFd, Identity)> {
-    OFFERED.lock().unwrap().take()
+    OFFERED
+        .lock()
+        .unwrap()
+        .take()
+        .map(|(fd, identity, _)| (fd, identity))
+}
+/// Closes offer `number` if it is still untaken after `ttl`.
+fn expire_offer(number: u64, ttl: Duration) {
+    let spawned = std::thread::Builder::new()
+        .name("usb-offer".into())
+        .spawn(move || {
+            std::thread::sleep(ttl);
+            let mut offered = OFFERED.lock().unwrap();
+            if offered.as_ref().is_some_and(|o| o.2 == number) {
+                *offered = None;
+                drop(offered);
+                note("ドライバー: 受け取ったドングルが使われなかったので閉じました");
+            }
+        });
+    if let Err(e) = spawned {
+        note(format!(
+            "ドライバー: 期限切れの接続を閉じる準備ができません（{e}）"
+        ));
+    }
 }
 
 /// How long `open` waits for the Java side (permission dialog included).
@@ -309,6 +343,8 @@ impl Usb {
         loop {
             if stop.load(Ordering::Relaxed) {
                 WANTED.store(false, Ordering::Relaxed);
+                // One offered just now belongs to nobody.
+                drop(take_offered());
                 return Err("USB: 接続を中止しました".into());
             }
             if let Some(fd) = take_offered() {
@@ -333,6 +369,7 @@ impl Usb {
             }
             if started.elapsed() >= wait {
                 WANTED.store(false, Ordering::Relaxed);
+                drop(take_offered());
                 let seconds = wait.as_secs();
                 note(format!(
                     "ドライバー: {seconds} 秒待ってもドングルを使えませんでした"
@@ -769,6 +806,37 @@ mod tests {
         );
         assert!(error.contains("1 回試しましたが"), "{error}");
         assert!(!wants_device());
+    }
+
+    #[test]
+    fn an_untaken_descriptor_is_closed_after_its_time_and_a_newer_one_is_kept() {
+        let _globals = globals();
+        let file = std::fs::File::open("/dev/null").unwrap();
+        use std::os::fd::AsRawFd;
+        offer_fd(file.as_raw_fd(), Identity::BlogV4);
+        let first = OFFERED.lock().unwrap().as_ref().unwrap().2;
+        // An expiry for an older offer leaves the current one alone.
+        expire_offer(first - 1, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(OFFERED.lock().unwrap().is_some());
+        expire_offer(first, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(OFFERED.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_descriptor_offered_as_the_start_is_cancelled_is_not_kept() {
+        let _globals = globals();
+        let file = std::fs::File::open("/dev/null").unwrap();
+        use std::os::fd::AsRawFd;
+        let stop = AtomicBool::new(true);
+        // Offered while the session that asked for it is being stopped.
+        offer_fd(file.as_raw_fd(), Identity::BlogV4);
+        let error = Usb::open_within(&config(), &stop, Duration::from_secs(1))
+            .err()
+            .unwrap();
+        assert!(error.contains("中止"), "{error}");
+        assert!(take_offered().is_none());
     }
 
     #[test]
