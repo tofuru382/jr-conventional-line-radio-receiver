@@ -31,12 +31,13 @@ class ReceiverService : Service() {
 
   // Built-in driver: while a session waits for the dongle (it dropped off USB
   // and came back), hand it over again, also with the app in the background.
-  // Every second, so a dongle that settled is opened soon after.
+  // Every second, and right when a settling dongle may be opened (the
+  // second's wait came on top of it).
   private val usbWatch =
     object : Runnable {
       override fun run() {
         if (UsbDongle.sessionWantsDevice()) UsbDongle.request(this@ReceiverService)
-        handler.postDelayed(this, 1000)
+        handler.postDelayed(this, UsbDongle.askAgainIn())
       }
     }
 
@@ -143,7 +144,8 @@ class ReceiverService : Service() {
         }
     }
     handler.removeCallbacks(usbWatch)
-    handler.postDelayed(usbWatch, 2000)
+    // A start whose dongle was settling waited 2 s here for the first ask.
+    handler.postDelayed(usbWatch, UsbDongle.askAgainIn())
     handler.removeCallbacks(bandUpdate)
     handler.postDelayed(bandUpdate, 1000)
     if (!running) {

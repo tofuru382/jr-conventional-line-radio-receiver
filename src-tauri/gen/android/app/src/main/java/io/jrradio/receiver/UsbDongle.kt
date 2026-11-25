@@ -152,20 +152,25 @@ object UsbDongle {
   // and after a few such bounces some phones turn the USB port off until the
   // dongle is replugged. So a dongle that just appeared is opened only once
   // it has stayed attached for a while: 2.5 s, doubled for every further
-  // detach in the last minute (at most 10 s; 20 s kept it out of use too
-  // long on a plug that bounces often).
+  // bounce in the last minute (at most 10 s; 20 s kept it out of use too
+  // long on a plug that bounces often). Only a dongle back within
+  // QUICK_RETURN_MS counts as a bounce: one replugged by hand while trying
+  // to get it going made every start after it wait the full 10 s.
   private const val SETTLE_MS = 2500L
   private const val SETTLE_MAX_MS = 10000L
   private const val BOUNCE_WINDOW_MS = 60000L
+  private const val QUICK_RETURN_MS = 2000L
   @Volatile private var attachedAt = 0L
-  private val detaches = ArrayDeque<Long>()
+  /** When the dongle last left USB (elapsedRealtime), or 0; kept after it is open again. */
+  @Volatile private var leftAt = 0L
+  private val bounces = ArrayDeque<Long>()
   private var settlingNoted = 0L
   private var lastMissing: String? = null
   private var lastMissingNoted = 0L
 
   /** How long a dongle must stay attached before it is opened (ms). */
-  internal fun settleTime(now: Long, detachTimes: List<Long>): Long {
-    val recent = detachTimes.count { now - it <= BOUNCE_WINDOW_MS }
+  internal fun settleTime(now: Long, bounceTimes: List<Long>): Long {
+    val recent = bounceTimes.count { now - it <= BOUNCE_WINDOW_MS }
     if (recent <= 1) return SETTLE_MS
     return (SETTLE_MS shl minOf(recent - 1, 3)).coerceAtMost(SETTLE_MAX_MS)
   }
@@ -174,8 +179,17 @@ object UsbDongle {
   private fun settling(): Long {
     if (attachedAt == 0L) return 0
     val now = SystemClock.elapsedRealtime()
-    val wait = synchronized(detaches) { settleTime(now, detaches.toList()) }
+    val wait = synchronized(bounces) { settleTime(now, bounces.toList()) }
     return (attachedAt + wait - now).coerceAtLeast(0)
+  }
+
+  /**
+   * When a waiting session should ask for the dongle again (ms): right when
+   * one that is settling may be opened, otherwise in a second.
+   */
+  fun askAgainIn(): Long {
+    val wait = settling()
+    return if (wait in 1..999) wait + 20 else 1000L
   }
 
   /** "電池 38.5℃ 62%": heat or a low battery can make a phone cut USB power. */
@@ -273,15 +287,20 @@ object UsbDongle {
           val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
           val detached = intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED
           val now = SystemClock.elapsedRealtime()
+          val dongle = device == null || isDongle(device)
           if (detached) {
             detachedAt = now
-            synchronized(detaches) {
-              detaches.addLast(now)
-              while (detaches.isNotEmpty() && now - detaches.first() > BOUNCE_WINDOW_MS) detaches.removeFirst()
-            }
+            if (dongle) leftAt = now
             release("ドングルが外れた", device?.deviceName)
-          } else if (device == null || isDongle(device)) {
+          } else if (dongle) {
             attachedAt = now
+            // Back this soon: the plug bounced (see QUICK_RETURN_MS).
+            if (leftAt != 0L && now - leftAt <= QUICK_RETURN_MS) {
+              synchronized(bounces) {
+                bounces.addLast(now)
+                while (bounces.isNotEmpty() && now - bounces.first() > BOUNCE_WINDOW_MS) bounces.removeFirst()
+              }
+            }
           }
           val what = if (detached) "外れました" else "つながりました"
           note("Android: USB 機器が$what（${device?.let { describe(it) } ?: "不明"}）· ${battery(context)}")
