@@ -253,9 +253,18 @@ impl Vocoder {
             let mut slope_gain = 10.0_f32.powf(-slope / 40.0);
             let slope_step = 10.0_f32.powf(slope / (20.0 * 79.0));
             let mut shaped = [0.0; 80];
-            for i in 0..80 {
-                for j in 0..128 {
-                    shaped[i] += extended[255 + i - j] * impulse[j];
+            if curve.is_some() {
+                // The final synthesis uses a wider accumulator. Preserve the
+                // binary32 reduction order in the model's intermediate trials.
+                let reversed: [f32; 128] = std::array::from_fn(|j| impulse[127 - j]);
+                for (i, sample) in shaped.iter_mut().enumerate() {
+                    *sample = precise_dot(&extended[128 + i..256 + i], &reversed);
+                }
+            } else {
+                for i in 0..80 {
+                    for j in 0..128 {
+                        shaped[i] += extended[255 + i - j] * impulse[j];
+                    }
                 }
             }
             for sample in &mut shaped {
@@ -308,5 +317,56 @@ impl Vocoder {
             return Err(());
         }
         Ok(pcm.map(sample))
+    }
+}
+
+/// Wide products and accumulation avoid loss of low-level components in the
+/// final source/filter convolution. AArch64 has Advanced SIMD as standard.
+fn precise_dot(a: &[f32], b: &[f32; 128]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        // SAFETY: both slices contain 128 floats; loads stay in bounds.
+        unsafe {
+            let mut lo = vdupq_n_f64(0.0);
+            let mut hi = vdupq_n_f64(0.0);
+            for i in (0..128).step_by(4) {
+                let x = vld1q_f32(a.as_ptr().add(i));
+                let y = vld1q_f32(b.as_ptr().add(i));
+                lo = vfmaq_f64(
+                    lo,
+                    vcvt_f64_f32(vget_low_f32(x)),
+                    vcvt_f64_f32(vget_low_f32(y)),
+                );
+                hi = vfmaq_f64(
+                    hi,
+                    vcvt_f64_f32(vget_high_f32(x)),
+                    vcvt_f64_f32(vget_high_f32(y)),
+                );
+            }
+            vaddvq_f64(vaddq_f64(lo, hi)) as f32
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        a.iter()
+            .zip(b)
+            .map(|(&x, &y)| x as f64 * y as f64)
+            .sum::<f64>() as f32
+    }
+}
+
+#[cfg(test)]
+mod precision_tests {
+    use super::*;
+
+    #[test]
+    fn wide_dot_preserves_small_terms_between_large_terms() {
+        let mut a = [0.0; 128];
+        a[0] = 1e8;
+        a[4] = 1.0;
+        a[8] = -1e8;
+        assert_eq!(precise_dot(&a, &[1.0; 128]), 1.0);
     }
 }

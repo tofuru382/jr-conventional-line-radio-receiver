@@ -4,6 +4,7 @@ use crate::numeric::Numeric;
 use crate::predictor::{Payload, Prediction, Predictor, LOOKAHEAD};
 use crate::synthesis::{Input, Pipeline};
 use crate::vocoder::Pcm;
+use std::collections::VecDeque;
 
 #[derive(Clone, Copy)]
 struct QueuedFrame {
@@ -35,6 +36,9 @@ pub struct VoiceStream {
     // The last received payload and how many slots in a row repeated it.
     last_payload: Option<Payload>,
     concealed: u32,
+    loss_slots: VecDeque<(u32, u32)>,
+    previous_pcm: Option<Output>,
+    previous_loss: bool,
 }
 impl Default for VoiceStream {
     fn default() -> Self {
@@ -63,6 +67,9 @@ impl Default for VoiceStream {
             emitted: 0,
             last_payload: None,
             concealed: 0,
+            loss_slots: VecDeque::new(),
+            previous_pcm: None,
+            previous_loss: false,
         }
     }
 }
@@ -101,6 +108,8 @@ impl VoiceStream {
                 if self.concealed < crate::plc::frames() && index as u64 == last as u64 + 1 =>
             {
                 self.concealed += 1;
+                // Mark by output index, not arrival order: synthesis looks ahead.
+                self.loss_slots.push_back((index, self.concealed));
                 self.enqueue(index, payload)
             }
             _ => self.missing_frame(),
@@ -224,14 +233,117 @@ impl VoiceStream {
         self.next_index += 1;
         Ok(())
     }
-    fn emit(&mut self, frame: Output) -> Result<(), ()> {
+    fn emit(&mut self, mut frame: Output) -> Result<(), ()> {
         if self.output_count == self.output.len() {
             return Err(());
         }
+        while self
+            .loss_slots
+            .front()
+            .is_some_and(|&(i, _)| i < frame.index)
+        {
+            self.loss_slots.pop_front();
+        }
+        let loss = if self
+            .loss_slots
+            .front()
+            .is_some_and(|&(i, _)| i == frame.index)
+        {
+            self.loss_slots.pop_front().map_or(0, |(_, n)| n)
+        } else {
+            0
+        };
+        let previous = self
+            .previous_pcm
+            .as_ref()
+            .filter(|p| p.index.checked_add(1) == Some(frame.index));
+        if loss != 0 || (self.previous_loss && previous.is_some()) {
+            repair_boundary(&mut frame.pcm, previous.map(|p| &p.pcm), loss);
+        }
+        self.previous_loss = loss != 0;
+        self.previous_pcm = Some(frame);
         self.output[(self.output_head + self.output_count) % self.output.len()] = frame;
         self.output_count += 1;
         self.synthesized = self.synthesized.wrapping_add(1);
         self.emitted = self.emitted.wrapping_add(1);
         Ok(())
+    }
+}
+
+/// Estimate a period only from strongly periodic decoded speech. For unvoiced
+/// speech, do not invent a pitch: use a short taper from the preceding sample.
+fn pitch_period(pcm: &Pcm) -> Option<usize> {
+    let mut best = 0.65_f64;
+    let mut period = None;
+    for lag in 20..=160 {
+        let (mut dot, mut a, mut b) = (0.0, 0.0, 0.0);
+        for i in 160..320 {
+            let x = pcm[i] as f64;
+            let y = pcm[i - lag] as f64;
+            dot += x * y;
+            a += x * x;
+            b += y * y;
+        }
+        if a < 160.0 * 64.0 * 64.0 || b < 160.0 * 64.0 * 64.0 {
+            continue;
+        }
+        // Prefer the fundamental over multiples of a similar correlation.
+        let score = dot / (a * b).sqrt() - lag as f64 * 0.0004;
+        if score > best {
+            best = score;
+            period = Some(lag);
+        }
+    }
+    period
+}
+
+/// Repeated-payload PLC stays in the decoder's normal state machine. Apply
+/// attenuation and a short pitch-aware overlap only to marked loss slots and
+/// their immediate recovery; clean frames and discontinuous calls stay intact.
+fn repair_boundary(pcm: &mut Pcm, previous: Option<&Pcm>, loss: u32) {
+    let (start, end) = match loss {
+        0 => (1.0, 1.0),
+        1 => (1.0, 0.82),
+        2 => (0.82, 0.55),
+        3 => (0.55, 0.24),
+        _ => (0.24, 0.0),
+    };
+    let period = previous.and_then(pitch_period);
+    for (i, sample) in pcm.iter_mut().enumerate() {
+        let t = i as f32 / 319.0;
+        let mut y = *sample as f32 * (start + (end - start) * t);
+        if let Some(p) = previous.filter(|_| i < 40) {
+            let old = match period {
+                Some(lag) => p[320 - lag + i % lag] as f32,
+                None => p[319] as f32 * (1.0 - i as f32 / 40.0),
+            };
+            let blend = 0.5 - 0.5 * (std::f32::consts::PI * i as f32 / 39.0).cos();
+            y = old + (y - old) * blend;
+        }
+        *sample = y.round().clamp(-32768.0, 32767.0) as i16;
+    }
+}
+
+#[cfg(test)]
+mod plc_tests {
+    use super::*;
+
+    #[test]
+    fn concealment_decays_and_recovery_preserves_the_frame_tail() {
+        let previous = std::array::from_fn(|i| {
+            (10000.0 * (std::f32::consts::TAU * i as f32 / 40.0).sin()) as i16
+        });
+        assert_eq!(pitch_period(&previous), Some(40));
+        let mut lost = [10000; 320];
+        repair_boundary(&mut lost, Some(&previous), 3);
+        assert_eq!(lost[319], 2400);
+        let mut recovered = [5000; 320];
+        repair_boundary(&mut recovered, Some(&lost), 0);
+        assert_eq!(recovered[319], 5000);
+    }
+
+    #[test]
+    fn silence_has_no_pitch() {
+        assert_eq!(pitch_period(&[0; 320]), None);
     }
 }

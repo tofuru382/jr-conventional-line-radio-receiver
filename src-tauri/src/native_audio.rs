@@ -142,33 +142,77 @@ pub struct Resampler {
     base: usize,
     phase: u64,
     history: Vec<f32>,
+    kernels: Vec<[f32; TAPS]>,
     passthrough: bool,
 }
 
-/// Kernel half-width in input samples (1 ms of latency at 8 kHz).
-const HALF: usize = 8;
-/// Low-pass cutoff relative to the input Nyquist frequency (3.6 kHz).
-const CUTOFF: f64 = 0.9;
+/// 64-tap Blackman-windowed sinc, with four milliseconds of lookahead at 8 kHz.
+const HALF: usize = 32;
+const TAPS: usize = HALF * 2;
+const PHASES: usize = 1024;
 
-fn kernel(x: f64) -> f64 {
-    if x.abs() >= HALF as f64 {
-        return 0.0;
+fn kernels(input: u32, output: u32) -> Vec<[f32; TAPS]> {
+    let cutoff = 0.92 * (output as f64 / input as f64).min(1.0);
+    (0..=PHASES)
+        .map(|p| {
+            let fraction = p as f64 / PHASES as f64;
+            let mut taps: [f64; TAPS] = std::array::from_fn(|k| {
+                let x = fraction + HALF as f64 - 1.0 - k as f64;
+                if x.abs() >= HALF as f64 {
+                    return 0.0;
+                }
+                let t = std::f64::consts::PI * cutoff * x;
+                let sinc = if t == 0.0 { 1.0 } else { t.sin() / t };
+                let angle = std::f64::consts::PI * x / HALF as f64;
+                let window = 0.42 + 0.5 * angle.cos() + 0.08 * (2.0 * angle).cos();
+                cutoff * sinc * window
+            });
+            let dc = taps.iter().sum::<f64>();
+            taps.iter_mut().for_each(|v| *v /= dc);
+            taps.map(|v| v as f32)
+        })
+        .collect()
+}
+
+fn resample_dot(samples: &[f32], taps: &[f32; TAPS]) -> f32 {
+    debug_assert_eq!(samples.len(), TAPS);
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        // SAFETY: 64 samples and coefficients, all 4-wide loads in bounds.
+        unsafe {
+            let mut sum = vdupq_n_f32(0.0);
+            for i in (0..TAPS).step_by(4) {
+                sum = vfmaq_f32(
+                    sum,
+                    vld1q_f32(samples.as_ptr().add(i)),
+                    vld1q_f32(taps.as_ptr().add(i)),
+                );
+            }
+            vaddvq_f32(sum)
+        }
     }
-    let t = std::f64::consts::PI * CUTOFF * x;
-    let sinc = if t == 0.0 { 1.0 } else { t.sin() / t };
-    let window = 0.5 + 0.5 * (std::f64::consts::PI * x / HALF as f64).cos();
-    CUTOFF * sinc * window
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        samples.iter().zip(taps).map(|(s, t)| s * t).sum()
+    }
 }
 
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 impl Resampler {
     pub fn new(input: u32, output: u32) -> Self {
+        assert!(input > 0 && output > 0);
         let mut r = Self {
             input: input as u64,
             output: output as u64,
             base: 0,
             phase: 0,
             history: Vec::new(),
+            kernels: if input == output {
+                Vec::new()
+            } else {
+                kernels(input, output)
+            },
             passthrough: input == output,
         };
         r.reset();
@@ -196,11 +240,9 @@ impl Resampler {
         let mut out =
             Vec::with_capacity(input.len() * self.output as usize / self.input as usize + 2);
         while self.base + HALF < self.history.len() {
-            let fraction = self.phase as f64 / self.output as f64;
-            let mut sum = 0.0;
-            for k in self.base + 1 - HALF..=self.base + HALF {
-                sum += self.history[k] as f64 * kernel(fraction + (self.base as f64 - k as f64));
-            }
+            let p = (self.phase * PHASES as u64 + self.output / 2) / self.output;
+            let first = self.base + 1 - HALF;
+            let sum = resample_dot(&self.history[first..first + TAPS], &self.kernels[p as usize]);
             out.push(sum.round().clamp(-32768.0, 32767.0) as i16);
             self.phase += self.input;
             self.base += (self.phase / self.output) as usize;
@@ -298,7 +340,14 @@ pub mod leveler {
                 } else {
                     self.quiet = self.quiet.saturating_add(1);
                 }
-                let wanted = (TARGET / self.envelope.max(GATE)).clamp(MIN_GAIN, MAX_GAIN);
+                let peak = block
+                    .iter()
+                    .map(|s| s.unsigned_abs() as f32 / 32768.0)
+                    .fold(0.0_f32, f32::max);
+                let headroom = 0.88 / peak.max(GATE);
+                let wanted = (TARGET / self.envelope.max(GATE))
+                    .min(headroom)
+                    .clamp(MIN_GAIN, MAX_GAIN);
                 // Turn down fast, turn up quickly but only while someone speaks.
                 let next = if wanted < self.gain {
                     self.gain + (wanted - self.gain) * RISE
@@ -314,7 +363,7 @@ pub mod leveler {
                 let step = (next - self.gain) / block.len() as f32;
                 for (i, s) in block.iter_mut().enumerate() {
                     let g = self.gain + step * (i + 1) as f32;
-                    *s = soft_limit(*s as f32 * g);
+                    *s = soft_limit(*s as f32 * if voiced { g } else { g.min(1.0) });
                 }
                 self.gain = next;
             }
@@ -322,9 +371,43 @@ pub mod leveler {
     }
     /// Transparent at normal levels, approaches full scale smoothly.
     fn soft_limit(x: f32) -> i16 {
-        let y = x / 32767.0;
-        let limited = y / (1.0 + y.powi(4)).powf(0.25);
-        (limited * 32767.0).round().clamp(-32768.0, 32767.0) as i16
+        let a = x.abs();
+        let knee = 24576.0;
+        let room = 8190.0;
+        let limited = if a <= knee {
+            a
+        } else {
+            let excess = a - knee;
+            knee + room * excess / (room + excess)
+        };
+        (limited.copysign(x)).round() as i16
+    }
+}
+
+/// Playback-only DC rejection and gentle speech-presence emphasis. No
+/// synthesized high frequencies; decoded/recorded PCM does not pass here.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[derive(Default)]
+struct SpeechFilter {
+    x: f32,
+    dc: f32,
+    low: f32,
+    high: f32,
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+impl SpeechFilter {
+    fn process(&mut self, pcm: &mut [i16]) {
+        for s in pcm {
+            let x = *s as f32;
+            // First-order high-pass near 90 Hz, then a broad presence band.
+            self.dc = x - self.x + 0.932 * self.dc;
+            self.x = x;
+            self.low += 0.51 * (self.dc - self.low);
+            self.high += 0.89 * (self.dc - self.high);
+            let y = 0.86 * (self.dc + 0.35 * (self.high - self.low));
+            *s = y.round().clamp(-32768.0, 32767.0) as i16;
+        }
     }
 }
 
@@ -583,6 +666,9 @@ mod android {
         let mut output: Option<Output> = None;
         let mut playout = Playout::default();
         let mut leveler = super::leveler::Leveler::default();
+        let mut speech = super::SpeechFilter::default();
+        let mut previous_channel = None;
+        let mut last_audio: Option<Instant> = None;
         let mut listening = false;
         let mut idle_since: Option<Instant> = None;
         // Device progress, to notice a stream that has not started playing.
@@ -591,18 +677,23 @@ mod android {
             let current = settings.lock().map(|s| s.clone()).unwrap_or_default();
             // Drain the queue unless Web Audio owns it, so unheard PCM never
             // piles up and replays later.
-            let audio = if current.inactive {
-                Vec::new()
+            let (channel, audio) = if current.inactive {
+                (None, Vec::new())
             } else {
                 receiver
                     .current()
-                    .map(|s| s.take_monitor_audio(current.selected.as_deref(), current.automatic))
+                    .map(|s| {
+                        s.take_monitor_audio_chosen(current.selected.as_deref(), current.automatic)
+                    })
                     .unwrap_or_default()
             };
             let now_listening = current.enabled && !current.inactive;
             if listening && !now_listening {
                 // Muted or switched to Web Audio: stop at once.
                 playout.clear();
+                speech = super::SpeechFilter::default();
+                leveler = super::leveler::Leveler::default();
+                last_audio = None;
                 if let Some(o) = output.as_mut() {
                     o.resampler.reset();
                 }
@@ -610,8 +701,17 @@ mod android {
             listening = now_listening;
             let now = Instant::now();
             if listening && !audio.is_empty() {
+                if previous_channel != channel
+                    || last_audio.is_some_and(|t| now.duration_since(t) > Duration::from_secs(1))
+                {
+                    speech = super::SpeechFilter::default();
+                    leveler = super::leveler::Leveler::default();
+                }
+                previous_channel = channel;
+                last_audio = Some(now);
                 let gain = current.volume.clamp(0.0, 1.0);
                 let mut pcm: Vec<i16> = audio.iter().flat_map(|f| f.pcm.iter().copied()).collect();
+                speech.process(&mut pcm);
                 if current.level {
                     leveler.process(&mut pcm);
                 }
@@ -652,7 +752,7 @@ mod android {
                 }
                 Step::Idle => {
                     if let Some(o) = output.as_mut() {
-                        // The talk spurt ended: play the resampler's last 1 ms.
+                        // The talk spurt ended: play the resampler's remaining tail.
                         if o.resampler.has_tail() {
                             let tail = o.resampler.flush();
                             if write(&o.stream, &tail).is_err() {
@@ -743,6 +843,33 @@ mod tests {
             out.extend(parts.process(chunk));
         }
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn resampler_has_unity_dc_gain_and_suppresses_downsampling_aliases() {
+        let mut up = Resampler::new(8000, 48_000);
+        let out = up.process(&[1000; 1000]);
+        assert!(out[400..out.len() - 400]
+            .iter()
+            .all(|&x| (x - 1000).abs() <= 1));
+        let mut down = Resampler::new(48_000, 8000);
+        let out = down.process(&tone(10_000.0, 48_000.0, 4800));
+        assert!(out[100..out.len() - 100]
+            .iter()
+            .all(|&x| x.abs() < 250));
+    }
+
+    #[test]
+    fn speech_filter_rejects_dc_and_is_chunk_invariant() {
+        let mut whole = [1000; 320];
+        let mut chunked = whole;
+        SpeechFilter::default().process(&mut whole);
+        let mut f = SpeechFilter::default();
+        for chunk in chunked.chunks_mut(47) {
+            f.process(chunk);
+        }
+        assert_eq!(whole, chunked);
+        assert!(whole[300..].iter().all(|&x| x.abs() <= 1));
     }
 
     #[test]
