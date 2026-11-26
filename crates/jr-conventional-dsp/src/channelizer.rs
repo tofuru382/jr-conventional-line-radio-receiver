@@ -312,8 +312,14 @@ mod tests {
             / x.len() as f64
     }
 
+    /// The bins setting is process-wide: a test that switches it to the
+    /// direct sums holds this, and so does one that needs the FFT (bin
+    /// power is measured only there), or the two race when run in parallel.
+    static BINS_SETTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn bin_power_shows_a_tone_in_its_bin_at_full_scale() {
+        let _fft = BINS_SETTING.lock().unwrap_or_else(|e| e.into_inner());
         let rate = 240_000.0;
         let mut c = Channelizer::new(rate).unwrap();
         c.set_measuring(true);
@@ -337,6 +343,7 @@ mod tests {
 
     #[test]
     fn fft_and_direct_bins_agree() {
+        let _switching = BINS_SETTING.lock().unwrap_or_else(|e| e.into_inner());
         let rate = 1_024_000.0;
         let input = tone(rate, 41_000.0, 20_000);
         let run = |mode: &str| {
