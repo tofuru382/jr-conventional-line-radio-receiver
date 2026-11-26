@@ -350,21 +350,6 @@
             <p id="recording-output" hidden></p>
           </div>
         </details>
-        <div id="iq-capture-group" class="iq-capture">
-          <div class="iq-capture-bar">
-            <span class="iq-capture-title">IQ 録音（診断用）</span>
-            <label for="iq-seconds"
-              >長さ<select id="iq-seconds">
-                <option value="10" selected>10 秒</option>
-                <option value="30">30 秒</option>
-              </select></label
-            >
-            <button id="iq-capture" type="button" disabled>IQ を保存</button>
-          </div>
-          <p id="iq-capture-hint" class="field-hint"></p>
-          <p id="iq-capture-status" class="field-hint" role="status"></p>
-          <div id="iq-files" class="iq-files"></div>
-        </div>
         <p id="recording-error" class="field-error" role="alert" hidden></p>
       </section>
       <details id="recordings-browser" class="card recordings-browser" hidden>
@@ -737,6 +722,21 @@
         readonly
         hidden
       ></textarea>
+      <div id="iq-capture-group" class="iq-capture" hidden>
+        <div class="iq-capture-bar">
+          <span class="iq-capture-title">IQ 録音（診断用）</span>
+          <label for="iq-seconds"
+            >長さ<select id="iq-seconds">
+              <option value="10" selected>10 秒</option>
+              <option value="30">30 秒</option>
+            </select></label
+          >
+          <button id="iq-capture" type="button" disabled>IQ を保存</button>
+        </div>
+        <p id="iq-capture-hint" class="field-hint"></p>
+        <p id="iq-capture-status" class="field-hint" role="status"></p>
+        <div id="iq-files" class="iq-files"></div>
+      </div>
       <div class="about-actions">
         <button id="about-copy-log" type="button" hidden>接続の記録をコピー</button>
         <button id="about-close" type="button" autofocus>閉じる</button>

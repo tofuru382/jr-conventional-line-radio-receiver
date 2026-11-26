@@ -484,7 +484,7 @@ $("recordings-sort").addEventListener("change", () => {
   resetRecordingsPaging();
   renderRecordings();
 });
-// Diagnostic IQ captures (desktop; not on Android): the raw band for 10 or
+// Diagnostic IQ captures (desktop and Android): the raw band for 10 or
 // 30 s, saved to the recordings folder's IQ subfolder; the IQ WAV input
 // replays them.
 let iqCapture = null,
@@ -523,7 +523,7 @@ function renderIqCapture() {
       : c.state === "saving"
         ? `保存中… 残り ${Math.max(0, Math.ceil(c.seconds - c.written_seconds))} 秒`
         : c.state === "saved"
-          ? `保存しました（${c.written_seconds.toFixed(0)} 秒・${megabytes(c.bytes)}）${c.message ? `：${c.message}` : ""}`
+          ? `保存しました（${c.written_seconds.toFixed(0)} 秒・${megabytes(c.bytes)}）${c.message ? `：${c.message}` : ""}${c.path ? ` 保存先：${c.path}` : ""}`
           : c.message || "IQ を保存できませんでした";
   if ($("iq-capture-status").textContent !== status) $("iq-capture-status").textContent = status;
   for (const replay of $("iq-files").querySelectorAll(".iq-replay")) {
@@ -635,7 +635,7 @@ function renderIqFiles() {
     list.append(el("p", `ほか ${iqFiles.length - IQ_SHOWN} 件（保存先の IQ フォルダーにあります）`, "field-hint"));
 }
 async function refreshIqFiles() {
-  if (!native || platform.android) return;
+  if (!native) return;
   try {
     iqFiles = (await invoke("list_iq_captures", { directory: iqDirectory() })) ?? [];
   } catch {
@@ -795,6 +795,8 @@ function el(tag, text, className) {
   return n;
 }
 $("about-open").addEventListener("click", () => {
+  renderIqCapture();
+  void refreshIqFiles();
   const dialog = $("about-dialog");
   if (!dialog.open) dialog.showModal();
 });
@@ -2937,7 +2939,7 @@ try {
         }),
       );
   await restorePreferences(true);
-  $("iq-capture-group").hidden = !native || !!platform.android;
+  $("iq-capture-group").hidden = !native;
   void refreshIqFiles();
   if (platform.android) adoptAndroidDefaults();
   else if (platform.simple) adoptMacDefaults();
