@@ -237,10 +237,7 @@ impl Channelizer {
             self.sums.fill(Complex::default());
             for (l, row) in self.taps.chunks_exact(m).enumerate() {
                 let x = &self.history[end - (l + 1) * m..end - l * m];
-                for ((acc, &tap), x) in self.sums.iter_mut().zip(row).zip(x) {
-                    acc.re += tap * x.real;
-                    acc.im += tap * x.imaginary;
-                }
+                accumulate_row(&mut self.sums, row, x);
             }
             self.frames.extend(self.sums.iter().rev());
         }
@@ -290,9 +287,63 @@ impl Channelizer {
     }
 }
 
+/// Vectorize independent branches without changing their accumulation order.
+fn accumulate_row(sums: &mut [Complex<f32>], taps: &[f32], samples: &[Complex32]) {
+    debug_assert_eq!(sums.len(), taps.len());
+    debug_assert_eq!(sums.len(), samples.len());
+    #[cfg(target_arch = "aarch64")]
+    let done = {
+        use std::arch::aarch64::*;
+        let done = sums.len() / 4 * 4;
+        // SAFETY: both complex types are repr(C) pairs of f32. Each load
+        // and store stays within four complete complex samples or taps.
+        unsafe {
+            for i in (0..done).step_by(4) {
+                let t = vld1q_f32(taps.as_ptr().add(i));
+                let x = samples.as_ptr().add(i).cast::<f32>();
+                let a = sums.as_mut_ptr().add(i).cast::<f32>();
+                let lo = vmulq_f32(vld1q_f32(x), vzip1q_f32(t, t));
+                let hi = vmulq_f32(vld1q_f32(x.add(4)), vzip2q_f32(t, t));
+                vst1q_f32(a, vaddq_f32(vld1q_f32(a), lo));
+                vst1q_f32(a.add(4), vaddq_f32(vld1q_f32(a.add(4)), hi));
+            }
+        }
+        done
+    };
+    #[cfg(not(target_arch = "aarch64"))]
+    let done = 0;
+    for ((acc, &tap), x) in sums[done..]
+        .iter_mut()
+        .zip(&taps[done..])
+        .zip(&samples[done..])
+    {
+        acc.re += tap * x.real;
+        acc.im += tap * x.imaginary;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_accumulation_matches_scalar_including_tail() {
+        let samples: [Complex32; 7] = std::array::from_fn(|i| Complex32 {
+            real: i as f32 * 0.13 - 0.4,
+            imaginary: i as f32 * -0.21 + 0.5,
+        });
+        let taps: [f32; 7] = std::array::from_fn(|i| 0.11 * (i + 1) as f32);
+        let mut actual = [Complex::new(0.1, -0.2); 7];
+        let mut expected = actual;
+        for _ in 0..6 {
+            accumulate_row(&mut actual, &taps, &samples);
+            for ((a, t), x) in expected.iter_mut().zip(taps).zip(samples) {
+                a.re += t * x.real;
+                a.im += t * x.imaginary;
+            }
+        }
+        assert_eq!(actual, expected);
+    }
 
     fn tone(rate: f64, hz: f64, n: usize) -> Vec<Complex32> {
         (0..n)
