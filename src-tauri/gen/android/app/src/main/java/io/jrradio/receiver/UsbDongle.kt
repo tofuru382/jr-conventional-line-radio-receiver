@@ -147,40 +147,26 @@ object UsbDongle {
   /** When Android last reported a USB device detached (elapsedRealtime), or 0. */
   @Volatile private var detachedAt = 0L
 
-  // A dongle whose plug is losing contact comes and goes within a second.
-  // Opening it at once makes it draw its full current through that contact,
-  // and after a few such bounces some phones turn the USB port off until the
-  // dongle is replugged. So a dongle that just appeared is opened only once
-  // it has stayed attached for a while: 2.5 s, doubled for every further
-  // bounce in the last minute (at most 10 s; 20 s kept it out of use too
-  // long on a plug that bounces often). Only a dongle back within
-  // QUICK_RETURN_MS counts as a bounce: one replugged by hand while trying
-  // to get it going made every start after it wait the full 10 s.
-  private const val SETTLE_MS = 2500L
-  private const val SETTLE_MAX_MS = 10000L
-  private const val BOUNCE_WINDOW_MS = 60000L
-  private const val QUICK_RETURN_MS = 2000L
+  // A dongle whose plug is losing contact comes and goes within a second,
+  // so one that just appeared is opened once it has stayed attached for
+  // 1 s. This used to be 2.5 s, doubled for every further detach in the
+  // last minute up to 10 s, for fear that opening a bouncing dongle made
+  // the phone turn its USB port off. A vivo X200 Pro kept the port on (a
+  // USB host throughout, see ACTION_USB_STATE) while its dongle came and
+  // went, staying 1-8 s at a time: never the 10 s asked for, so the app
+  // never opened it and gave up after 30 s, where a PC used it at once. A
+  // longer wait did not make it last longer once open either (1 s after
+  // 10 s of waiting, 8 s after 3 s).
+  private const val SETTLE_MS = 1000L
   @Volatile private var attachedAt = 0L
-  /** When the dongle last left USB (elapsedRealtime), or 0; kept after it is open again. */
-  @Volatile private var leftAt = 0L
-  private val bounces = ArrayDeque<Long>()
   private var settlingNoted = 0L
   private var lastMissing: String? = null
   private var lastMissingNoted = 0L
 
-  /** How long a dongle must stay attached before it is opened (ms). */
-  internal fun settleTime(now: Long, bounceTimes: List<Long>): Long {
-    val recent = bounceTimes.count { now - it <= BOUNCE_WINDOW_MS }
-    if (recent <= 1) return SETTLE_MS
-    return (SETTLE_MS shl minOf(recent - 1, 3)).coerceAtMost(SETTLE_MAX_MS)
-  }
-
   /** Milliseconds left before a dongle that just appeared may be opened. */
   private fun settling(): Long {
     if (attachedAt == 0L) return 0
-    val now = SystemClock.elapsedRealtime()
-    val wait = synchronized(bounces) { settleTime(now, bounces.toList()) }
-    return (attachedAt + wait - now).coerceAtLeast(0)
+    return (attachedAt + SETTLE_MS - SystemClock.elapsedRealtime()).coerceAtLeast(0)
   }
 
   /**
@@ -287,20 +273,11 @@ object UsbDongle {
           val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
           val detached = intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED
           val now = SystemClock.elapsedRealtime()
-          val dongle = device == null || isDongle(device)
           if (detached) {
             detachedAt = now
-            if (dongle) leftAt = now
             release("ドングルが外れた", device?.deviceName)
-          } else if (dongle) {
+          } else if (device == null || isDongle(device)) {
             attachedAt = now
-            // Back this soon: the plug bounced (see QUICK_RETURN_MS).
-            if (leftAt != 0L && now - leftAt <= QUICK_RETURN_MS) {
-              synchronized(bounces) {
-                bounces.addLast(now)
-                while (bounces.isNotEmpty() && now - bounces.first() > BOUNCE_WINDOW_MS) bounces.removeFirst()
-              }
-            }
           }
           val what = if (detached) "外れました" else "つながりました"
           note("Android: USB 機器が$what（${device?.let { describe(it) } ?: "不明"}）· ${battery(context)}")
