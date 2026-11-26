@@ -46,22 +46,6 @@
     </header>
     <main>
       <div id="error" class="error" role="alert" hidden></div>
-      <section id="background-notice" class="notice" aria-labelledby="background-notice-title" hidden>
-        <h2 id="background-notice-title">バックグラウンドで止まらないようにする</h2>
-        <p id="background-notice-killed" hidden></p>
-        <p id="background-notice-battery" hidden>
-          電池の最適化がオンのため、画面を消すと Android に受信を止められることがあります。
-        </p>
-        <p id="background-notice-vendor" hidden></p>
-        <label id="background-resume-group" class="check-field" for="background-resume" hidden
-          ><input id="background-resume" type="checkbox" />止められた後にアプリを開いたら、自動で受信を再開する</label
-        >
-        <div class="notice-actions">
-          <button id="background-battery" type="button">電池の最適化をオフ</button>
-          <button id="background-settings" type="button">アプリの設定</button>
-          <button id="background-dismiss" type="button">閉じる</button>
-        </div>
-      </section>
       <div id="preferences-error" class="error" hidden>
         <p id="preferences-message" role="alert"></p>
         <button id="preferences-retry" type="button">保存を再試行</button>
@@ -299,6 +283,9 @@
           /></label>
           <label id="bias-group" class="check-field" for="bias-tee"
             ><input id="bias-tee" type="checkbox" />Bias-T（アンテナ・LNA に給電）</label
+          >
+          <label id="background-resume-group" class="check-field" for="background-resume" hidden
+            ><input id="background-resume" type="checkbox" />Android に止められた後にアプリを開いたら、自動で受信を再開する</label
           >
           <p id="live-tuning-hint" class="field-hint" hidden>
             受信中もゲイン・周波数補正・Bias-T は変更でき、すぐに反映されます。

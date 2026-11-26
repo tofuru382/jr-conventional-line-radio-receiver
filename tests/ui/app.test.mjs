@@ -87,6 +87,7 @@ async function setup(
     connectionLog = [],
     bridge = null,
     channelClass = null,
+    storage = null,
   } = {},
 ) {
   const dom = new JSDOM(html, {
@@ -166,6 +167,7 @@ async function setup(
     return timers.length;
   };
   if (bridge) w.JrAndroid = bridge;
+  for (const [key, value] of Object.entries(storage ?? {})) w.localStorage.setItem(key, value);
   w.__TAURI__ = native
     ? {
         core: {
@@ -382,7 +384,7 @@ test("Android hides SoapySDR and pickers, defaults to the built-in USB driver, a
   const { $ } = app;
   assert.deepEqual(
     [...$("input-kind").options].map((o) => o.value),
-    ["usb", "rtl_tcp", "wave"],
+    ["usb", "rtl_tcp"],
   );
   assert.equal($("input-kind").value, "usb");
   assert.equal($("driver-group").hidden, true);
@@ -404,7 +406,7 @@ test("Android hides SoapySDR and pickers, defaults to the built-in USB driver, a
     [1234],
   );
   assert.equal($("error").hidden, true);
-  await app.change("input-kind", "wave");
+  await app.change("input-kind", "usb");
   assert.equal($("driver-group").hidden, true);
 });
 test("Android plays live audio through Web Audio and holds the background service while receiving", async (t) => {
@@ -555,20 +557,24 @@ test("Android starts without the dongle and waits for it to be plugged in", asyn
   await app.click("start");
   // Not found (or bounced off USB just then): the session starts and waits.
   assert.equal(app.calls.some((c) => c.command === "start"), true);
-  let now = 1_000_000;
-  t.mock.method(app.w.Date, "now", () => now);
+  // Waiting is no error: the status bar says it is getting ready.
   app.setSnapshot({ status: { ...status(), state: "starting" }, audio: [] });
   await app.poll();
-  assert.equal($("error").textContent, "ドングルが見つかりません。30 秒以内に挿すと受信を始めます。");
-  assert.equal($("state").textContent, "準備中");
-  // Plugged in: the notice goes, and reception starts.
-  attached = true;
-  now += 1500;
-  await app.poll();
   assert.equal($("error").hidden, true);
+  assert.equal($("state").textContent, "準備中");
+  // Plugged in: reception starts.
+  attached = true;
   app.setSnapshot({ status: status(), audio: [] });
   await app.poll();
   assert.equal($("error").hidden, true);
+  assert.equal($("state").textContent, "受信中");
+  // Never plugged in within the wait: the stopped session says so.
+  app.setSnapshot({
+    status: { ...status(), running: false, state: "failed", error: "USB: 30 秒待ちましたが、ドングルを使えませんでした。挿さっているか、USB の使用を許可したかを確認してください" },
+    audio: [],
+  });
+  await app.poll();
+  assert.equal($("error").textContent, "ドングルを使えませんでした。挿し直して、USB の使用を許可してください。");
 });
 test("a failed session's error does not come back after switching input or starting again", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -596,7 +602,7 @@ test("a failed session's error does not come back after switching input or start
   assert.match($("error").textContent, /ドングルを開けません/);
   assert.doesNotMatch($("error").textContent, /RTL-TCP/);
 });
-test("a lost dongle's error carries a diagnosis, kept for the version dialog with the log", async (t) => {
+test("a lost dongle's error is one plain line; its diagnosis is kept for the version dialog with the log", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
   assert.equal($("about-copy-log").hidden, false);
@@ -614,16 +620,14 @@ test("a lost dongle's error carries a diagnosis, kept for the version dialog wit
   app.setSnapshot({ status: { ...status(), running: false, state: "failed", error: lost }, audio: [] });
   await app.poll();
   await app.poll();
-  const [message, diagnosis] = $("error").textContent.split("\n");
-  assert.equal(message, "ドングルが外れました。挿し直してから受信を開始してください。");
-  assert.equal(
-    diagnosis,
-    "診断：データが止まった · ゲイン変更の 0.4 秒後 · 再接続 3 回失敗: USB: ドングルを初期化できません (control transfer timed out) · スマホが USB の切断を検出（63 秒前） · 今は USB 機器なし · 電池 41.5℃ 48%",
-  );
+  assert.equal($("error").textContent, "ドングルが外れました。挿し直してから受信を開始してください。");
   // The phone is asked once per error, not on every poll.
   assert.equal(asked, 1);
   assert.equal($("about-lost").hidden, false);
-  assert.match($("about-lost").textContent, /\nデータが止まった · /);
+  assert.equal(
+    $("about-lost").textContent.split("\n")[1],
+    "データが止まった · ゲイン変更の 0.4 秒後 · 再接続 3 回失敗: USB: ドングルを初期化できません (control transfer timed out) · スマホが USB の切断を検出（63 秒前） · 今は USB 機器なし · 電池 41.5℃ 48%",
+  );
   assert.match(app.w.localStorage.getItem("jr-clrr.usb-diagnosis"), /ゲイン変更の 0\.4 秒後/);
   // The log: driver and Android notes in time order, shown and copied.
   let copied = null;
@@ -642,46 +646,36 @@ test("a lost dongle's error carries a diagnosis, kept for the version dialog wit
   assert.match(lines[1], /^前回の切断: .*ゲイン変更の 0\.4 秒後/);
   assert.ok(lines.some((l) => /Android: USB 機器が外れました/.test(l)));
   assert.equal($("about-copy-log").textContent, "コピーしました");
-  // Other errors and other platforms get no diagnosis.
+  // Other errors get no diagnosis either: the kept one stays.
   app.setSnapshot({
     status: { ...status(), running: false, state: "failed", error: "RTL-TCP: 127.0.0.1:1234 に接続できません" },
     audio: [],
   });
   await app.poll();
   assert.doesNotMatch($("error").textContent, /診断/);
+  assert.match($("about-lost").textContent, /ゲイン変更の 0\.4 秒後/);
 });
-test("Android says to replug a dongle that left USB, until it is back", async (t) => {
+test("Android shows no error while the session waits for a dongle that left USB, only once it gives up", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
-  let attached = false;
-  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "ok", usbAttached: () => attached };
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "ok", usbAttached: () => false };
   await app.change("input-kind", "usb");
   await app.click("start");
   let now = 1_000_000;
   t.mock.method(app.w.Date, "now", () => now);
-  const reconnecting = { status: { ...status(), reconnecting: true }, audio: [] };
-  app.setSnapshot(reconnecting);
-  await app.poll();
-  // A bounce of a few seconds says nothing.
-  now += 4000;
+  app.setSnapshot({ status: { ...status(), reconnecting: true }, audio: [] });
+  for (let i = 0; i < 4; i++) {
+    now += 6000;
+    await app.poll();
+  }
+  assert.equal($("error").hidden, true);
+  assert.equal($("state").textContent, "再接続中");
+  // A poll that fails (e.g. while in the background) shows nothing either.
+  app.setSnapshot(() => {
+    throw new Error("IPC timeout");
+  });
   await app.poll();
   assert.equal($("error").hidden, true);
-  now += 1500;
-  await app.poll();
-  assert.equal($("error").textContent, "ドングルが USB から外れています。挿し直すと自動で受信を再開します。");
-  assert.equal($("error").hidden, false);
-  // Replugged: the notice goes away, also before reception is back.
-  attached = true;
-  now += 1500;
-  await app.poll();
-  assert.equal($("error").hidden, true);
-  // An error that replaced the notice stays.
-  attached = false;
-  now += 1500;
-  await app.poll();
-  now += 6000;
-  await app.poll();
-  assert.equal($("error").hidden, false);
   app.setSnapshot({
     status: { ...status(), running: false, state: "failed", error: "USB: 受信を開始できません" },
     audio: [],
@@ -690,58 +684,48 @@ test("Android says to replug a dongle that left USB, until it is back", async (t
   assert.match($("error").textContent, /^ドングルの受信を開始できません/);
   assert.equal($("error").hidden, false);
 });
-test("Android asks to lift battery optimisation, and reports a killed run", async (t) => {
+test("saving problems that do not stop the saving are not shown; one that stops it is", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
-  const asked = [];
-  let restricted = true;
-  app.w.JrAndroid = {
-    setReceiving() {},
-    requestUsb: () => "ok",
-    batteryRestricted: () => restricted,
-    manufacturer: () => "vivo",
-    requestBatteryExemption: () => asked.push("battery"),
-    openAppSettings: () => asked.push("settings"),
-  };
-  assert.equal($("background-notice").hidden, true);
   await app.click("start");
-  assert.equal($("background-notice").hidden, false);
-  assert.equal($("background-notice-battery").hidden, false);
-  assert.equal($("background-notice-killed").hidden, true);
-  assert.match($("background-notice-vendor").textContent, /^vivo：設定 → 電池/);
-  $("background-battery").click();
-  $("background-settings").click();
-  assert.deepEqual(asked, ["battery", "settings"]);
-  // Back from the settings with the optimisation off: the notice goes.
-  restricted = false;
-  app.w.document.dispatchEvent(new app.w.Event("visibilitychange"));
-  assert.equal($("background-notice").hidden, true);
-  // Dismissed, it is not shown at the next start.
-  restricted = true;
-  await app.click("start");
-  await app.click("start");
-  assert.equal($("background-notice").hidden, false);
-  $("background-dismiss").click();
-  assert.equal($("background-notice").hidden, true);
-  await app.click("start");
-  await app.click("start");
-  assert.equal($("background-notice").hidden, true);
+  const saving = { state: "recording", options: { audio: true, raw_frames: false, data_messages: false }, files: 1, pcm_samples: 8000, raw_frames: 0, data_messages: 0, error: null, directory: "/sdcard/x" };
+  app.setRecording({ ...saving, warning: "D5 の WAV を確定できませんでした", dropped_events: 12 });
+  await app.poll();
+  assert.equal($("recording-error").hidden, true);
+  assert.equal($("error").hidden, true);
+  app.setRecording({ ...saving, state: "failed", error: "保存先に書き込めません" });
+  await app.poll();
+  assert.equal($("recording-error").hidden, false);
+  assert.equal($("recording-error").textContent, "保存先に書き込めません");
 });
-test("Android shows when the phone killed the last run", async (t) => {
-  const app = await setup(t, {
-    platformInfo: { android: true, soapy: false },
-    bridge: {
-      lastKill: () => `${Date.UTC(2026, 10, 18, 0, 0)}\t${Date.UTC(2026, 10, 18, 0, 41)}`,
-      batteryRestricted: () => false,
-      manufacturer: () => "Google",
-    },
-  });
+test("Android shows no background notice; resuming after the phone killed a run is a setting", async (t) => {
+  const killed = `${Date.UTC(2026, 10, 18, 0, 0)}\t${Date.UTC(2026, 10, 18, 0, 41)}`;
+  const bridge = () => ({ lastKill: () => killed, setReceiving() {}, requestUsb: () => "ok" });
+  // Not opted in: a killed run says nothing and does not start reception.
+  const app = await setup(t, { platformInfo: { android: true, soapy: false }, bridge: bridge() });
   const { $ } = app;
-  assert.equal($("background-notice").hidden, false);
-  assert.match($("background-notice-killed").textContent, /^前回は .+ ごろ、受信中に Android がアプリを止めました。$/);
-  assert.equal($("background-notice-battery").hidden, true);
-  assert.equal($("background-battery").hidden, true);
-  assert.equal($("background-notice-vendor").hidden, true);
+  assert.equal($("background-notice"), null);
+  assert.equal($("background-resume-group").hidden, false);
+  assert.equal($("background-resume").checked, false);
+  await app.click("start");
+  await tick();
+  assert.equal($("error").hidden, true);
+  assert.equal(app.calls.filter((c) => c.command === "start").length, 1);
+  // Opting in is remembered.
+  $("background-resume").click();
+  assert.equal(app.w.localStorage.getItem("jr-clrr-auto-resume"), "on");
+  // Opted in: reopening after a killed run starts reception by itself.
+  const resumed = await setup(t, {
+    platformInfo: { android: true, soapy: false },
+    bridge: bridge(),
+    storage: { "jr-clrr-auto-resume": "on" },
+  });
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(resumed.$("background-resume").checked, true);
+  assert.equal(resumed.calls.filter((c) => c.command === "start").length, 1);
+  // Desktop has no such setting.
+  const desktop = await setup(t, { platformInfo: { android: false, soapy: true } });
+  assert.equal(desktop.$("background-resume-group").hidden, true);
 });
 test("the title bar shows the time and the screen's name", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -860,13 +844,14 @@ test("the measured input rate is shown and flagged when it differs from the sett
   await app.poll();
   assert.match($("capture-info").textContent, /　周波数 自動補正 \+120 Hz　入力/);
 });
-test("no diagnosis panels besides the IQ capture: the connection log is gone", async (t) => {
+test("no diagnosis panels on Android: no connection log panel, and no IQ capture", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   for (const id of ["iq-group", "log-group", "connection-log", "recent-block"])
     assert.equal(app.$(id), null, id);
-  assert.notEqual(app.$("iq-capture"), null);
+  assert.equal(app.$("iq-capture-group").hidden, true);
+  assert.equal(app.calls.some((c) => c.command === "list_iq_captures"), false);
 });
-test("IQ capture saves for the chosen length with progress, then lists, shares, replays and deletes captures", async (t) => {
+test("IQ capture saves for the chosen length with progress, then lists, replays and deletes captures", async (t) => {
   const root = "/sdcard/Download/JR-CLRR/Recordings/IQ";
   const iq = (stamp, seconds) => ({
     name: `iq-${stamp}-352603125Hz-240000.wav`,
@@ -874,15 +859,9 @@ test("IQ capture saves for the chosen length with progress, then lists, shares, 
     bytes: 44 + 240000 * 4 * seconds,
     modified: 0,
   });
-  const shared = [],
-    scanned = [];
   const app = await setup(t, {
-    platformInfo: { android: true, soapy: false },
+    platformInfo: { android: false, soapy: true },
     iqFiles: [iq("20261123T061112Z", 10)],
-    bridge: {
-      shareFile: (path) => (shared.push(path), true),
-      scanRecordings: (path) => scanned.push(path),
-    },
   });
   const { $ } = app;
   // Listed at start, newest first, in Japan time with frequency, rate and size.
@@ -912,16 +891,12 @@ test("IQ capture saves for the chosen length with progress, then lists, shares, 
   app.setSnapshot(capture("saving", 12.4));
   await app.poll();
   assert.equal($("iq-capture-status").textContent, "保存中… 残り 18 秒");
-  // Finished: Android indexes the folder and the list refreshes.
+  // Finished: the list refreshes.
   app.setSnapshot(capture("saved", 30));
   await app.poll();
   assert.equal($("iq-capture-status").textContent, "保存しました（30 秒・28.8 MB）");
-  assert.deepEqual(scanned, [root]);
   assert.equal($("iq-capture").disabled, false);
   assert.ok(app.calls.filter((c) => c.command === "list_iq_captures").length >= 2);
-  // Share opens Android's share sheet for that file.
-  rows()[0].querySelector("button").click();
-  assert.deepEqual(shared, [iq("20261123T061112Z", 10).path]);
   // Stopped: replay switches the input to that file at its centre frequency.
   await app.click("start");
   app.setSnapshot({ status: { ...status(), running: false, state: "stopped" }, audio: [] });
@@ -946,7 +921,7 @@ test("IQ capture saves for the chosen length with progress, then lists, shares, 
   assert.equal($("iq-capture-status").textContent, "削除しました");
 });
 test("a failed or cut-short IQ capture says why", async (t) => {
-  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const app = await setup(t, { platformInfo: { android: false, soapy: true } });
   const { $ } = app;
   await app.click("start");
   await app.poll();
@@ -963,7 +938,7 @@ test("a failed or cut-short IQ capture says why", async (t) => {
   await app.poll();
   assert.equal($("iq-capture-status").textContent, "IQ を保存できません：Permission denied");
 });
-test("desktop and the browser preview: no share button, and no IQ section without the app", async (t) => {
+test("IQ capture is on desktop only: not on Android, nor in the browser preview", async (t) => {
   const desktop = await setup(t, {
     platformInfo: { android: false, soapy: true },
     iqFiles: [{ name: "iq-20261123T061112Z-352603125Hz-240000.wav", path: "/r/IQ/iq-20261123T061112Z-352603125Hz-240000.wav", bytes: 9600044, modified: 0 }],
@@ -972,6 +947,20 @@ test("desktop and the browser preview: no share button, and no IQ section withou
   assert.deepEqual([...desktop.$("iq-files").querySelectorAll("button")].map((b) => b.textContent), ["この IQ で受信", "削除"]);
   const preview = await setup(t, { native: false });
   assert.equal(preview.$("iq-capture-group").hidden, true);
+  // Android: neither the capture nor the IQ WAV input; a run saved with that
+  // input comes back on the built-in driver.
+  const preferences = {
+    value: {
+      version: 1,
+      preset_file: null,
+      input: { kind: "wave", profile: "east", center: "352.603125", rate: "240000", gain: "", host: "", port: "", ppm: "0", args: "", rx_channel: "0", antenna: "", path: "/sdcard/x/IQ/iq-a.wav" },
+      output: { enabled: false, directory: null, audio: true, raw_frames: false, data_messages: false },
+    },
+  };
+  const android = await setup(t, { platformInfo: { android: true, soapy: false }, preferences, configureConnection: false });
+  assert.equal(android.$("iq-capture-group").hidden, true);
+  assert.equal(android.$("input-kind").querySelector('option[value="wave"]'), null);
+  assert.equal(android.$("input-kind").value, "usb");
 });
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });

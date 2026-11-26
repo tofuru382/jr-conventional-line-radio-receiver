@@ -6,10 +6,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
 import android.graphics.Color
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -149,38 +147,6 @@ class MainActivity : TauriActivity() {
       if (files.isNotEmpty()) android.media.MediaScannerConnection.scanFile(this@MainActivity, files, null, null)
     }
 
-    /**
-     * Opens the share sheet for a saved IQ capture (an `iq-*.wav`), e.g. to
-     * send it for analysis. Returns false when the file cannot be shared.
-     */
-    @JavascriptInterface
-    fun shareFile(path: String): Boolean {
-      val file = java.io.File(path)
-      if (!file.isFile || !file.name.startsWith("iq-") || !file.name.endsWith(".wav", ignoreCase = true)) {
-        return false
-      }
-      val uri =
-        try {
-          androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file)
-        } catch (e: IllegalArgumentException) {
-          UsbDongle.note("Android: 共有できない場所のファイルです（${file.name}）")
-          return false
-        }
-      runOnUiThread {
-        val send =
-          Intent(Intent.ACTION_SEND)
-            .setType("audio/wav")
-            .putExtra(Intent.EXTRA_STREAM, uri)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        try {
-          startActivity(Intent.createChooser(send, file.name))
-        } catch (e: Exception) {
-          UsbDongle.note("Android: 共有メニューを開けませんでした（${e.javaClass.simpleName}）")
-        }
-      }
-      return true
-    }
-
     /** The notification's band map layout (see [NativeBand.layout]). */
     @JavascriptInterface
     fun setBandLayout(json: String) {
@@ -201,42 +167,6 @@ class MainActivity : TauriActivity() {
 
     /** "<start ms>\t<last sign of life ms>" when the previous run was killed while receiving. */
     @JavascriptInterface fun lastKill(): String = this@MainActivity.lastKill
-
-    @JavascriptInterface fun manufacturer(): String = Build.MANUFACTURER ?: ""
-
-    /** Whether Android may stop the app in the background to save battery. */
-    @JavascriptInterface
-    fun batteryRestricted(): Boolean = ReceiverService.batteryRestricted(this@MainActivity)
-
-    /** Asks to exempt the app from battery optimisation (system dialog). */
-    @JavascriptInterface
-    fun requestBatteryExemption() {
-      runOnUiThread {
-        val ask =
-          Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
-        try {
-          startActivity(ask)
-        } catch (e: Exception) {
-          openSettings(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-        }
-      }
-    }
-
-    /** The app's page in the system settings (battery, autostart on some phones). */
-    @JavascriptInterface
-    fun openAppSettings() {
-      runOnUiThread {
-        openSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
-      }
-    }
-  }
-
-  private fun openSettings(intent: Intent) {
-    try {
-      startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-    } catch (e: Exception) {
-      UsbDongle.note("Android: 設定画面を開けませんでした（${intent.action}）")
-    }
   }
 
   private fun requestNotificationPermission() {

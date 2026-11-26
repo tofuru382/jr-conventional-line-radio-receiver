@@ -150,8 +150,9 @@ function syncNativeMonitor() {
   if (next === nativeMonitorState) return;
   nativeMonitorState = next;
   invoke("set_native_monitor", { settings }).catch((e) => {
+    // Sent again with the next change; nothing for the screen.
     nativeMonitorState = "";
-    fail(e);
+    console.warn(e);
   });
 }
 // Three rising tones through the chosen output, so the playback path can be
@@ -483,8 +484,9 @@ $("recordings-sort").addEventListener("change", () => {
   resetRecordingsPaging();
   renderRecordings();
 });
-// Diagnostic IQ captures: the raw band for 10 or 30 s, saved to the
-// recordings folder's IQ subfolder; the IQ WAV input replays them.
+// Diagnostic IQ captures (desktop; not on Android): the raw band for 10 or
+// 30 s, saved to the recordings folder's IQ subfolder; the IQ WAV input
+// replays them.
 let iqCapture = null,
   iqFiles = [],
   iqMessage = "",
@@ -533,10 +535,7 @@ function renderIqCapture() {
 function noteIqCapture(next) {
   const finished = iqCapture?.state === "saving" && next && next.state !== "saving";
   iqCapture = next ?? iqCapture;
-  if (finished) {
-    if (platform.android) window.JrAndroid?.scanRecordings?.(next.path.replace(/[/\\][^/\\]*$/, ""));
-    void refreshIqFiles();
-  }
+  if (finished) void refreshIqFiles();
 }
 $("iq-seconds").addEventListener("change", renderIqCapture);
 $("iq-capture").addEventListener("click", async () => {
@@ -587,17 +586,6 @@ function renderIqFiles() {
         "iq-file-name",
       ),
     );
-    if (platform.android && window.JrAndroid?.shareFile) {
-      const share = el("button", "共有");
-      share.type = "button";
-      share.addEventListener("click", () => {
-        iqMessage = window.JrAndroid.shareFile(file.path)
-          ? ""
-          : "このファイルは共有できません（保存先を端末の Download 以下にしてください）";
-        renderIqCapture();
-      });
-      row.append(share);
-    }
     const replay = el("button", "この IQ で受信", "iq-replay");
     replay.type = "button";
     replay.disabled = running || busy;
@@ -647,7 +635,7 @@ function renderIqFiles() {
     list.append(el("p", `ほか ${iqFiles.length - IQ_SHOWN} 件（保存先の IQ フォルダーにあります）`, "field-hint"));
 }
 async function refreshIqFiles() {
-  if (!native) return;
+  if (!native || platform.android) return;
   try {
     iqFiles = (await invoke("list_iq_captures", { directory: iqDirectory() })) ?? [];
   } catch {
@@ -823,16 +811,18 @@ document.addEventListener("click", (event) => {
   if (panel) panel.open = true;
   target.focus({ preventScroll: true });
 });
+// The error line shows only what stopped and what to do; a lost dongle's
+// diagnosis goes to the version dialog and the connection log.
 function fail(error) {
-  const diagnosis = usbDiagnosis(String(error?.message ?? error ?? ""));
-  const text = friendlyError(error) + (diagnosis ? `\n診断：${diagnosis}` : "");
+  usbDiagnosis(String(error?.message ?? error ?? ""));
+  const text = friendlyError(error);
   if ($("error").textContent !== text) $("error").textContent = text;
   $("error").hidden = false;
 }
-// Android, built-in driver: when the dongle is lost, say what the driver and
+// Android, built-in driver: when the dongle is lost, note what the driver and
 // the phone saw, so a report tells a cut USB link (power, contact) from a
 // dongle that stopped answering, and whether a gain change preceded it. The
-// last one is kept for the version dialog.
+// last one is kept for the version dialog and the connection log.
 const usbDiagnosisKey = "jr-clrr.usb-diagnosis";
 let diagnosed = { raw: "", text: "" };
 function usbDiagnosis(raw) {
@@ -865,7 +855,7 @@ function usbDiagnosis(raw) {
         `${new Date().toLocaleString("ja-JP", { hour12: false })}\n${text}`,
       );
     } catch {
-      // Storage may be unavailable; the error still shows the diagnosis.
+      // Storage may be unavailable; the diagnosis is then not kept.
     }
     showLastUsbDiagnosis();
   }
@@ -920,41 +910,6 @@ async function connectionLogText() {
     .filter((line) => line !== null)
     .join("\n");
 }
-// Android: background reception needs the battery optimisation off (and on
-// some phones, vivo among them, their own background settings). Shown when
-// reception starts while it is on, and after the phone killed a run.
-const batteryNoticeKey = "jr-clrr.battery-notice";
-function showBackgroundNotice({ killed = null, starting = false } = {}) {
-  if (!platform.android) return;
-  const restricted = window.JrAndroid?.batteryRestricted?.() === true;
-  let dismissed = false;
-  try {
-    dismissed = localStorage.getItem(batteryNoticeKey) === "dismissed";
-  } catch {
-    dismissed = false;
-  }
-  if (!killed && !(starting && restricted && !dismissed)) return;
-  if (killed) {
-    const at = new Date(killed).toLocaleString("ja-JP", { hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-    $("background-notice-killed").textContent = `前回は ${at} ごろ、受信中に Android がアプリを止めました。`;
-  }
-  $("background-notice-killed").hidden = !killed;
-  $("background-resume-group").hidden = !killed;
-  $("background-resume").checked = autoResume();
-  $("background-notice-battery").hidden = !restricted;
-  $("background-battery").hidden = !restricted;
-  const vendor = bridgeText("manufacturer").toLowerCase();
-  const vendorHelp = {
-    vivo: "vivo：設定 → 電池 → バックグラウンドの電力消費の管理 で、このアプリの「高いバックグラウンド電力消費」を許可し、アプリの設定で自動起動もオンにします（項目名は機種によって違います）。",
-    xiaomi: "Xiaomi：アプリの設定 → バッテリーセーバー を「制限なし」にし、自動起動をオンにします。",
-    oppo: "OPPO：アプリの設定 → バッテリー使用 で「バックグラウンドアクティビティを許可」をオンにします。",
-    samsung: "Galaxy：アプリの設定 → バッテリー を「制限なし」にします。",
-  };
-  const help = Object.entries(vendorHelp).find(([name]) => vendor.includes(name))?.[1] ?? "";
-  $("background-notice-vendor").textContent = help;
-  $("background-notice-vendor").hidden = !help;
-  $("background-notice").hidden = false;
-}
 let resumeAfterKill = false;
 // Files written by path reach MediaStore (music and file apps) only when
 // indexed: ask Android to, once a recording is complete.
@@ -967,8 +922,9 @@ function noteRecording(next) {
   recordingStatus = next;
   if (finished && platform.android) window.JrAndroid?.scanRecordings?.(next.directory);
 }
-// Opt-in: reopening the app after Android stopped it while receiving starts
-// reception again with the saved settings.
+// Opt-in (a checkbox in the receive settings, Android only): reopening the
+// app after Android stopped it while receiving starts reception again with
+// the saved settings.
 const autoResumeKey = "jr-clrr-auto-resume";
 function autoResume() {
   try {
@@ -982,36 +938,6 @@ $("background-resume").addEventListener("change", () => {
     localStorage.setItem(autoResumeKey, $("background-resume").checked ? "on" : "off");
   } catch {
     // Asked again next time.
-  }
-});
-$("background-battery").addEventListener("click", () => {
-  try {
-    window.JrAndroid?.requestBatteryExemption?.();
-  } catch {
-    // The bridge only exists in the Android app.
-  }
-});
-$("background-settings").addEventListener("click", () => {
-  try {
-    window.JrAndroid?.openAppSettings?.();
-  } catch {
-    // The bridge only exists in the Android app.
-  }
-});
-$("background-dismiss").addEventListener("click", () => {
-  $("background-notice").hidden = true;
-  try {
-    localStorage.setItem(batteryNoticeKey, "dismissed");
-  } catch {
-    // It is shown again next time.
-  }
-});
-// Back from the settings: hide what was fixed there.
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden" || $("background-notice").hidden || !platform.android) return;
-  if (window.JrAndroid?.batteryRestricted?.() === false) {
-    $("background-notice-battery").hidden = $("background-battery").hidden = true;
-    if ($("background-notice-killed").hidden) $("background-notice").hidden = true;
   }
 });
 $("about-copy-log").addEventListener("click", async () => {
@@ -1207,6 +1133,8 @@ function lockSettings() {
   const wave = kind === "wave";
   const live = running && !busy && !wave;
   for (const control of $("settings").querySelectorAll("input, select, button")) {
+    // Not a reception setting: what to do after Android stops the app.
+    if (control.id === "background-resume") continue;
     const always =
       ((control.id === "rate" || control.id === "gain") && wave) ||
       ((control.id === "scan" || control.id === "browse" || control.id === "tcp-test") && !native);
@@ -1564,18 +1492,14 @@ function renderRecording() {
       `${active ? "保存フォルダー" : "保存したフォルダー"}：${s.directory}`;
     $("recording-output").hidden = false;
   }
-  // A problem with one call's WAV does not stop the saving; it shows the
-  // same way, without opening the settings.
-  // Storage that fell behind costs a few frames, not the whole recording.
-  const dropped = s.dropped_events
-    ? `保存が追いつかず ${s.dropped_events.toLocaleString()} 件を欠落しました（音声は無音で補い、保存は続けています）。保存先の速度と空き容量を確認してください。`
-    : "";
-  const warning = s.warning || dropped;
-  const error = recordingActionError || s.error || warning;
+  // Only what stopped the saving or refused a request: a problem with one
+  // call's WAV or frames lost to slow storage do not stop it, and are not
+  // shown.
+  const error = recordingActionError || s.error;
   const message = error ? friendlyError(error) : "";
   if ($("recording-error").textContent !== message) {
     $("recording-error").textContent = message;
-    if (error && error !== warning) $("recording-settings").open = true;
+    if (error) $("recording-settings").open = true;
   }
   $("recording-error").hidden = !error;
 }
@@ -2338,6 +2262,9 @@ $("driver-start").addEventListener("click", async () => {
 function applyAndroidLayout() {
   document.documentElement.classList.add("android");
   $("input-kind").querySelector('option[value="sdr"]')?.remove();
+  // No IQ WAV input either: without a file picker it only replayed IQ
+  // captures, which Android no longer makes.
+  $("input-kind").querySelector('option[value="wave"]')?.remove();
   // Built-in driver: the app drives the dongle itself (no driver app).
   const usb = el("option", "USB 直結（内蔵ドライバー）");
   usb.value = "usb";
@@ -2420,43 +2347,6 @@ function adoptMacDefaults() {
     void persistPreferences();
   }
 }
-// Android, built-in driver: a dongle the phone no longer sees (it cut the
-// USB power, or the plug lost contact) only returns once it is replugged.
-// The session keeps waiting; say so once it has been gone for 5 seconds.
-// A start waits 30 s for the dongle to be plugged in; that is said at once.
-const usbWaitNotice = "ドングルが USB から外れています。挿し直すと自動で受信を再開します。";
-const usbStartNotice = "ドングルが見つかりません。30 秒以内に挿すと受信を始めます。";
-const usbWait = { since: 0, checked: 0, absent: false, shown: "" };
-function renderUsbWait(s) {
-  const usb = platform.android && $("input-kind").value === "usb";
-  const starting = usb && s.running && s.state === "starting";
-  const waiting = usb && (s.reconnecting || starting);
-  if (waiting && Date.now() - usbWait.checked >= 1000) {
-    usbWait.checked = Date.now();
-    try {
-      usbWait.absent = window.JrAndroid?.usbAttached?.() === false;
-    } catch {
-      usbWait.absent = false;
-    }
-  }
-  if (!waiting || !usbWait.absent) {
-    usbWait.since = 0;
-    usbWait.absent = false;
-    if (usbWait.shown) {
-      // Not an error that replaced the notice meanwhile.
-      if ($("error").textContent === usbWait.shown) clearError();
-      usbWait.shown = "";
-    }
-    return;
-  }
-  usbWait.since ||= Date.now();
-  const notice = starting ? usbStartNotice : usbWaitNotice;
-  const due = Date.now() - usbWait.since >= (starting ? 0 : 5000);
-  if (due && usbWait.shown !== notice && (!usbWait.shown || $("error").textContent === usbWait.shown)) {
-    usbWait.shown = notice;
-    fail(notice);
-  }
-}
 // What the phone saw when the built-in driver asked for the dongle. A dongle
 // that is not there yet (or bounced off USB just then) is waited for: the
 // session takes it once it is plugged in.
@@ -2508,11 +2398,12 @@ function adoptAndroidDefaults() {
   } catch {
     switched = false;
   }
-  if (!switched && $("input-kind").value !== "wave") {
+  if (!switched) {
     $("input-kind").value = "usb";
     changed = true;
   }
-  if (!["usb", "rtl_tcp", "wave"].includes($("input-kind").value)) {
+  // Also an input Android no longer offers (an IQ WAV file).
+  if (!["usb", "rtl_tcp"].includes($("input-kind").value)) {
     $("input-kind").value = "usb";
     changed = true;
   }
@@ -2589,7 +2480,6 @@ async function startReception() {
     running = true;
     syncBackgroundService();
     syncNativeMonitor();
-    if (input.kind !== "wave") showBackgroundNotice({ starting: true });
     sessionReplay = input.kind === "wave";
     recordingStatus = emptyRecording();
     recordingResumePending = recordingEnabled;
@@ -2938,7 +2828,6 @@ async function poll() {
           else resetAudio();
           syncNativeMonitor();
         }
-        renderUsbWait(s);
         const stateLabel = s.reconnecting
           ? "再接続中"
           : ({
@@ -2989,7 +2878,8 @@ async function poll() {
       }
     }
   } catch (e) {
-    fail(e);
+    // The next poll tries again; errors are shown only once reception stops.
+    console.warn(e);
   } finally {
     // IPC and rendering time are part of the polling period, not an extra
     // delay added after it. Leave breathing room when a poll itself is slow.
@@ -3033,11 +2923,9 @@ try {
     if (platform.android) {
       addTestSound();
       addRecordingsBrowser();
-      const kill = bridgeText("lastKill");
-      if (kill) {
-        showBackgroundNotice({ killed: Number(kill.split("\t")[1]) });
-        resumeAfterKill = autoResume();
-      }
+      $("background-resume-group").hidden = false;
+      $("background-resume").checked = autoResume();
+      if (bridgeText("lastKill")) resumeAfterKill = autoResume();
     }
   }
   bundledCatalog = native
@@ -3049,7 +2937,7 @@ try {
         }),
       );
   await restorePreferences(true);
-  $("iq-capture-group").hidden = !native;
+  $("iq-capture-group").hidden = !native || !!platform.android;
   void refreshIqFiles();
   if (platform.android) adoptAndroidDefaults();
   else if (platform.simple) adoptMacDefaults();

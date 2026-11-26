@@ -128,6 +128,7 @@ The desktop app saves changes automatically and restores them at the next launch
 
 Saved center frequencies and rates are not replaced by profile defaults at startup, and deliberately empty fields stay empty.
 Startup restores settings only; reception starts when you press start. If saving was on, it resumes once reception is ready.
+On Android, with “Android に止められた後にアプリを開いたら、自動で受信を再開する” (resume after Android stopped the app) checked in the receive settings, opening the app after Android stopped it while receiving starts reception again; nothing is shown about the stop.
 Closing the window waits for pending writes, including recent edits.
 
 Settings are stored as versioned JSON in `settings.json` in Tauri's app config directory. Source files and presets are never modified.
@@ -208,11 +209,12 @@ A write failure or queue overflow stops the whole session, leaves `INCOMPLETE`, 
 
 On Android, “録音を聞く” plays saved recordings inside the app; live audio keeps playing meanwhile and “listen” stays as it is.
 
-### IQ capture (diagnosis)
+### IQ capture (diagnosis, desktop)
 
 “IQ を保存” in the recording card saves 10 or 30 seconds of the raw band (IQ, all channels) while receiving, for tuning the decoder or investigating problems.
 Captures go to an `IQ` folder inside the recordings folder, named like `iq-20261123T061112Z-352603125Hz-240000.wav` (UTC time, centre frequency, sample rate). They are PCM16 stereo (I left, Q right): about 9.6 MB per 10 s at 240 kS/s, about 96 MB at 2.4 MS/s.
-A thread of its own writes them; if storage falls behind, the capture stops early without stopping reception (what was written replays). Saved captures are listed in the recording card; “この IQ で受信” (receive this IQ) sets the input kind and centre frequency to that file, and on Android “共有” (share) sends it. A capture contains every call in the band.
+A thread of its own writes them; if storage falls behind, the capture stops early without stopping reception (what was written replays). Saved captures are listed in the recording card; “この IQ で受信” (receive this IQ) sets the input kind and centre frequency to that file. A capture contains every call in the band.
+The Android version has neither IQ capture nor IQ WAV input.
 
 ## IQ playback and CLI
 
