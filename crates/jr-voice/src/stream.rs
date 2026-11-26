@@ -39,6 +39,8 @@ pub struct VoiceStream {
     loss_slots: VecDeque<(u32, u32)>,
     previous_pcm: Option<Output>,
     previous_loss: bool,
+    speech_rms: f32,
+    post_gain: f32,
 }
 impl Default for VoiceStream {
     fn default() -> Self {
@@ -70,6 +72,8 @@ impl Default for VoiceStream {
             loss_slots: VecDeque::new(),
             previous_pcm: None,
             previous_loss: false,
+            speech_rms: 0.0,
+            post_gain: 1.0,
         }
     }
 }
@@ -260,6 +264,11 @@ impl VoiceStream {
         if loss != 0 || (self.previous_loss && previous.is_some()) {
             repair_boundary(&mut frame.pcm, previous.map(|p| &p.pcm), loss);
         }
+        if previous.is_none() {
+            self.speech_rms = 0.0;
+            self.post_gain = 1.0;
+        }
+        enhance_pcm(&mut frame.pcm, previous.map(|p| &p.pcm), loss, &mut self.speech_rms, &mut self.post_gain);
         self.previous_loss = loss != 0;
         self.previous_pcm = Some(frame);
         self.output[(self.output_head + self.output_count) % self.output.len()] = frame;
@@ -312,6 +321,12 @@ fn repair_boundary(pcm: &mut Pcm, previous: Option<&Pcm>, loss: u32) {
     for (i, sample) in pcm.iter_mut().enumerate() {
         let t = i as f32 / 319.0;
         let mut y = *sample as f32 * (start + (end - start) * t);
+        if loss != 0 {
+            if let (Some(p), Some(lag)) = (previous, period) {
+                let prediction = p[320 - lag + i % lag] as f32;
+                y = 0.65 * y + 0.35 * prediction * (start + (end - start) * t);
+            }
+        }
         if let Some(p) = previous.filter(|_| i < 40) {
             let old = match period {
                 Some(lag) => p[320 - lag + i % lag] as f32,
@@ -345,5 +360,27 @@ mod plc_tests {
     #[test]
     fn silence_has_no_pitch() {
         assert_eq!(pitch_period(&[0; 320]), None);
+    }
+}
+
+// Recording-domain enhancement: bounded gain, impulse suppression and voiced comb.
+fn enhance_pcm(pcm: &mut Pcm, previous: Option<&Pcm>, loss: u32, average: &mut f32, gain: &mut f32) {
+    let raw = *pcm;
+    let rms = (raw.iter().map(|&x| (x as f32).powi(2)).sum::<f32>() / 320.0).sqrt();
+    if loss == 0 && rms > 96.0 {
+        *average = if *average == 0.0 { rms } else { 0.94 * *average + 0.06 * rms.min(*average * 3.0) };
+    }
+    let target = if rms > 96.0 && loss == 0 { (1800.0 / average.max(96.0)).clamp(0.5, 3.0) } else { 1.0_f32.min(*gain) };
+    let period = if loss == 0 { pitch_period(&raw) } else { None };
+    let ceiling = (rms * 7.0).clamp(512.0, 30000.0);
+    for i in 0..320 {
+        *gain += 0.002 * (target - *gain);
+        let mut x = raw[i] as f32;
+        if let Some(lag) = period {
+            let delayed = if i >= lag { raw[i-lag] as f32 } else { previous.map_or(x, |p| p[320+i-lag] as f32 / gain.max(0.5)) };
+            x = 0.88 * x + 0.12 * delayed;
+        }
+        x = x.clamp(-ceiling, ceiling) * *gain;
+        pcm[i] = x.round().clamp(-30000.0, 30000.0) as i16;
     }
 }

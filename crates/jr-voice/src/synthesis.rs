@@ -204,8 +204,8 @@ impl Pipeline {
             return Err(());
         }
         let strength = periodicity(&original.pcm);
-        let fallback =
-            frame.strength < 0.5 && strength >= 0.65 && strength - frame.strength >= 0.15;
+        let fallback = !frame.strength.is_finite()
+            || (frame.strength < 0.5 && strength >= 0.65 && strength - frame.strength >= 0.15);
         let mut input = frame.input;
         let source = if fallback {
             [0.0; 320]
@@ -338,13 +338,30 @@ impl Pipeline {
     }
     fn emit(&mut self, frame: GainFrame, following: Option<f64>) -> Result<(), ()> {
         let curve = parameters::gain_curve(&frame.gain, self.previous_gain, following);
-        let pcm = synth(
+        let checkpoint = self.final_synthesis.clone();
+        let pcm = match synth(
             &mut self.final_synthesis,
             &frame.input,
             &frame.source,
             Some(&curve),
             false,
-        )?;
+        ) {
+            Ok(pcm) => pcm,
+            Err(()) => {
+                self.final_synthesis = checkpoint;
+                let mut fallback = frame.input.clone();
+                for value in &mut fallback.controls[..4] {
+                    *value = value.clamp(-90.0, -18.0);
+                }
+                match synth(&mut self.final_synthesis, &fallback, &[0.0; 320], None, true) {
+                    Ok(pcm) => pcm,
+                    Err(()) => {
+                        self.final_synthesis.reset();
+                        [0; 320]
+                    }
+                }
+            }
+        };
         self.previous_gain = Some(frame.gain[3]);
         self.output.push_back(Output {
             index: frame.input.key,

@@ -403,7 +403,16 @@ impl Pipeline {
         } else {
             self.status.rejected_voice += 1;
         }
-        self.voice.push(index, payload)?;
+        // A heavily repaired frame in a deep fade is safer to conceal.
+        // Keep the original decoded payload for diagnostics and recording.
+        let weak = frame.confidence.iter().map(|&v| u32::from(v)).sum::<u32>()
+            < 24 * frame.confidence.len() as u32;
+        let audio_payload = if weak && corrected_bits.is_some_and(|n| n >= 16) {
+            None
+        } else {
+            payload
+        };
+        self.voice.push(index, audio_payload)?;
         let info = data.map(|(info, _)| info);
         let messages = self.data.decode_with(&frame, data);
         for message in messages.iter().cloned() {

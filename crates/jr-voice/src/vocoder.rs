@@ -49,6 +49,8 @@ pub struct Vocoder {
     has_excitation: bool,
     has_power: bool,
     has_level: bool,
+    final_period: Option<f32>,
+    final_impulse: Option<[f32; 256]>,
 }
 impl Default for Vocoder {
     fn default() -> Self {
@@ -71,6 +73,8 @@ impl Default for Vocoder {
             has_excitation: false,
             has_power: false,
             has_level: false,
+            final_period: None,
+            final_impulse: None,
         }
     }
 }
@@ -234,9 +238,18 @@ impl Vocoder {
             .clamp(-18.0, 18.0);
             let mut extended = [0.0; 335];
             extended[..255].copy_from_slice(&self.history);
+            let mut period = values[74 + block].clamp(20.0, 160.0);
+            if curve.is_some() {
+                if let Some(old) = self.final_period {
+                    if values[70 + block] > 0.55 && (period / old).ln().abs() < 0.35 {
+                        period = 0.7 * period + 0.3 * old;
+                    }
+                }
+                self.final_period = Some(period);
+            }
             self.excitation(
                 values[70 + block].clamp(0.0, 1.0),
-                values[74 + block].clamp(20.0, 160.0),
+                period,
                 &mut extended[255..],
             );
             if let Some(source) = source {
@@ -259,6 +272,13 @@ impl Vocoder {
                 let reversed: [f32; 128] = std::array::from_fn(|j| impulse[127 - j]);
                 for (i, sample) in shaped.iter_mut().enumerate() {
                     *sample = precise_dot(&extended[128 + i..256 + i], &reversed);
+                    if let Some(old) = &self.final_impulse {
+                        if i < 32 && block % 2 == 0 {
+                            let prior: [f32; 128] = std::array::from_fn(|j| old[127 - j]);
+                            let t = (i + 1) as f32 / 32.0;
+                            *sample = (1.0 - t) * precise_dot(&extended[128 + i..256 + i], &prior) + t * *sample;
+                        }
+                    }
                 }
             } else {
                 for i in 0..80 {
@@ -266,6 +286,9 @@ impl Vocoder {
                         shaped[i] += extended[255 + i - j] * impulse[j];
                     }
                 }
+            }
+            if curve.is_some() {
+                self.final_impulse = Some(impulse);
             }
             for sample in &mut shaped {
                 *sample *= slope_gain;
@@ -284,7 +307,7 @@ impl Vocoder {
             self.has_power = true;
             let bound = 10.0_f32.powf(0.6);
             let denominator = self.power.clamp(power / bound, power * bound);
-            let gain = 10.0_f32.powf(levels[block] / 20.0) / denominator.sqrt();
+            let gain = 10.0_f32.powf(levels[block] / 20.0) / denominator.sqrt().max(1e-12);
             for x in &mut shaped {
                 *x *= gain;
             }

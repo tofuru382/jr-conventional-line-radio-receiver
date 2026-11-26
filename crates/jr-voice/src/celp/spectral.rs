@@ -36,6 +36,9 @@ impl Spectral {
             out[k] = out[k].max(out[k - 1] + 321.0);
         }
         out[9] = out[9].min(25682.0);
+        for k in (0..9).rev() {
+            out[k] = out[k].min(out[k + 1] - 321.0);
+        }
         out
     }
     pub fn decode(&mut self, p: &HalfParams) -> [i16; 10] {
