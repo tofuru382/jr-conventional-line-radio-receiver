@@ -265,26 +265,17 @@ impl Vocoder {
             self.source_trace[block * 80..(block + 1) * 80].copy_from_slice(&extended[255..]);
             let mut slope_gain = 10.0_f32.powf(-slope / 40.0);
             let slope_step = 10.0_f32.powf(slope / (20.0 * 79.0));
-            let mut shaped = [0.0; 80];
-            if curve.is_some() {
-                // The final synthesis uses a wider accumulator. Preserve the
-                // binary32 reduction order in the model's intermediate trials.
-                let reversed: [f32; 128] = std::array::from_fn(|j| impulse[127 - j]);
-                for (i, sample) in shaped.iter_mut().enumerate() {
-                    *sample = precise_dot(&extended[128 + i..256 + i], &reversed);
-                    if let Some(old) = &self.final_impulse {
-                        if i < 32 && block % 2 == 0 {
-                            let prior: [f32; 128] = std::array::from_fn(|j| old[127 - j]);
-                            let t = (i + 1) as f32 / 32.0;
-                            *sample = (1.0 - t) * precise_dot(&extended[128 + i..256 + i], &prior) + t * *sample;
-                        }
-                    }
-                }
-            } else {
-                for i in 0..80 {
-                    for j in 0..128 {
-                        shaped[i] += extended[255 + i - j] * impulse[j];
-                    }
+            // The excitation through this block's filter. The final synthesis
+            // fades in from the previous half's filter over the first 32
+            // samples of each half, so a filter change is no step.
+            let fade_from = self
+                .final_impulse
+                .filter(|_| curve.is_some() && block % 2 == 0);
+            let mut shaped: [f32; 80] = std::array::from_fn(|i| convolve(&extended, i, &impulse));
+            if let Some(old) = &fade_from {
+                for (i, sample) in shaped.iter_mut().enumerate().take(32) {
+                    let t = (i + 1) as f32 / 32.0;
+                    *sample = (1.0 - t) * convolve(&extended, i, old) + t * *sample;
                 }
             }
             if curve.is_some() {
@@ -343,53 +334,13 @@ impl Vocoder {
     }
 }
 
-/// Wide products and accumulation avoid loss of low-level components in the
-/// final source/filter convolution. AArch64 has Advanced SIMD as standard.
-fn precise_dot(a: &[f32], b: &[f32; 128]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
-    #[cfg(target_arch = "aarch64")]
-    {
-        use std::arch::aarch64::*;
-        // SAFETY: both slices contain 128 floats; loads stay in bounds.
-        unsafe {
-            let mut lo = vdupq_n_f64(0.0);
-            let mut hi = vdupq_n_f64(0.0);
-            for i in (0..128).step_by(4) {
-                let x = vld1q_f32(a.as_ptr().add(i));
-                let y = vld1q_f32(b.as_ptr().add(i));
-                lo = vfmaq_f64(
-                    lo,
-                    vcvt_f64_f32(vget_low_f32(x)),
-                    vcvt_f64_f32(vget_low_f32(y)),
-                );
-                hi = vfmaq_f64(
-                    hi,
-                    vcvt_f64_f32(vget_high_f32(x)),
-                    vcvt_f64_f32(vget_high_f32(y)),
-                );
-            }
-            vaddvq_f64(vaddq_f64(lo, hi)) as f32
-        }
+/// One output of the source/filter convolution, summed in binary32 in the
+/// order the model was trained with (newest input first). A wider sum
+/// changes the result by about -120 dB, below what 16-bit PCM can carry.
+fn convolve(extended: &[f32; 335], i: usize, impulse: &[f32]) -> f32 {
+    let mut sum = 0.0;
+    for j in 0..128 {
+        sum += extended[255 + i - j] * impulse[j];
     }
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        a.iter()
-            .zip(b)
-            .map(|(&x, &y)| x as f64 * y as f64)
-            .sum::<f64>() as f32
-    }
-}
-
-#[cfg(test)]
-mod precision_tests {
-    use super::*;
-
-    #[test]
-    fn wide_dot_preserves_small_terms_between_large_terms() {
-        let mut a = [0.0; 128];
-        a[0] = 1e8;
-        a[4] = 1.0;
-        a[8] = -1e8;
-        assert_eq!(precise_dot(&a, &[1.0; 128]), 1.0);
-    }
+    sum
 }

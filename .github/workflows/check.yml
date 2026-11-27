@@ -48,3 +48,23 @@ jobs:
           lines=$(grep -E -A4 '^(error|warning)(\[[A-Za-z0-9_]+\])?:|panicked at|^---- |^failures:|^not ok|FAILED' "$RUNNER_TEMP/check.log" | head -100 || true)
           message=$(printf '%s' "$lines" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' | awk '{printf "%s%%0A", $0}')
           echo "::error title=scripts/check.sh::${message:-no error lines found}"
+
+  # The NEON paths (channelizer rows, playback resampler) run only on ARM; the
+  # check above runs on x86, where only their scalar fallbacks run. Their
+  # parity tests here compare them with the scalar results.
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-arm64-neon
+      - uses: ./.github/actions/setup-native
+      - name: Test the NEON paths
+        run: |
+          cargo test --locked -p jr_conventional_dsp --lib channelizer
+          cargo test --locked -p jr-receiver-desktop --lib native_audio

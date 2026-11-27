@@ -242,7 +242,10 @@ impl Resampler {
         while self.base + HALF < self.history.len() {
             let p = (self.phase * PHASES as u64 + self.output / 2) / self.output;
             let first = self.base + 1 - HALF;
-            let sum = resample_dot(&self.history[first..first + TAPS], &self.kernels[p as usize]);
+            let sum = resample_dot(
+                &self.history[first..first + TAPS],
+                &self.kernels[p as usize],
+            );
             out.push(sum.round().clamp(-32768.0, 32767.0) as i16);
             self.phase += self.input;
             self.base += (self.phase / self.output) as usize;
@@ -854,9 +857,27 @@ mod tests {
             .all(|&x| (x - 1000).abs() <= 1));
         let mut down = Resampler::new(48_000, 8000);
         let out = down.process(&tone(10_000.0, 48_000.0, 4800));
-        assert!(out[100..out.len() - 100]
-            .iter()
-            .all(|&x| x.abs() < 250));
+        assert!(out[100..out.len() - 100].iter().all(|&x| x.abs() < 250));
+    }
+
+    #[test]
+    fn resampler_dot_matches_the_plain_sum() {
+        // On AArch64 this is the NEON path (run by the arm64 CI job); four
+        // lanes sum in another order, so equal to float rounding.
+        let samples: [f32; TAPS] = std::array::from_fn(|i| ((i * 37 % 64) as f32 - 31.5) * 517.0);
+        let kernels = kernels(8000, 48_000);
+        for taps in [&kernels[0], &kernels[PHASES / 3], &kernels[PHASES]] {
+            let plain: f64 = samples
+                .iter()
+                .zip(taps)
+                .map(|(&s, &t)| s as f64 * t as f64)
+                .sum();
+            let fast = resample_dot(&samples, taps) as f64;
+            assert!(
+                (fast - plain).abs() <= 1e-3 * plain.abs().max(1.0),
+                "{fast} vs {plain}"
+            );
+        }
     }
 
     #[test]

@@ -2987,10 +2987,11 @@ select {
   margin-inline-start: 0;
 }
 
-/* Shared error presentation for global, form, recording and diagnostic errors. */
+/* Shared error presentation for global, form, recording and diagnostic
+   errors: one box, at the panes' inset, the message on its first line. */
 :is(.error, .field-error):not([hidden]):not(:empty) {
   box-sizing: border-box;
-  padding: 12px 14px;
+  padding: var(--pad);
   border: 1px solid var(--danger);
   border-inline-start-width: 4px;
   border-radius: 8px;
@@ -3003,9 +3004,12 @@ select {
   max-width: 100%;
 }
 :is(.error, .field-error):not([hidden]):not(:empty)::before {
-  content: "⚠ エラー";
-  display: block;
-  font-weight: 700;
-  margin-block-end: 4px;
+  content: "⚠ ";
 }
-:is(.error, .field-error)[hidden] { display: none !important; }
+:is(.error, .field-error)[hidden] {
+  display: none !important;
+}
+/* In the version dialog the IQ capture lines up with the dialog's text. */
+#about-dialog .iq-capture {
+  padding-inline: 0;
+}

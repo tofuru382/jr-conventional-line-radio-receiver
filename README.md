@@ -209,12 +209,11 @@ A write failure or queue overflow stops the whole session, leaves `INCOMPLETE`, 
 
 On Android, “録音を聞く” plays saved recordings inside the app; live audio keeps playing meanwhile and “listen” stays as it is.
 
-### IQ capture (diagnosis, desktop)
+### IQ capture (diagnosis)
 
-“IQ を保存” in the recording card saves 10 or 30 seconds of the raw band (IQ, all channels) while receiving, for tuning the decoder or investigating problems.
+“IQ を保存” in the version-information dialog (“バージョン情報”) saves 10 or 30 seconds of the raw band (IQ, all channels) while receiving, for tuning the decoder or investigating problems.
 Captures go to an `IQ` folder inside the recordings folder, named like `iq-20261123T061112Z-352603125Hz-240000.wav` (UTC time, centre frequency, sample rate). They are PCM16 stereo (I left, Q right): about 9.6 MB per 10 s at 240 kS/s, about 96 MB at 2.4 MS/s.
-A thread of its own writes them; if storage falls behind, the capture stops early without stopping reception (what was written replays). Saved captures are listed in the recording card; “この IQ で受信” (receive this IQ) sets the input kind and centre frequency to that file. A capture contains every call in the band.
-The Android version has neither IQ capture nor IQ WAV input.
+A thread of its own writes them; if storage falls behind, the capture stops early without stopping reception (what was written replays). Saved captures are listed in the same dialog, with where they were saved. On desktop, “この IQ で受信” (receive this IQ) sets the input kind and centre frequency to that file. The Android version has no IQ WAV input: its captures are for sending on for analysis. A capture contains every call in the band.
 
 ## IQ playback and CLI
 

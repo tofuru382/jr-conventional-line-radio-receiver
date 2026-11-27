@@ -353,7 +353,13 @@ impl Pipeline {
                 for value in &mut fallback.controls[..4] {
                     *value = value.clamp(-90.0, -18.0);
                 }
-                match synth(&mut self.final_synthesis, &fallback, &[0.0; 320], None, true) {
+                match synth(
+                    &mut self.final_synthesis,
+                    &fallback,
+                    &[0.0; 320],
+                    None,
+                    true,
+                ) {
                     Ok(pcm) => pcm,
                     Err(()) => {
                         self.final_synthesis.reset();

@@ -844,12 +844,12 @@ test("the measured input rate is shown and flagged when it differs from the sett
   await app.poll();
   assert.match($("capture-info").textContent, /　周波数 自動補正 \+120 Hz　入力/);
 });
-test("no diagnosis panels on Android: no connection log panel, and no IQ capture", async (t) => {
+test("no diagnosis panels on Android besides the IQ capture in the version dialog", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   for (const id of ["iq-group", "log-group", "connection-log", "recent-block"])
     assert.equal(app.$(id), null, id);
-  assert.equal(app.$("iq-capture-group").hidden, true);
-  assert.equal(app.calls.some((c) => c.command === "list_iq_captures"), false);
+  assert.equal(app.$("iq-capture-group").closest("dialog")?.id, "about-dialog");
+  assert.equal(app.$("iq-capture-group").hidden, false);
 });
 test("IQ capture saves for the chosen length with progress, then lists, replays and deletes captures", async (t) => {
   const root = "/sdcard/Download/JR-CLRR/Recordings/IQ";
@@ -894,7 +894,10 @@ test("IQ capture saves for the chosen length with progress, then lists, replays 
   // Finished: the list refreshes.
   app.setSnapshot(capture("saved", 30));
   await app.poll();
-  assert.equal($("iq-capture-status").textContent, "保存しました（30 秒・28.8 MB）");
+  assert.equal(
+    $("iq-capture-status").textContent,
+    "保存しました（30 秒・28.8 MB） 保存先：/sdcard/Download/JR-CLRR/Recordings/IQ/iq-20261123T061200Z-352603125Hz-240000.wav",
+  );
   assert.equal($("iq-capture").disabled, false);
   assert.ok(app.calls.filter((c) => c.command === "list_iq_captures").length >= 2);
   // Stopped: replay switches the input to that file at its centre frequency.
@@ -932,22 +935,25 @@ test("a failed or cut-short IQ capture says why", async (t) => {
   });
   app.setSnapshot(at("saved", { written_seconds: 4, bytes: 44 + 960000 * 4, message: "保存先への書き込みが追いつかないため途中で止めました" }));
   await app.poll();
-  assert.equal($("iq-capture-status").textContent, "保存しました（4 秒・3.8 MB）：保存先への書き込みが追いつかないため途中で止めました");
+  assert.equal(
+    $("iq-capture-status").textContent,
+    "保存しました（4 秒・3.8 MB）：保存先への書き込みが追いつかないため途中で止めました 保存先：/x/IQ/iq-a.wav",
+  );
   await app.click("iq-capture");
   app.setSnapshot(at("failed", { message: "IQ を保存できません：Permission denied" }));
   await app.poll();
   assert.equal($("iq-capture-status").textContent, "IQ を保存できません：Permission denied");
 });
-test("IQ capture is on desktop only: not on Android, nor in the browser preview", async (t) => {
-  const desktop = await setup(t, {
-    platformInfo: { android: false, soapy: true },
-    iqFiles: [{ name: "iq-20261123T061112Z-352603125Hz-240000.wav", path: "/r/IQ/iq-20261123T061112Z-352603125Hz-240000.wav", bytes: 9600044, modified: 0 }],
-  });
+test("IQ captures replay on desktop; Android keeps them to send on, without an IQ WAV input", async (t) => {
+  const file = { name: "iq-20261123T061112Z-352603125Hz-240000.wav", path: "/r/IQ/iq-20261123T061112Z-352603125Hz-240000.wav", bytes: 9600044, modified: 0 };
+  const desktop = await setup(t, { platformInfo: { android: false, soapy: true }, iqFiles: [file] });
   assert.equal(desktop.$("iq-capture-group").hidden, false);
   assert.deepEqual([...desktop.$("iq-files").querySelectorAll("button")].map((b) => b.textContent), ["この IQ で受信", "削除"]);
   const preview = await setup(t, { native: false });
   assert.equal(preview.$("iq-capture-group").hidden, true);
-  // Android: neither the capture nor the IQ WAV input; a run saved with that
+  assert.match(desktop.$("iq-capture-hint").textContent, /入力方式「IQ WAV ファイル」で再生できます/);
+  // Android: the capture, but no IQ WAV input to replay it with, so no
+  // replay key (it used to leave no input chosen); a run saved with that
   // input comes back on the built-in driver.
   const preferences = {
     value: {
@@ -957,8 +963,10 @@ test("IQ capture is on desktop only: not on Android, nor in the browser preview"
       output: { enabled: false, directory: null, audio: true, raw_frames: false, data_messages: false },
     },
   };
-  const android = await setup(t, { platformInfo: { android: true, soapy: false }, preferences, configureConnection: false });
-  assert.equal(android.$("iq-capture-group").hidden, true);
+  const android = await setup(t, { platformInfo: { android: true, soapy: false }, preferences, configureConnection: false, iqFiles: [file] });
+  assert.equal(android.$("iq-capture-group").hidden, false);
+  assert.deepEqual([...android.$("iq-files").querySelectorAll("button")].map((b) => b.textContent), ["削除"]);
+  assert.match(android.$("iq-capture-hint").textContent, /解析用に送れます/);
   assert.equal(android.$("input-kind").querySelector('option[value="wave"]'), null);
   assert.equal(android.$("input-kind").value, "usb");
 });
@@ -1901,7 +1909,11 @@ test("about dialog shows product and author, restores focus, and leaves receptio
   assert.equal(dialog.open, true);
   assert.deepEqual(ui.modalCalls, ["showModal"]);
   assert.equal(ui.w.document.activeElement.id, "about-close");
-  assert.equal(ui.calls.length, commands);
+  // Opening it only reads the IQ capture list shown in it.
+  assert.deepEqual(
+    ui.calls.slice(commands).map((c) => c.command),
+    ["list_iq_captures"],
+  );
   await ui.poll();
   assert.equal(ui.$("state").textContent, "受信中");
   assert.equal(ui.$("recording-state").textContent, "保存中");

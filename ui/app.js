@@ -498,6 +498,11 @@ function iqDirectory() {
 function megabytes(bytes) {
   return bytes >= 100e6 ? `${Math.round(bytes / 1e6)} MB` : `${(bytes / 1e6).toFixed(1)} MB`;
 }
+// Captures replay through the IQ WAV input, which Android does not have:
+// there they are kept to be sent on for analysis.
+function iqReplayable() {
+  return Boolean($("input-kind").querySelector('option[value="wave"]'));
+}
 function iqRate() {
   return (running && lastSnapshot?.sample_rate) || Number($("rate").value) || 0;
 }
@@ -511,7 +516,9 @@ function renderIqCapture() {
   const size = bytes ? `約 ${megabytes(bytes)}` : "";
   const hint = !native
     ? ""
-    : `受信中の電波をそのまま保存します${size ? `（${size}）` : ""}。入力方式「IQ WAV ファイル」で再生できます。${
+    : `受信中の電波をそのまま保存します${size ? `（${size}）` : ""}。${
+        iqReplayable() ? "入力方式「IQ WAV ファイル」で再生できます。" : "保存先の IQ フォルダーから、解析用に送れます。"
+      }${
         bytes > 100e6 ? "サンプルレートが高いため大きなファイルになります。" : ""
       }`;
   if ($("iq-capture-hint").textContent !== hint) $("iq-capture-hint").textContent = hint;
@@ -575,6 +582,27 @@ function iqCenterHz(file) {
   const m = /-(\d+)Hz-(\d+)\.wav$/i.exec(file.name);
   return m ? { center: Number(m[1]), rate: Number(m[2]) } : null;
 }
+function replayButton(file, info) {
+  const replay = el("button", "この IQ で受信", "iq-replay");
+  replay.type = "button";
+  replay.disabled = running || busy;
+  replay.title = running ? "受信を停止してから選んでください" : "";
+  replay.addEventListener("click", () => {
+    $("input-kind").value = "wave";
+    $("input-kind").dispatchEvent(new Event("change"));
+    $("path").value = file.path;
+    $("path").dispatchEvent(new Event("input"));
+    $("path").dispatchEvent(new Event("change"));
+    if (info) {
+      $("center").value = (info.center / 1e6).toFixed(6);
+      $("center").dispatchEvent(new Event("input"));
+      $("center").dispatchEvent(new Event("change"));
+    }
+    iqMessage = "入力を「IQ WAV ファイル」に切り替えました。受信を開始すると再生します。";
+    renderIqCapture();
+  });
+  return replay;
+}
 function renderIqFiles() {
   const list = $("iq-files");
   list.replaceChildren();
@@ -588,25 +616,7 @@ function renderIqFiles() {
         "iq-file-name",
       ),
     );
-    const replay = el("button", "この IQ で受信", "iq-replay");
-    replay.type = "button";
-    replay.disabled = running || busy;
-    replay.title = running ? "受信を停止してから選んでください" : "";
-    replay.addEventListener("click", () => {
-      $("input-kind").value = "wave";
-      $("input-kind").dispatchEvent(new Event("change"));
-      $("path").value = file.path;
-      $("path").dispatchEvent(new Event("input"));
-      $("path").dispatchEvent(new Event("change"));
-      if (info) {
-        $("center").value = (info.center / 1e6).toFixed(6);
-        $("center").dispatchEvent(new Event("input"));
-        $("center").dispatchEvent(new Event("change"));
-      }
-      iqMessage = "入力を「IQ WAV ファイル」に切り替えました。受信を開始すると再生します。";
-      renderIqCapture();
-    });
-    row.append(replay);
+    if (iqReplayable()) row.append(replayButton(file, info));
     const remove = el("button", iqDeleteArmed === file.path ? "もう一度押すと削除" : "削除");
     remove.type = "button";
     remove.addEventListener("click", async () => {
