@@ -73,14 +73,16 @@ fn run() -> Result<()> {
                 gain_db: a.get(6).map(|s| s.parse()).transpose()?,
                 ppm: 0,
                 reconnect_seconds: 60,
+                bias_tee: false,
+                gain_optimize: false,
             };
-            let mut session = Session::start(Config {
+            let session = Session::start(Config {
                 input: Input::RtlTcp { radio },
                 channels: preset.channels,
             })?;
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(seconds) {
-                if !session.snapshot(None).0.running {
+                if !session.is_running() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));

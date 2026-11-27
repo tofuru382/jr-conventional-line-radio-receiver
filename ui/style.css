@@ -329,6 +329,40 @@ fieldset {
   grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr);
   gap: 12px;
 }
+.tcp-test-row {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+.tcp-test-row .field-hint {
+  margin-block-start: 0;
+}
+.gain-status {
+  grid-column: 1 / -1;
+  margin-block-start: 0;
+}
+.gain-status:empty,
+#gain-auto-group[hidden] {
+  display: none;
+}
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block-start: 12px;
+}
+.check-field[hidden] {
+  display: none;
+}
+.check-field input {
+  width: auto;
+  margin: 0;
+}
+#apply-ppm[hidden] {
+  display: none;
+}
 .driver-row {
   display: flex;
   flex-wrap: wrap;
@@ -804,6 +838,49 @@ figcaption {
   margin: 0;
   padding: 0 22px 16px;
   overflow-wrap: anywhere;
+}
+.iq-capture {
+  padding: 4px 22px 16px;
+  border-block-start: 1px solid var(--line);
+}
+.iq-capture[hidden] {
+  display: none;
+}
+.iq-capture-bar,
+.iq-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-block-start: 12px;
+}
+.iq-capture-title {
+  font-weight: 600;
+  margin-inline-end: auto;
+}
+.iq-capture-bar label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.iq-capture-bar select {
+  width: auto;
+}
+.iq-capture .field-hint {
+  margin-block-start: 8px;
+  overflow-wrap: anywhere;
+}
+.iq-capture .field-hint:empty {
+  display: none;
+}
+.iq-file-name {
+  flex: 1 1 16rem;
+  min-width: 0;
+  font-size: var(--text-caption);
+  overflow-wrap: anywhere;
+}
+.iq-file button {
+  flex: 0 0 auto;
 }
 .recording-controls {
   display: flex;
@@ -2675,28 +2752,6 @@ html:not(.compact) .statusbar .quick-stats {
   background: var(--screen);
   box-shadow: 2px 2px 0 #000000;
 }
-.notice {
-  margin-block: 8px;
-  padding: 8px 12px;
-  display: grid;
-  gap: 6px;
-  background: var(--display);
-  border: 2px solid var(--signal-yellow);
-}
-.notice h2 {
-  color: var(--signal-yellow);
-  font-size: var(--text-body);
-  font-weight: 400;
-}
-.notice p {
-  font-size: var(--text-caption);
-}
-.notice-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
 /* The full view's band summary is a display pane like the others. */
 .overview {
   margin-block: 12px;
@@ -2751,4 +2806,210 @@ th,
 }
 .mode-switch button[aria-pressed="true"] {
   font-weight: 400;
+}
+
+/* ===================================================================
+   One spacing scale. Every pane sits the same gap from the next, with its
+   title in one size at one inset and its contents at the same inset, and
+   every key and field is one height. Last on purpose: the rules above set
+   these per pane (8 to 22 px insets, 10 to 24 px gaps, titles 12 to 16 px).
+   =================================================================== */
+:root {
+  --pad: 12px;
+  --gap: 12px;
+  --control-height: 44px;
+  --text-pane-title: 1rem;
+}
+/* Between panes: one gap, from the column that holds them. */
+main,
+.compact main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding-block: var(--gap);
+}
+.workspace,
+.workspace-tools {
+  gap: var(--gap);
+}
+/* Specific enough to undo each pane's own margins (".compact .live-panel"). */
+:root :is(main, .workspace, .workspace-tools) > :is(.card, .overview, .error, .workspace, .workspace-tools, .workspace-navigation, .route-feedback, footer) {
+  margin-block: 0;
+}
+#route-feedback:empty {
+  display: none;
+}
+
+/* Pane titles: one size, one colour, at the pane's inset. */
+.pane-title,
+.live-block h2,
+.live-heading h2,
+.card h2,
+.card .source-heading,
+.overview .eyebrow {
+  margin: 0;
+  padding: 0;
+  color: var(--title-green);
+  font-size: var(--text-pane-title);
+  font-weight: 300;
+  line-height: 1.5;
+  letter-spacing: 0.1em;
+}
+.pane-title,
+.live-block h2 {
+  margin-block-end: 8px;
+}
+/* Room before the summary beside it (desktop); on a phone it wraps below. */
+.card .source-heading {
+  margin-inline: 0 16px;
+}
+
+/* Inside panes: title rows and contents at one inset. */
+.overview,
+.live-panel,
+.compact .live-panel,
+.error {
+  padding: var(--pad);
+}
+.source-summary,
+.panel-summary,
+.section-title,
+#recording-settings > summary {
+  padding: var(--pad);
+}
+.recording-bar {
+  padding: var(--pad) var(--pad) 4px;
+}
+:is(
+    fieldset,
+    .source-foot,
+    .table-note,
+    .channel-toolbar,
+    .filter-note,
+    .preset-feedback,
+    .monitor-grid,
+    .monitor-selection,
+    .audio-controls,
+    .message-toolbar,
+    .message-channel-bar,
+    .recording-hint,
+    .recording-controls,
+    .recording-info,
+    .operation-times,
+    .operation-note,
+    .operation-footnote,
+    .recordings-body,
+    .iq-capture,
+    .decoder-options,
+    .frequency-heading,
+    .hint
+  ) {
+  padding-inline: var(--pad);
+}
+.preset-settings {
+  margin-inline: var(--pad);
+}
+/* Phone-width tables lay each row out as a block of its own. */
+#channels-table tbody tr,
+.operation-table tbody tr {
+  padding-inline: var(--pad);
+}
+.operation-table th:first-child {
+  padding-inline-start: var(--pad);
+}
+.operation-table :is(th, td):last-child {
+  padding-inline-end: var(--pad);
+}
+/* The compact view's front panel: band, frequency, keys and figures. */
+.band {
+  padding: var(--pad) var(--pad) 0;
+}
+.band .band-map {
+  margin: 0;
+}
+.band-scale {
+  padding-inline: 0;
+}
+.quick-now {
+  padding: 6px var(--pad) var(--pad);
+}
+.quick-controls {
+  padding: 8px var(--pad);
+}
+.quick-scope {
+  padding: var(--pad);
+}
+.live-calls,
+.live-panel .empty,
+.live-block > p {
+  padding: 0;
+}
+
+/* Keys and fields: one height (the start/stop row is a size larger). */
+button {
+  min-height: var(--control-height);
+}
+.mode-switch button,
+.mode-switch button + button {
+  min-height: var(--control-height);
+}
+input:not([type="checkbox"], [type="range"]),
+select {
+  height: var(--control-height);
+  min-height: var(--control-height);
+}
+/* Frequency correction is a field like the others above it. */
+.ppm-field {
+  display: block;
+}
+.ppm-field input {
+  display: block;
+  width: 100%;
+  max-width: 24rem;
+  margin-block-start: 6px;
+}
+/* The band summary, stacked at phone width: the range on one line and the
+   map across the pane, as in the compact view. */
+.band-range small {
+  display: inline;
+}
+@media (max-width: 78rem) {
+  .overview-intro {
+    align-self: stretch;
+  }
+  .overview-intro .band-map {
+    width: auto;
+  }
+}
+/* A panel's one-line summary under its title starts at the contents' inset,
+   as the receive settings' does. */
+.panel-summary-meta {
+  margin-inline-start: 0;
+}
+
+/* Shared error presentation for global, form, recording and diagnostic
+   errors: one box, at the panes' inset, the message on its first line. */
+:is(.error, .field-error):not([hidden]):not(:empty) {
+  box-sizing: border-box;
+  padding: var(--pad);
+  border: 1px solid var(--danger);
+  border-inline-start-width: 4px;
+  border-radius: 8px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--text-caption);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+:is(.error, .field-error):not([hidden]):not(:empty)::before {
+  content: "⚠ ";
+}
+:is(.error, .field-error)[hidden] {
+  display: none !important;
+}
+/* In the version dialog the IQ capture lines up with the dialog's text. */
+#about-dialog .iq-capture {
+  padding-inline: 0;
 }

@@ -10,18 +10,15 @@ use crate::{native_audio::NativeMonitor, Receiver};
 /// received channels, or `{"state": "stopped"}` without a session.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn state_json(receiver: &Receiver, monitor: &NativeMonitor) -> String {
-    let Ok(guard) = receiver.0.lock() else {
-        return r#"{"state":"stopped"}"#.into();
-    };
-    let Some(session) = guard.as_ref() else {
+    let Some(session) = receiver.current() else {
         return r#"{"state":"stopped"}"#.into();
     };
     // The channel the native player plays (the page's choice, or the
-    // automatic one), as the page would show it.
+    // automatic one), as the page would show it. Status only: the monitor
+    // audio is left to the player.
     let settings = monitor.settings();
-    let (status, _) =
-        session.snapshot_with_options(settings.selected.as_deref(), settings.automatic, false);
-    drop(guard);
+    let status = session.status(settings.selected.as_deref(), settings.automatic);
+    drop(session);
     let channels: serde_json::Map<String, serde_json::Value> = status
         .channels
         .iter()
@@ -66,14 +63,18 @@ fn stop() {
     let Some((receiver, _)) = SOURCES.get() else {
         return;
     };
-    let Ok(mut guard) = receiver.0.lock() else {
+    let Some(session) = receiver.current() else {
         return;
     };
-    if let Some(session) = guard.as_mut() {
-        receiver_core::diag::note("通知から受信を停止しました");
+    receiver_core::diag::note("通知から受信を停止しました");
+    // Called on Android's main thread: signal the stop at once, then join the
+    // workers and finalize the recording on a thread of its own, so the
+    // notification never freezes the app (ANR) while files are closed.
+    session.request_stop();
+    std::thread::spawn(move || {
         session.stop();
         session.stop_recording();
-    }
+    });
 }
 
 /// JNI entry point for io.jrradio.receiver.NativeBand (Kotlin).
@@ -86,6 +87,23 @@ mod jni_entry {
         _class: JClass<'local>,
     ) {
         super::stop();
+    }
+    /// The phone overheats (Android thermal status severe or worse): every
+    /// channel runs its primary detector only, about a third of the CPU.
+    #[no_mangle]
+    pub extern "system" fn Java_io_jrradio_receiver_NativeBand_setPowerSaving<'local>(
+        _env: JNIEnv<'local>,
+        _class: JClass<'local>,
+        on: jni::sys::jboolean,
+    ) {
+        use receiver_core::dsp_tuning::{set_alternate, Alternate};
+        let on = on != 0;
+        set_alternate(if on { Alternate::Off } else { Alternate::Gated });
+        receiver_core::diag::note(if on {
+            "端末が高温のため、第 2 検出器を止めて処理を軽くします"
+        } else {
+            "端末の温度が戻ったため、第 2 検出器を再開します"
+        });
     }
     #[no_mangle]
     pub extern "system" fn Java_io_jrradio_receiver_NativeBand_state<'local>(

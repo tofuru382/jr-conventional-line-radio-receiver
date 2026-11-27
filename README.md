@@ -106,17 +106,21 @@ The decoder supports the verified `0x22 / C9` common-channel form: an 11-byte pr
 
 ### RTL-TCP
 
-RTL-TCP accepts IPv4 or IPv6 addresses and requested rates of 225001–300000 or 900001–3200000 S/s.
-An empty gain field selects automatic gain: the app starts at the tuner's highest gain and steps it down while the 8-bit ADC clips. It never steps back up. rtl_tcp's own tuner AGC is not used, because it clips the wideband input and loses frame sync. A number sets manual gain. The ppm correction must be an integer.
+RTL-TCP accepts IPv4 or IPv6 addresses (scoped ones such as `fe80::1%wlan0` too) or host names such as `raspberrypi.local`. “接続テスト” (Test connection) checks the server and its tuner without starting reception. Requested rates are 225001–300000 or 900001–3200000 S/s.
+An empty gain field selects automatic gain: the app starts at the tuner's highest gain, steps it down while the 8-bit ADC clips, and raises it again gradually after a long stretch with headroom. rtl_tcp's own tuner AGC is not used, because it clips the wideband input and loses frame sync. A number sets manual gain. The ppm correction must be an integer.
+With “自動ゲインの方式” (automatic gain method) set to “雑音の量から最適化” (optimise by the noise floor), the gain is chosen from the noise (RTL-TCP with an R820T / R828D, and the built-in USB driver). When reception starts, the app spends about 15 seconds stepping through 11 gains and measures the noise floor in bins without JR channels. It then picks the lowest gain at which the tuner's noise stands 8 dB above the ADC's, avoiding gains where the floor rises faster than the gain (intermodulation from strong stations) or where samples clip. Afterwards clipping lowers the gain at once, and the choice is redone, only while no call is active, when the floor has moved for over 30 seconds and every 30 minutes. Each gain change is a write to a streaming dongle, so they stay this rare. The chosen gain and the reason are shown under the settings. “飽和しない最大（従来）” is the automatic gain described above.
+Gain, ppm correction, bias tee and the automatic gain method can be changed while receiving and take effect without a restart. Turn the bias tee (power for an antenna or LNA over the coax) on only for equipment built for it; with a dongle on a phone, the phone supplies that current as well.
 RTL-TCP is an extra Rust TCP input alongside SoapySDR, not a replacement.
 The protocol does not report server-side IQ loss or rejected settings. “処理欠落” (Dropped blocks) counts drops in the app's own worker queues only;
-it does not prove the server delivered every sample.
+it does not prove the server delivered every sample. When fewer samples arrive than requested for a while, an estimated loss (“推定欠落”) is shown.
+
+rtl_tcp traffic is neither encrypted nor authenticated (about 3.8 Mbit/s at 240 kS/s, 16 Mbit/s at 1.024 MS/s). Outside your own LAN, do not expose the port to the internet: use SSH port forwarding (for example `ssh -N -L 1234:localhost:1234 pi@raspberrypi.local`, then connect to `127.0.0.1`, port `1234`) or a VPN such as WireGuard or Tailscale.
 
 ## Persistent settings
 
 The desktop app saves changes automatically and restores them at the next launch:
 
-- Input, receive profile, center frequency, sample rate, and gain.
+- Input, receive profile, center frequency, sample rate, gain, and the automatic gain method.
 - External preset file path, if any.
 - RTL-TCP address, port, and ppm correction.
 - SoapySDR device arguments, RX channel, and antenna; IQ WAV file path.
@@ -124,6 +128,7 @@ The desktop app saves changes automatically and restores them at the next launch
 
 Saved center frequencies and rates are not replaced by profile defaults at startup, and deliberately empty fields stay empty.
 Startup restores settings only; reception starts when you press start. If saving was on, it resumes once reception is ready.
+On Android, with “Android に止められた後にアプリを開いたら、自動で受信を再開する” (resume after Android stopped the app) checked in the receive settings, opening the app after Android stopped it while receiving starts reception again; nothing is shown about the stop.
 Closing the window waits for pending writes, including recent edits.
 
 Settings are stored as versioned JSON in `settings.json` in Tauri's app config directory. Source files and presets are never modified.
@@ -201,6 +206,14 @@ A data-message row's frame position is the frame that emitted the message.
 Rows keep processing order within a channel; order across channels may not follow reception time.
 `session.json` lists enabled formats in `outputs`; `result.json` records frame and message counts and any error.
 A write failure or queue overflow stops the whole session, leaves `INCOMPLETE`, and shows an error.
+
+On Android, “録音を聞く” plays saved recordings inside the app; live audio keeps playing meanwhile and “listen” stays as it is.
+
+### IQ capture (diagnosis)
+
+“IQ を保存” in the version-information dialog (“バージョン情報”) saves 10 or 30 seconds of the raw band (IQ, all channels) while receiving, for tuning the decoder or investigating problems.
+Captures go to an `IQ` folder inside the recordings folder, named like `iq-20261123T061112Z-352603125Hz-240000.wav` (UTC time, centre frequency, sample rate). They are PCM16 stereo (I left, Q right): about 9.6 MB per 10 s at 240 kS/s, about 96 MB at 2.4 MS/s.
+A thread of its own writes them; if storage falls behind, the capture stops early without stopping reception (what was written replays). Saved captures are listed in the same dialog, with where they were saved. On desktop, “この IQ で受信” (receive this IQ) sets the input kind and centre frequency to that file. The Android version has no IQ WAV input: its captures are for sending on for analysis. A capture contains every call in the band.
 
 ## IQ playback and CLI
 

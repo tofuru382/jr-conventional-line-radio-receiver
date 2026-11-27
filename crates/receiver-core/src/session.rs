@@ -4,7 +4,7 @@ use crate::{
     monitor::{Activity, Monitor},
     pipeline::{validate_channels, Audio, ChannelConfig, Pipeline, Status},
     recording::{OutputOptions, Recorder, RecordingStatus},
-    source::{RadioConfig, Read},
+    source::{Control, RadioConfig, Read},
     wave::IqWave,
     Complex32,
 };
@@ -32,6 +32,10 @@ pub enum Input {
     Wave {
         path: String,
         center_hz: f64,
+        /// Decode as fast as the CPU allows instead of in real time (for
+        /// analysing recordings; there is no live audio then).
+        #[serde(default)]
+        fast: bool,
     },
     /// Built-in USB driver (Android). Present in every build so settings
     /// round-trip; opening it needs the `usb` feature.
@@ -50,6 +54,10 @@ pub struct UsbRadio {
     pub gain_db: Option<f64>,
     #[serde(default)]
     pub ppm: i32,
+    #[serde(default)]
+    pub bias_tee: bool,
+    #[serde(default)]
+    pub gain_optimize: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -62,6 +70,10 @@ pub struct ChannelStatus {
     pub status: Status,
     pub dropped_blocks: u64,
     pub audio_drops: u64,
+    /// Times this channel's processing failed and was restarted on its own;
+    /// the other channels kept receiving.
+    #[serde(default)]
+    pub restarts: u64,
     pub error: Option<String>,
 }
 struct Channel {
@@ -71,6 +83,19 @@ struct Channel {
     monitored: bool,
 }
 impl Channel {
+    /// A copy of this channel's status; the message history and constellation
+    /// only for the monitored channel (the others' would be discarded).
+    fn status_copy(&mut self, monitored: bool) -> ChannelStatus {
+        if monitored {
+            return self.status.clone();
+        }
+        let messages = std::mem::take(&mut self.status.status.messages);
+        let constellation = std::mem::take(&mut self.status.status.constellation);
+        let copy = self.status.clone();
+        self.status.status.messages = messages;
+        self.status.status.constellation = constellation;
+        copy
+    }
     /// Hands the monitored channel's PCM to the single audio consumer and
     /// keeps the other queues fresh.
     fn route_audio(&mut self, monitored: bool, audio: &mut Vec<Audio>) {
@@ -94,6 +119,33 @@ impl Channel {
         }
     }
 }
+/// File name for a diagnostic IQ capture started now: sortable UTC time,
+/// then the centre frequency and sample rate the IQ WAV input needs.
+pub fn iq_capture_file_name(center_hz: f64, sample_rate: f64) -> String {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let instant = chrono::DateTime::from_timestamp(t.as_secs() as i64, 0).unwrap_or_default();
+    format!(
+        "iq-{}-{}Hz-{}.wav",
+        instant.format("%Y%m%dT%H%M%SZ"),
+        center_hz.round() as u64,
+        sample_rate.round() as u64
+    )
+}
+/// A diagnostic raw IQ capture ([`Session::capture_iq`]).
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct IqCapture {
+    /// "saving", "saved" or "failed".
+    pub state: &'static str,
+    pub path: String,
+    /// Why it failed or ended early.
+    pub message: Option<String>,
+    /// Requested and written length.
+    pub seconds: f64,
+    pub written_seconds: f64,
+    pub bytes: u64,
+}
 #[derive(Clone, Serialize)]
 pub struct Overview {
     pub running: bool,
@@ -116,8 +168,11 @@ pub struct Overview {
     /// IQ samples per second actually arriving (over the last few seconds;
     /// 0 until measured). Should match `sample_rate` for live inputs.
     pub input_rate: f64,
-    /// Diagnostic raw IQ capture state ("保存中", the saved path, or an error).
-    pub iq_capture: Option<String>,
+    /// Diagnostic raw IQ capture (the latest one in this session).
+    pub iq_capture: Option<IqCapture>,
+    /// Automatic gain by the noise floor, when asked for.
+    #[serde(default)]
+    pub gain: Option<crate::gain::GainStatus>,
     /// What the input reports about the receiver (built-in driver: tuner and
     /// RTL-SDR Blog V4 handling).
     pub source_info: Option<String>,
@@ -125,6 +180,16 @@ pub struct Overview {
     /// the synchronised channels show a common carrier error).
     #[serde(default)]
     pub frequency_correction_hz: f64,
+    /// The same correction as a tuner frequency correction (ppm) to add to
+    /// the configured one, so the next session starts on frequency.
+    #[serde(default)]
+    pub frequency_correction_ppm: f64,
+    /// Blocks with non-finite samples, dropped as discontinuities.
+    #[serde(default)]
+    pub invalid_blocks: u64,
+    /// Why the last tuning change while receiving could not be applied.
+    #[serde(default)]
+    pub control_error: Option<String>,
 }
 struct Shared {
     state: String,
@@ -135,17 +200,26 @@ struct Shared {
     progress: f64,
     reconnection: (bool, u32, u64),
     input_rate: f64,
-    /// Diagnostic raw IQ capture: requested file and sample count.
+    /// Diagnostic raw IQ capture: requested file and sample count, and the
+    /// latest capture's state.
     iq_request: Option<(std::path::PathBuf, u64)>,
-    iq_status: Option<String>,
+    iq: Option<IqCapture>,
+    gain: Option<crate::gain::GainStatus>,
     source_info: Option<String>,
     frequency_correction: f64,
+    invalid_blocks: u64,
+    /// Tuning change waiting for the acquisition thread, and the outcome of
+    /// the last one.
+    control: Option<Control>,
+    control_error: Option<String>,
 }
 pub struct Session {
     stop: Arc<AtomicBool>,
     shared: Arc<Mutex<Shared>>,
     channels: Vec<Arc<Mutex<Channel>>>,
-    thread: Option<JoinHandle<()>>,
+    // Behind a mutex so that `stop` takes `&self`: callers can stop a shared
+    // session without holding the lock that publishes it.
+    thread: Mutex<Option<JoinHandle<()>>>,
     recorder: Arc<Recorder>,
     monitor: Arc<Mutex<Monitor>>,
 }
@@ -153,6 +227,7 @@ struct Block {
     sequence: u64,
     start_sample: u64,
     iq: Arc<[Complex32]>,
+    info: crate::pipeline::BlockInfo,
 }
 enum Source {
     Wave(IqWave),
@@ -160,11 +235,23 @@ enum Source {
     #[cfg(feature = "usb")]
     Usb(Box<crate::usb::Usb>),
     #[cfg(feature = "soapy")]
-    Sdr(crate::source::Sdr),
+    Sdr(crate::source::Reconnecting),
     #[cfg(test)]
     Gated {
         source: Box<Source>,
         permits: mpsc::Receiver<()>,
+    },
+    /// Silence forever, paced at about real time (block count so far).
+    #[cfg(test)]
+    Endless(u64),
+    /// An R820T-like receiver for the gain optimizer: white noise from the
+    /// ADC (-60 dB) plus the tuner's (-90 dB + gain), as fast as it can;
+    /// records every gain set (None: back to automatic).
+    #[cfg(test)]
+    GainModel {
+        gain: f64,
+        seed: u64,
+        applied: Arc<Mutex<Vec<Option<f64>>>>,
     },
 }
 impl Source {
@@ -202,7 +289,9 @@ impl Source {
                     Err("USB 直結はこのビルドでは使えません".into())
                 }
             }
-            Input::Wave { path, center_hz } => {
+            Input::Wave {
+                path, center_hz, ..
+            } => {
                 let w = IqWave::open(path).map_err(|e| e.to_string())?;
                 let rate = w.sample_rate;
                 Ok((Self::Wave(w), rate, *center_hz))
@@ -210,7 +299,7 @@ impl Source {
             Input::Sdr { radio } => {
                 #[cfg(feature = "soapy")]
                 {
-                    let s = crate::source::Sdr::open(radio)?;
+                    let s = crate::source::Reconnecting::open(radio)?;
                     let (rate, center) = (s.sample_rate, s.center_hz);
                     Ok((Self::Sdr(s), rate, center))
                 }
@@ -232,12 +321,49 @@ impl Source {
             _ => None,
         }
     }
+    /// Applies a tuning change while receiving.
+    fn apply(&mut self, control: &Control) -> Result<(), String> {
+        match self {
+            Self::RtlTcp(s) => s.apply(control),
+            #[cfg(feature = "usb")]
+            Self::Usb(s) => s.apply(control),
+            #[cfg(feature = "soapy")]
+            Self::Sdr(s) => s.apply(control),
+            #[cfg(test)]
+            Self::Gated { source, .. } => source.apply(control),
+            #[cfg(test)]
+            Self::GainModel { gain, applied, .. } => {
+                if let Some(g) = control.gain_db {
+                    *gain = g.unwrap_or(49.6);
+                    crate::lock(applied).push(g);
+                }
+                Ok(())
+            }
+            _ => Err("IQ WAV の再生中はゲインと周波数補正を変更できません".into()),
+        }
+    }
+    /// The tuner's gain table (0.1 dB steps) for the gain optimizer, when
+    /// the input uses librtlsdr's R820T/R828D one.
+    fn gain_table(&self) -> Option<&'static [u16]> {
+        match self {
+            Self::RtlTcp(s) => s.gain_table(),
+            #[cfg(feature = "usb")]
+            Self::Usb(_) => Some(&crate::rtl_tcp::GAINS_TENTH_DB[..]),
+            #[cfg(test)]
+            Self::Gated { source, .. } => source.gain_table(),
+            #[cfg(test)]
+            Self::GainModel { .. } => Some(&crate::rtl_tcp::GAINS_TENTH_DB[..]),
+            _ => None,
+        }
+    }
     /// RTL-TCP reconnection state: (reconnecting, failed attempts, reconnects).
     fn reconnection(&self) -> (bool, u32, u64) {
         match self {
             Self::RtlTcp(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
             #[cfg(feature = "usb")]
             Self::Usb(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
+            #[cfg(feature = "soapy")]
+            Self::Sdr(s) => (s.reconnecting(), s.failed_attempts, s.reconnects),
             #[cfg(test)]
             Self::Gated { source, .. } => source.reconnection(),
             _ => (false, 0, 0),
@@ -253,7 +379,33 @@ impl Source {
                 Ok(if n == 0 { None } else { Some(Read::Samples(n)) })
             }
             #[cfg(feature = "soapy")]
-            Self::Sdr(s) => s.read(buf).map(Some),
+            Self::Sdr(s) => s.read(buf, stop).map(Some),
+            #[cfg(test)]
+            Self::Endless(blocks) => {
+                *blocks += 1;
+                thread::sleep(Duration::from_millis(5));
+                buf.fill(Complex32::default());
+                Ok(Some(Read::Samples(buf.len())))
+            }
+            #[cfg(test)]
+            Self::GainModel { gain, seed, .. } => {
+                let sigma = ((1e-6 + 10f64.powf((-90.0 + *gain) / 10.0)) / 2.0).sqrt();
+                let mut uniform = || {
+                    *seed ^= *seed << 13;
+                    *seed ^= *seed >> 7;
+                    *seed ^= *seed << 17;
+                    (*seed >> 11) as f64 / (1u64 << 53) as f64
+                };
+                for v in buf.iter_mut() {
+                    let r = (-2.0 * uniform().max(1e-300).ln()).sqrt() * sigma;
+                    let a = 2.0 * std::f64::consts::PI * uniform();
+                    *v = Complex32 {
+                        real: (r * a.cos()) as f32,
+                        imaginary: (r * a.sin()) as f32,
+                    };
+                }
+                Ok(Some(Read::Samples(buf.len())))
+            }
             #[cfg(test)]
             Self::Gated { source, permits } => {
                 match permits.recv_timeout(Duration::from_millis(20)) {
@@ -291,9 +443,13 @@ impl Session {
             reconnection: (false, 0, 0),
             input_rate: 0.0,
             iq_request: None,
-            iq_status: None,
+            iq: None,
+            gain: None,
             source_info: None,
             frequency_correction: 0.0,
+            invalid_blocks: 0,
+            control: None,
+            control_error: None,
         }));
         let channels: Vec<_> = config
             .channels
@@ -308,6 +464,7 @@ impl Session {
                         },
                         dropped_blocks: 0,
                         audio_drops: 0,
+                        restarts: 0,
                         error: None,
                     },
                     audio: VecDeque::new(),
@@ -337,10 +494,10 @@ impl Session {
                         open_source,
                     )
                 }));
-                let mut s = state.lock().unwrap();
+                let mut s = crate::lock(&state);
                 // Serialize automatic finalization with starting a recording.
                 // Workers have already flushed their last synthesized audio.
-                call_monitor.lock().unwrap().finish();
+                crate::lock(&call_monitor).finish();
                 recording.stop();
                 match result {
                     Ok(Ok(())) => {
@@ -355,7 +512,7 @@ impl Session {
                         if cancel.load(Ordering::Relaxed)
                             && workers
                                 .iter()
-                                .all(|c| c.lock().unwrap().status.error.is_none()) =>
+                                .all(|c| crate::lock(c).status.error.is_none()) =>
                     {
                         s.state = "stopped".into();
                     }
@@ -381,7 +538,7 @@ impl Session {
             stop,
             shared,
             channels,
-            thread: Some(handle),
+            thread: Mutex::new(Some(handle)),
             recorder,
             monitor,
         })
@@ -404,8 +561,8 @@ impl Session {
         automatic: bool,
         take_audio: bool,
     ) -> (Overview, Vec<Audio>) {
-        let s = self.shared.lock().unwrap();
-        let (preferred, active_calls) = self.monitor.lock().unwrap().snapshot();
+        let s = crate::lock(&self.shared);
+        let (preferred, active_calls) = crate::lock(&self.monitor).snapshot();
         let selected = if automatic {
             preferred.as_deref().or(selected)
         } else {
@@ -416,17 +573,12 @@ impl Session {
             .channels
             .iter()
             .map(|c| {
-                let mut c = c.lock().unwrap();
-                let mut status = c.status.clone();
-                let monitored = selected == Some(status.config.id.as_str());
+                let mut c = crate::lock(c);
+                let monitored = selected == Some(c.status.config.id.as_str());
                 if take_audio {
                     c.route_audio(monitored, &mut audio);
                 }
-                if !monitored {
-                    status.status.messages.clear();
-                    status.status.constellation.clear();
-                }
-                status
+                c.status_copy(monitored)
             })
             .collect();
         (
@@ -446,33 +598,85 @@ impl Session {
                 reconnect_failures: s.reconnection.1,
                 reconnects: s.reconnection.2,
                 input_rate: s.input_rate,
-                iq_capture: s.iq_status.clone(),
+                iq_capture: s.iq.clone(),
+                gain: s.gain.clone(),
                 source_info: s.source_info.clone(),
                 frequency_correction_hz: s.frequency_correction,
+                frequency_correction_ppm: if s.center > 0.0 {
+                    -s.frequency_correction / s.center * 1e6
+                } else {
+                    0.0
+                },
+                invalid_blocks: s.invalid_blocks,
+                control_error: s.control_error.clone(),
             },
             audio,
+        )
+    }
+    /// Changes gain, frequency correction or bias tee while receiving. The
+    /// acquisition thread applies it between two reads (within 100 ms) and
+    /// keeps it for reconnections; a failure is reported in the status.
+    pub fn set_control(&self, control: Control) -> Result<(), String> {
+        control.validate()?;
+        let mut s = crate::lock(&self.shared);
+        if !matches!(s.state.as_str(), "starting" | "receiving") {
+            return Err("受信中に変更してください。".into());
+        }
+        match s.control.as_mut() {
+            Some(pending) => pending.merge(control),
+            None => s.control = Some(control),
+        }
+        s.control_error = None;
+        Ok(())
+    }
+    /// Status of every channel without touching the monitor audio: safe to
+    /// call from any number of observers (UI, notification, tools).
+    pub fn status(&self, selected: Option<&str>, automatic: bool) -> Overview {
+        self.snapshot_with_options(selected, automatic, false).0
+    }
+    /// Whether the session is connecting or receiving (cheap; no copies).
+    pub fn is_running(&self) -> bool {
+        matches!(
+            crate::lock(&self.shared).state.as_str(),
+            "starting" | "receiving"
         )
     }
     /// Audio-only counterpart of [`Self::snapshot_with_monitor`] for a native
     /// player: the same channel choice, without cloning any channel status.
     pub fn take_monitor_audio(&self, selected: Option<&str>, automatic: bool) -> Vec<Audio> {
-        let (preferred, _) = self.monitor.lock().unwrap().snapshot();
+        self.take_monitor_audio_chosen(selected, automatic).1
+    }
+    /// [`Self::take_monitor_audio`] with the channel it was taken for (the
+    /// automatic choice when `automatic`), so a pushed stream can tell the
+    /// page which channel it carries.
+    pub fn take_monitor_audio_chosen(
+        &self,
+        selected: Option<&str>,
+        automatic: bool,
+    ) -> (Option<String>, Vec<Audio>) {
+        let (preferred, _) = crate::lock(&self.monitor).snapshot();
         let selected = if automatic {
             preferred.as_deref().or(selected)
         } else {
             selected
         };
+        let chosen = selected.map(String::from);
         let mut audio = Vec::new();
         for c in &self.channels {
-            let mut c = c.lock().unwrap();
+            let mut c = crate::lock(c);
             let monitored = selected == Some(c.status.config.id.as_str());
             c.route_audio(monitored, &mut audio);
         }
-        audio
+        (chosen, audio)
     }
-    pub fn stop(&mut self) {
+    /// Ask the session to stop without waiting (see [`Self::stop`]).
+    pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.thread.take() {
+    }
+    pub fn stop(&self) {
+        self.request_stop();
+        let handle = crate::lock(&self.thread).take();
+        if let Some(h) = handle {
             let _ = h.join();
         }
     }
@@ -484,14 +688,14 @@ impl Session {
         directory: &std::path::Path,
         options: OutputOptions,
     ) -> Result<RecordingStatus, String> {
-        let s = self.shared.lock().unwrap();
+        let s = crate::lock(&self.shared);
         if s.state != "receiving" || self.stop.load(Ordering::Relaxed) {
             return Err("受信を開始し、接続が完了してから録音してください。".into());
         }
         let configs: Vec<_> = self
             .channels
             .iter()
-            .map(|c| c.lock().unwrap().status.config.clone())
+            .map(|c| crate::lock(c).status.config.clone())
             .collect();
         self.recorder
             .start_with_options(directory, &configs, options)
@@ -499,32 +703,55 @@ impl Session {
     pub fn stop_recording(&self) -> RecordingStatus {
         self.recorder.stop()
     }
-    /// Saves the next `seconds` of raw IQ (16-bit stereo WAV, I left / Q
-    /// right) for diagnosis; the IQ WAV input can replay it.
+    /// Saves the next `seconds` (1-60) of raw IQ (16-bit stereo WAV, I left
+    /// / Q right) for diagnosis; the IQ WAV input can replay it. Progress
+    /// and the outcome are in [`Overview::iq_capture`].
     pub fn capture_iq(&self, path: std::path::PathBuf, seconds: f64) -> Result<(), String> {
-        let mut s = self.shared.lock().unwrap();
+        let mut s = crate::lock(&self.shared);
         if s.state != "receiving" {
             return Err("受信中に保存してください。".into());
         }
-        if s.iq_request.is_some() || s.iq_status.as_deref() == Some("保存中") {
+        if s.iq_request.is_some() || s.iq.as_ref().is_some_and(|c| c.state == "saving") {
             return Err("IQ を保存中です。".into());
         }
-        let samples = (s.rate * seconds.clamp(1.0, 60.0)).round() as u64;
+        let seconds = if seconds.is_finite() {
+            seconds.clamp(1.0, 60.0)
+        } else {
+            10.0
+        };
+        let samples = (s.rate * seconds).round() as u64;
+        s.iq = Some(IqCapture {
+            state: "saving",
+            path: path.to_string_lossy().into_owned(),
+            message: None,
+            seconds,
+            written_seconds: 0.0,
+            bytes: 0,
+        });
         s.iq_request = Some((path, samples));
-        s.iq_status = Some("保存中".into());
         Ok(())
     }
 }
 
-/// Raw IQ to a 16-bit stereo WAV (I left, Q right), header sized on finish.
+/// Raw IQ to a 16-bit stereo WAV (I left, Q right). A thread of its own
+/// writes the file, so slow storage cannot hold up reception: if it falls
+/// more than [`IQ_QUEUE`] blocks behind, the capture stops there. The thread
+/// sizes the header and reports the outcome in the session's status.
 struct IqWriter {
-    file: std::io::BufWriter<std::fs::File>,
-    path: std::path::PathBuf,
+    tx: Option<mpsc::SyncSender<Vec<u8>>>,
     remaining: u64,
     written: u64,
+    rate: f64,
 }
+/// Blocks (40 ms each) the file writer may fall behind.
+const IQ_QUEUE: usize = 64;
 impl IqWriter {
-    fn create(path: std::path::PathBuf, samples: u64, rate: f64) -> std::io::Result<Self> {
+    fn create(
+        path: std::path::PathBuf,
+        samples: u64,
+        rate: f64,
+        shared: Arc<Mutex<Shared>>,
+    ) -> std::io::Result<Self> {
         use std::io::Write;
         let mut file = std::io::BufWriter::new(
             std::fs::OpenOptions::new()
@@ -532,26 +759,67 @@ impl IqWriter {
                 .create_new(true)
                 .open(&path)?,
         );
-        let rate = rate.round() as u32;
+        let sample_rate = rate.round() as u32;
         file.write_all(b"RIFF\0\0\0\0WAVEfmt ")?;
         file.write_all(&16u32.to_le_bytes())?;
         file.write_all(&1u16.to_le_bytes())?; // PCM
         file.write_all(&2u16.to_le_bytes())?; // I, Q
-        file.write_all(&rate.to_le_bytes())?;
-        file.write_all(&(rate * 4).to_le_bytes())?;
+        file.write_all(&sample_rate.to_le_bytes())?;
+        file.write_all(&(sample_rate * 4).to_le_bytes())?;
         file.write_all(&4u16.to_le_bytes())?;
         file.write_all(&16u16.to_le_bytes())?;
         file.write_all(b"data\0\0\0\0")?;
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(IQ_QUEUE);
+        std::thread::Builder::new()
+            .name("iq-capture".into())
+            .spawn(move || {
+                let mut data = 0u64;
+                let mut result = (|| -> std::io::Result<()> {
+                    for bytes in rx {
+                        file.write_all(&bytes)?;
+                        data += bytes.len() as u64;
+                    }
+                    Ok(())
+                })();
+                // The header always matches what was written, so even a
+                // capture cut short replays.
+                result = result.and_then(|_| {
+                    use std::io::{Seek, SeekFrom};
+                    let size = u32::try_from(data).unwrap_or(u32::MAX);
+                    file.seek(SeekFrom::Start(4))?;
+                    file.write_all(&size.saturating_add(36).to_le_bytes())?;
+                    file.seek(SeekFrom::Start(40))?;
+                    file.write_all(&size.to_le_bytes())?;
+                    file.flush()?;
+                    file.get_ref().sync_all()
+                });
+                let mut s = crate::lock(&shared);
+                if let Some(c) = s.iq.as_mut().filter(|c| c.state == "saving") {
+                    c.bytes = data + 44;
+                    c.written_seconds = data as f64 / 4.0 / rate;
+                    match result {
+                        Ok(()) => c.state = "saved",
+                        Err(e) => {
+                            c.state = "failed";
+                            c.message = Some(format!("IQ を保存できません：{e}"));
+                        }
+                    }
+                    if c.state == "saved" && c.written_seconds + 0.05 < c.seconds {
+                        c.message
+                            .get_or_insert_with(|| "受信が止まったため途中までになりました".into());
+                    }
+                }
+            })?;
         Ok(Self {
-            file,
-            path,
+            tx: Some(tx),
             remaining: samples,
             written: 0,
+            rate,
         })
     }
-    /// Returns true when the requested length has been written.
-    fn write(&mut self, iq: &[Complex32]) -> std::io::Result<bool> {
-        use std::io::Write;
+    /// Queues `iq`; returns true when the requested length has been queued,
+    /// or the reason the capture stopped.
+    fn write(&mut self, iq: &[Complex32]) -> Result<bool, String> {
         let n = (iq.len() as u64).min(self.remaining) as usize;
         let mut bytes = Vec::with_capacity(n * 4);
         for s in &iq[..n] {
@@ -560,27 +828,43 @@ impl IqWriter {
                 bytes.extend_from_slice(&x.to_le_bytes());
             }
         }
-        self.file.write_all(&bytes)?;
+        let tx = self.tx.as_ref().ok_or("IQ の保存は終わっています")?;
+        match tx.try_send(bytes) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                self.tx = None;
+                return Err("保存先への書き込みが追いつかないため途中で止めました".into());
+            }
+            // The writer stopped on an error it reports itself.
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                self.tx = None;
+                return Err(String::new());
+            }
+        }
         self.remaining -= n as u64;
         self.written += n as u64;
         Ok(self.remaining == 0)
     }
-    fn finish(mut self) -> std::io::Result<std::path::PathBuf> {
-        use std::io::{Seek, SeekFrom, Write};
-        let data = (self.written * 4) as u32;
-        self.file.seek(SeekFrom::Start(4))?;
-        self.file.write_all(&(36 + data).to_le_bytes())?;
-        self.file.seek(SeekFrom::Start(40))?;
-        self.file.write_all(&data.to_le_bytes())?;
-        self.file.flush()?;
-        self.file.get_ref().sync_all()?;
-        Ok(self.path)
+    fn written_seconds(&self) -> f64 {
+        self.written as f64 / self.rate
     }
 }
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.stop();
     }
+}
+/// Clipped I/Q components (at full scale: the dongles' 8-bit codes 0 and 255
+/// convert to exactly ∓1) and the largest component, for the gain optimizer.
+fn clipping(samples: &[Complex32]) -> (u64, f32) {
+    let (mut clipped, mut peak) = (0u64, 0f32);
+    for s in samples {
+        let (re, im) = (s.real.abs(), s.imaginary.abs());
+        clipped += u64::from(re >= 0.999) + u64::from(im >= 0.999);
+        peak = peak.max(re).max(im);
+    }
+    (clipped, peak.min(1.0))
 }
 /// IQ samples per block handed to the channel workers (40 ms).
 fn block_samples(rate: f64) -> usize {
@@ -636,142 +920,76 @@ fn run(
     ));
     let (mut source, rate, center) =
         open_source(&config.input, stop).inspect_err(|e| crate::diag::note(e.clone()))?;
-    shared.lock().unwrap().source_info = source.info();
+    crate::lock(shared).source_info = source.info();
     validate_channels(&config.channels, rate, center)?;
     let total = source.samples();
     // Construct every pipeline before starting threads: no partial receiver on invalid input.
     let queue_capacity = queue_capacity(&config.input);
+    // One polyphase filter bank splits the input for every channel, which
+    // then works at about 24 kS/s; without it (or below 96 kS/s) each
+    // channel mixes and filters the whole input itself.
+    let mut channelizer = crate::tuning::on(crate::tuning::CHANNELIZER)
+        .then(|| jr_conventional_dsp::channelizer::Channelizer::new(rate))
+        .flatten();
+    // Each pipeline's input rate and centre, and its channelizer bin.
+    let mut placements = Vec::new();
     let pipelines = config
         .channels
         .into_iter()
-        .map(|c| Pipeline::new(c, rate, center))
+        .map(|c| {
+            let placement = match channelizer.as_mut() {
+                Some(bank) => {
+                    let p = bank.place(c.frequency_hz - center);
+                    (p.rate, c.frequency_hz - p.residual_hz, Some(p.bin))
+                }
+                None => (rate, center, None),
+            };
+            placements.push(placement);
+            Pipeline::new(c, placement.0, placement.1)
+        })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut bands: Vec<(usize, Vec<Complex32>)> = Vec::new();
     let mut senders = Vec::new();
     let mut handles = Vec::new();
     // Automatic frequency correction (f64 bits, Hz), set by this thread from
     // the synchronised channels and applied by every worker.
     let tuning = Arc::new(AtomicU64::new(0f64.to_bits()));
-    for (channel_index, (mut pipe, ch)) in pipelines
+    for (channel_index, (pipe, ch)) in pipelines
         .into_iter()
         .zip(channels.iter().cloned())
         .enumerate()
     {
         let (tx, rx) = mpsc::sync_channel::<Block>(queue_capacity);
-        let cancel = stop.clone();
-        let recording = recorder.clone();
-        let monitor = monitor.clone();
-        let tuning = tuning.clone();
-        let h = thread::spawn(move || {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
-                    let mut expected = 0;
-                    let mut segment_start = 0;
-                    let mut audio_origin_us = 0;
-                    let channel_id = pipe.config.id.clone();
-                    let mut last = Instant::now();
-                    let mut tuned = 0.0;
-                    loop {
-                        if cancel.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let block = match rx.recv_timeout(Duration::from_millis(100)) {
-                            Ok(b) => b,
-                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                            Err(_) => break,
-                        };
-                        let to_us = |samples: u64| (samples as f64 / rate * 1_000_000.0) as u64;
-                        let mut activity = Vec::new();
-                        if block.sequence != expected {
-                            pipe.discontinuity()?;
-                            segment_start = block.start_sample;
-                            activity.push(Activity::Reset(to_us(segment_start)));
-                            ch.lock().unwrap().audio.clear();
-                        }
-                        expected = block.sequence + 1;
-                        let correction = f64::from_bits(tuning.load(Ordering::Relaxed));
-                        if correction != tuned {
-                            // A channel at the very edge of the IQ bandwidth
-                            // stays where it is.
-                            let _ = pipe.retune(correction);
-                            tuned = correction;
-                        }
-                        let mut epoch = pipe.status.epoch;
-                        let audio = pipe.process_observed(&block.iq, |event| {
-                            let time =
-                                to_us(segment_start) + event.frame.bit_offset * 1_000_000 / 9600;
-                            audio_origin_us = time.saturating_sub(event.index as u64 * 40_000);
-                            if event.epoch != epoch {
-                                activity.push(Activity::Reset(time));
-                                epoch = event.epoch;
-                            }
-                            if event.corrected_bits.is_some() {
-                                activity.push(Activity::Voice(time));
-                            }
-                            recording.push_frame(&channel_id, event);
-                        })?;
-                        monitor.lock().unwrap().update(
-                            channel_index,
-                            to_us(block.start_sample + block.iq.len() as u64),
-                            activity,
-                        );
-                        for a in &audio {
-                            recording.push(a);
-                        }
-                        let mut c = ch.lock().unwrap();
-                        c.progress_us = to_us(block.start_sample + block.iq.len() as u64);
-                        if c.status.status.epoch != pipe.status.epoch {
-                            c.audio.clear();
-                            c.status.status.epoch = pipe.status.epoch;
-                        }
-                        for a in audio {
-                            if c.audio.len() == 125 {
-                                c.audio.pop_front();
-                                c.status.audio_drops += 1;
-                            }
-                            c.audio
-                                .push_back((audio_origin_us + a.index as u64 * 40_000, a));
-                        }
-                        if last.elapsed() >= Duration::from_millis(150) {
-                            c.status.status = pipe.snapshot();
-                            last = Instant::now();
-                        }
-                    }
-                    let tail = pipe.flush()?;
-                    for a in &tail {
-                        recording.push(a);
-                    }
-                    let mut c = ch.lock().unwrap();
-                    for a in tail {
-                        if c.audio.len() == 125 {
-                            c.audio.pop_front();
-                            c.status.audio_drops += 1;
-                        }
-                        c.audio
-                            .push_back((audio_origin_us + a.index as u64 * 40_000, a));
-                    }
-                    c.status.status = pipe.snapshot();
-                    Ok(())
-                }));
-            let error = match result {
-                Ok(Ok(())) => None,
-                Ok(Err(e)) => Some(e),
-                Err(_) => Some("Channel worker panicked; restart reception".into()),
-            };
-            if let Some(e) = error {
-                crate::diag::note(format!("チャンネルの処理が止まりました：{e}"));
-                ch.lock().unwrap().status.error = Some(e);
-                cancel.store(true, Ordering::Relaxed);
-            }
-        });
-        senders.push(tx);
+        let worker = Worker {
+            index: channel_index,
+            rate: placements[channel_index].0,
+            center: placements[channel_index].1,
+            cancel: stop.clone(),
+            recording: recorder.clone(),
+            monitor: monitor.clone(),
+            tuning: tuning.clone(),
+            channel: ch,
+        };
+        let name = format!("channel-{}", pipe.config.id);
+        let h = thread::Builder::new()
+            .name(name)
+            .spawn(move || worker.run(pipe, rx))
+            .map_err(|e| format!("チャンネルの処理を開始できません：{e}"))?;
+        senders.push(Some(tx));
         handles.push(h);
     }
     {
-        let mut s = shared.lock().unwrap();
+        let mut s = crate::lock(shared);
         s.state = "receiving".into();
         s.rate = rate;
         s.center = center;
     }
+    // A recording is decoded faster than real time only on request; live
+    // inputs never wait for a slow channel (it drops blocks instead).
+    let (paced, blocking) = match &config.input {
+        Input::Wave { fast, .. } => (!*fast, true),
+        _ => (false, false),
+    };
     let mut sequence = 0;
     let mut samples = 0u64;
     let start = Instant::now();
@@ -780,46 +998,172 @@ fn run(
     let mut afc = crate::afc::Afc::default();
     let mut afc_due = rate as u64;
     let mut buf = vec![Complex32::default(); block_samples(rate)];
+    // Automatic gain by the noise floor (crate::gain): the user's gain
+    // (None: automatic) and choice, and the optimizer once it could start.
+    let (mut user_gain, mut optimize) = match &config.input {
+        Input::RtlTcp { radio } => (radio.gain_db, radio.gain_optimize),
+        Input::Usb { radio } => (radio.gain_db, radio.gain_optimize),
+        Input::Sdr { radio } => (radio.gain_db, false),
+        Input::Wave { .. } => (None, false),
+    };
+    let channel_bins: Vec<usize> = placements.iter().filter_map(|p| p.2).collect();
+    let mut optimizer: Option<crate::gain::GainOptimizer> = None;
+    let mut optimizer_wanted = optimize && user_gain.is_none();
+    let mut idle = (Instant::now(), true);
     let result = (|| -> Result<(), String> {
         while !stop.load(Ordering::Relaxed) {
+            let control = crate::lock(shared).control.take();
+            if let Some(control) = control {
+                // Only what changed reaches the source: re-sending the same
+                // automatic gain (with a new ppm) would restart its search.
+                let gain_changed = control.gain_db.is_some_and(|g| g != user_gain);
+                let optimize_changed = control.gain_optimize.is_some_and(|o| o != optimize);
+                user_gain = control.gain_db.unwrap_or(user_gain);
+                optimize = control.gain_optimize.unwrap_or(optimize);
+                let mut change = control.clone();
+                change.gain_optimize = None;
+                if !gain_changed {
+                    change.gain_db = None;
+                }
+                if (gain_changed || optimize_changed) && optimizer.is_some() && user_gain.is_none()
+                {
+                    // From the optimizer's gains back to the source's own.
+                    change.gain_db = Some(None);
+                }
+                let outcome = if change == Control::default() {
+                    Ok(())
+                } else {
+                    source.apply(&change)
+                };
+                if let Err(e) = &outcome {
+                    crate::diag::note(format!("受信設定を変更できません：{e}"));
+                }
+                crate::lock(shared).control_error = outcome.err();
+                if gain_changed || optimize_changed {
+                    optimizer = None;
+                    if let Some(bank) = channelizer.as_mut() {
+                        bank.set_measuring(false);
+                    }
+                    crate::lock(shared).gain = None;
+                    optimizer_wanted = optimize && user_gain.is_none();
+                }
+            }
+            if optimizer_wanted {
+                optimizer_wanted = false;
+                let fft =
+                    jr_conventional_dsp::tuning::bins() == jr_conventional_dsp::tuning::Bins::Fft;
+                let status = match (source.gain_table(), channelizer.as_mut()) {
+                    (_, None) => Err("このサンプルレートでは使えません（従来の自動で受信します）"),
+                    (_, Some(_)) if !fft => Err("この設定では使えません（従来の自動で受信します）"),
+                    (None, _) => {
+                        Err("この入力・チューナーでは使えません（従来の自動で受信します）")
+                    }
+                    (Some(table), Some(bank)) => {
+                        match crate::gain::GainOptimizer::new(table, rate) {
+                            Some((opt, first)) => {
+                                bank.set_measuring(true);
+                                let outcome = source.apply(&Control {
+                                    gain_db: Some(Some(first)),
+                                    ..Control::default()
+                                });
+                                if let Err(e) = &outcome {
+                                    crate::diag::note(format!("ゲインを変更できません：{e}"));
+                                }
+                                let status = opt.status();
+                                optimizer = Some(opt);
+                                Ok(status)
+                            }
+                            None => {
+                                Err("この入力・チューナーでは使えません（従来の自動で受信します）")
+                            }
+                        }
+                    }
+                };
+                crate::lock(shared).gain =
+                    Some(status.unwrap_or_else(crate::gain::GainStatus::unavailable));
+            }
             let read = source.read(&mut buf, stop)?;
+            let received = std::time::SystemTime::now();
+            // Samples after lost ones: mark the gap, then take them.
+            let read = match read {
+                Some(Read::SamplesAfterGap(n)) => {
+                    window = (Instant::now(), 0);
+                    sequence += 1;
+                    if let Some(bank) = channelizer.as_mut() {
+                        bank.reset();
+                    }
+                    crate::lock(shared).overflows += 1;
+                    Some(Read::Samples(n))
+                }
+                other => other,
+            };
             let reconnection = source.reconnection();
-            if shared.lock().unwrap().reconnection != reconnection {
-                let mut s = shared.lock().unwrap();
+            if crate::lock(shared).reconnection != reconnection {
+                let mut s = crate::lock(shared);
                 s.reconnection = reconnection;
                 s.source_info = source.info();
             }
             match read {
                 None => break,
                 Some(Read::Timeout) => continue,
+                Some(Read::SamplesAfterGap(_)) => unreachable!("handled above"),
                 Some(Read::Discontinuity) => {
                     window = (Instant::now(), 0);
                     sequence += 1;
-                    shared.lock().unwrap().overflows += 1;
+                    if let Some(bank) = channelizer.as_mut() {
+                        bank.reset();
+                    }
+                    crate::lock(shared).overflows += 1;
                     continue;
                 }
                 Some(Read::Samples(n)) => {
+                    // One check for every channel: a block with NaN or
+                    // infinity (a broken source) is dropped as a gap rather
+                    // than ending the session.
+                    if buf[..n]
+                        .iter()
+                        .any(|s| !s.real.is_finite() || !s.imaginary.is_finite())
+                    {
+                        samples += n as u64;
+                        sequence += 1;
+                        if let Some(bank) = channelizer.as_mut() {
+                            bank.reset();
+                        }
+                        crate::lock(shared).invalid_blocks += 1;
+                        continue;
+                    }
                     if iq_capture.is_none() {
-                        let request = shared.lock().unwrap().iq_request.take();
+                        let request = crate::lock(shared).iq_request.take();
                         if let Some((path, count)) = request {
-                            match IqWriter::create(path, count, rate) {
+                            match IqWriter::create(path, count, rate, shared.clone()) {
                                 Ok(w) => iq_capture = Some(w),
                                 Err(e) => {
-                                    shared.lock().unwrap().iq_status =
-                                        Some(format!("IQ を保存できません：{e}"))
+                                    if let Some(c) = crate::lock(shared).iq.as_mut() {
+                                        c.state = "failed";
+                                        c.message = Some(format!("IQ を保存できません：{e}"));
+                                    }
                                 }
                             }
                         }
                     }
                     if let Some(w) = iq_capture.as_mut() {
-                        let done = w.write(&buf[..n]);
-                        if !matches!(done, Ok(false)) {
-                            let w = iq_capture.take().unwrap();
-                            let status = done.and_then(|_| w.finish()).map_or_else(
-                                |e| format!("IQ を保存できません：{e}"),
-                                |p| format!("保存しました：{}", p.display()),
-                            );
-                            shared.lock().unwrap().iq_status = Some(status);
+                        let outcome = w.write(&buf[..n]);
+                        let seconds = w.written_seconds();
+                        {
+                            let mut s = crate::lock(shared);
+                            if let Some(c) = s.iq.as_mut().filter(|c| c.state == "saving") {
+                                c.written_seconds = seconds;
+                                if let Err(e) = &outcome {
+                                    if !e.is_empty() {
+                                        c.message = Some(e.clone());
+                                    }
+                                }
+                            }
+                        }
+                        // Dropping the writer closes its queue: the file
+                        // thread finishes the file and reports.
+                        if !matches!(outcome, Ok(false)) {
+                            iq_capture = None;
                         }
                     }
                     samples += n as u64;
@@ -827,48 +1171,128 @@ fn run(
                     if samples >= afc_due {
                         // Once a second of IQ.
                         afc_due = samples + rate as u64;
+                        // Only measurements taken with the correction now in
+                        // effect, after the carrier loops settled: a queued
+                        // status from before the last step would count it twice.
+                        let current = afc.correction();
                         let mut errors: Vec<f64> = channels
                             .iter()
                             .filter_map(|c| {
-                                let c = c.lock().unwrap();
+                                let c = crate::lock(c);
                                 let s = &c.status.status;
-                                (s.frame_locked && s.carrier_locked).then_some(s.frequency_error_hz)
+                                (s.frame_locked
+                                    && s.carrier_locked
+                                    && s.correction_settled
+                                    && s.applied_correction_hz == current)
+                                    .then_some(s.frequency_error_hz)
                             })
                             .collect();
                         if let Some(correction) = afc.update(&mut errors) {
                             tuning.store(correction.to_bits(), Ordering::Relaxed);
-                            shared.lock().unwrap().frequency_correction = correction;
+                            crate::lock(shared).frequency_correction = correction;
                         }
                     }
                     let elapsed = window.0.elapsed();
                     if elapsed >= Duration::from_secs(3) {
-                        let mut s = shared.lock().unwrap();
+                        let mut s = crate::lock(shared);
                         s.input_rate = window.1 as f64 / elapsed.as_secs_f64();
                         s.source_info = source.info();
                         drop(s);
                         window = (Instant::now(), 0);
                     }
                     let iq: Arc<[Complex32]> = Arc::from(&buf[..n]);
-                    for (i, tx) in senders.iter().enumerate() {
-                        match tx.try_send(Block {
-                            sequence,
-                            start_sample: samples - n as u64,
-                            iq: iq.clone(),
-                        }) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(_)) => {
-                                channels[i].lock().unwrap().status.dropped_blocks += 1
-                            }
-                            Err(TrySendError::Disconnected(_)) => {
-                                return Err("A channel worker stopped; restart reception".into())
+                    let mut info = crate::pipeline::BlockInfo {
+                        dbfs: Some(crate::pipeline::block_dbfs(&iq)),
+                        captured: received.checked_sub(Duration::from_secs_f64(n as f64 / rate)),
+                        input_samples: None,
+                    };
+                    // Each bin's samples, shared by the channels in it, and
+                    // where they start at the bins' rate.
+                    let mut narrow: Vec<(usize, Arc<[Complex32]>)> = Vec::new();
+                    let mut narrow_start = 0;
+                    if let Some(bank) = channelizer.as_mut() {
+                        for (_, out) in &mut bands {
+                            out.clear();
+                        }
+                        bank.process(&buf[..n], &mut bands);
+                        narrow = bands.iter().map(|(k, v)| (*k, Arc::from(&v[..]))).collect();
+                        narrow_start = (samples - n as u64) / bank.decimation() as u64;
+                        info.input_samples = Some(n as u64);
+                    }
+                    if let Some(opt) = optimizer.as_mut() {
+                        let floor = channelizer
+                            .as_mut()
+                            .and_then(|bank| bank.take_bin_power())
+                            .and_then(|power| crate::gain::noise_floor_db(&power, &channel_bins));
+                        let (clipped, peak) = clipping(&buf[..n]);
+                        if idle.0.elapsed() >= Duration::from_secs(1) {
+                            idle = (Instant::now(), crate::lock(monitor).snapshot().1.is_empty());
+                        }
+                        let window = crate::gain::Window {
+                            floor_db: floor,
+                            clipped,
+                            samples: n as u64,
+                            peak,
+                        };
+                        if let Some(db) = opt.observe(&window, idle.1) {
+                            let outcome = source.apply(&Control {
+                                gain_db: Some(Some(db)),
+                                ..Control::default()
+                            });
+                            if let Err(e) = outcome {
+                                crate::diag::note(format!("ゲインを変更できません：{e}"));
                             }
                         }
+                        let status = opt.status();
+                        let mut s = crate::lock(shared);
+                        if s.gain.as_ref() != Some(&status) {
+                            s.gain = Some(status);
+                        }
+                    }
+                    for (i, slot) in senders.iter_mut().enumerate() {
+                        let Some(tx) = slot else { continue };
+                        let (start_sample, iq) = match placements[i].2 {
+                            Some(bin) => (
+                                narrow_start,
+                                narrow.iter().find(|(k, _)| *k == bin).unwrap().1.clone(),
+                            ),
+                            None => (samples - n as u64, iq.clone()),
+                        };
+                        let block = Block {
+                            sequence,
+                            start_sample,
+                            iq,
+                            info,
+                        };
+                        let gone = if blocking {
+                            tx.send(block).is_err()
+                        } else {
+                            match tx.try_send(block) {
+                                Ok(()) => false,
+                                Err(TrySendError::Full(_)) => {
+                                    crate::lock(&channels[i]).status.dropped_blocks += 1;
+                                    false
+                                }
+                                Err(TrySendError::Disconnected(_)) => true,
+                            }
+                        };
+                        if gone {
+                            // That channel gave up after repeated failures
+                            // (its status says why); the others go on.
+                            *slot = None;
+                        }
+                    }
+                    if senders.iter().all(Option::is_none) {
+                        return Err(
+                            "すべてのチャンネルの処理が停止しました。受信を再開してください。"
+                                .into(),
+                        );
                     }
                     sequence += 1;
                     if let Some(total) = total {
-                        shared.lock().unwrap().progress = samples as f64 / total.max(1) as f64;
+                        crate::lock(shared).progress = samples as f64 / total.max(1) as f64;
                         let target = Duration::from_secs_f64(samples as f64 / rate);
-                        while !stop.load(Ordering::Relaxed) && start.elapsed() < target {
+                        while paced && !stop.load(Ordering::Relaxed) && start.elapsed() < target {
                             thread::sleep(
                                 (target - start.elapsed().min(target))
                                     .min(Duration::from_millis(20)),
@@ -886,18 +1310,369 @@ fn run(
             return Err("Channel thread could not finish".into());
         }
     }
-    if let Some(e) = channels
+    // One failed channel is reported on that channel; the session fails
+    // only when none of them could keep receiving.
+    let failed: Vec<String> = channels
         .iter()
-        .find_map(|c| c.lock().unwrap().status.error.clone())
-    {
-        return Err(e);
+        .filter_map(|c| crate::lock(c).status.error.clone())
+        .collect();
+    if !failed.is_empty() && failed.len() == channels.len() {
+        return Err(failed[0].clone());
     }
     result
+}
+
+/// One channel's processing thread. A failure (an error or a panic) restarts
+/// this channel's pipeline instead of stopping the session; a channel that
+/// keeps failing gives up alone.
+struct Worker {
+    index: usize,
+    rate: f64,
+    center: f64,
+    cancel: Arc<AtomicBool>,
+    recording: Arc<Recorder>,
+    monitor: Arc<Mutex<Monitor>>,
+    tuning: Arc<AtomicU64>,
+    channel: Arc<Mutex<Channel>>,
+}
+/// Failures within [`RESTART_WINDOW`] after which a channel stops.
+const MAX_RESTARTS: usize = 3;
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
+#[derive(Default)]
+struct WorkerState {
+    expected: Option<u64>,
+    segment_start: u64,
+    audio_origin_us: u64,
+    tuned: f64,
+    retune_failed: bool,
+}
+impl Worker {
+    fn run(self, mut pipe: Pipeline, rx: mpsc::Receiver<Block>) {
+        pipe.trust_input();
+        let config = pipe.config.clone();
+        let mut failures: VecDeque<Instant> = VecDeque::new();
+        let mut state = WorkerState::default();
+        loop {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.receive(&mut pipe, &rx, &mut state)
+            }));
+            let error = match result {
+                Ok(Ok(())) => return,
+                Ok(Err(e)) => e,
+                Err(_) => "Channel worker panicked".into(),
+            };
+            let now = Instant::now();
+            failures.push_back(now);
+            while failures
+                .front()
+                .is_some_and(|t| now.duration_since(*t) > RESTART_WINDOW)
+            {
+                failures.pop_front();
+            }
+            let rebuilt = Pipeline::new(config.clone(), self.rate, self.center);
+            match rebuilt {
+                Ok(fresh)
+                    if failures.len() <= MAX_RESTARTS && !self.cancel.load(Ordering::Relaxed) =>
+                {
+                    crate::diag::note(format!("{} の処理をやり直します：{error}", config.label));
+                    pipe = fresh;
+                    pipe.trust_input();
+                    // The next block starts a new segment (a discontinuity).
+                    state = WorkerState::default();
+                    let mut c = crate::lock(&self.channel);
+                    c.status.restarts += 1;
+                    c.audio.clear();
+                }
+                _ => {
+                    crate::diag::note(format!(
+                        "{} の処理を停止しました（ほかの波は受信を続けます）：{error}",
+                        config.label
+                    ));
+                    crate::lock(&self.channel).status.error = Some(error);
+                    return;
+                }
+            }
+        }
+    }
+    fn receive(
+        &self,
+        pipe: &mut Pipeline,
+        rx: &mpsc::Receiver<Block>,
+        state: &mut WorkerState,
+    ) -> Result<(), String> {
+        let rate = self.rate;
+        let channel_id = pipe.config.id.clone();
+        let mut last = Instant::now();
+        loop {
+            if self.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let block = match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(b) => b,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            };
+            #[cfg(test)]
+            tests::injected_failure(&pipe.config.id)?;
+            let to_us = |samples: u64| (samples as f64 / rate * 1_000_000.0) as u64;
+            let mut activity = Vec::new();
+            if state.expected != Some(block.sequence) {
+                // Not at the very first block: after lost blocks, or after
+                // this channel restarted with a fresh pipeline.
+                if state.expected.is_some() {
+                    pipe.discontinuity()?;
+                }
+                if state.expected.is_some() || block.start_sample != 0 {
+                    state.segment_start = block.start_sample;
+                    activity.push(Activity::Reset(to_us(state.segment_start)));
+                    crate::lock(&self.channel).audio.clear();
+                }
+            }
+            state.expected = Some(block.sequence + 1);
+            let correction = f64::from_bits(self.tuning.load(Ordering::Relaxed));
+            if correction != state.tuned {
+                // A channel at the very edge of the IQ bandwidth stays where
+                // it is; say so once.
+                if let Err(e) = pipe.retune(correction) {
+                    if !state.retune_failed {
+                        state.retune_failed = true;
+                        crate::diag::note(format!(
+                            "{} は周波数補正を適用できません：{e}",
+                            pipe.config.label
+                        ));
+                    }
+                }
+                state.tuned = correction;
+            }
+            let mut epoch = pipe.status.epoch;
+            let segment_start = state.segment_start;
+            let audio_origin = &mut state.audio_origin_us;
+            let audio = pipe.process_block(&block.iq, block.info, |event| {
+                let time = to_us(segment_start) + event.frame.bit_offset * 1_000_000 / 9600;
+                *audio_origin = time.saturating_sub(event.index as u64 * 40_000);
+                if event.epoch != epoch {
+                    activity.push(Activity::Reset(time));
+                    epoch = event.epoch;
+                }
+                if event.corrected_bits.is_some() {
+                    activity.push(Activity::Voice(time));
+                }
+                self.recording.push_frame(&channel_id, event);
+            })?;
+            crate::lock(&self.monitor).update(
+                self.index,
+                to_us(block.start_sample + block.iq.len() as u64),
+                activity,
+            );
+            for a in &audio {
+                self.recording.push(a);
+            }
+            let mut c = crate::lock(&self.channel);
+            c.progress_us = to_us(block.start_sample + block.iq.len() as u64);
+            if c.status.status.epoch != pipe.status.epoch {
+                c.audio.clear();
+                c.status.status.epoch = pipe.status.epoch;
+            }
+            for a in audio {
+                if c.audio.len() == 125 {
+                    c.audio.pop_front();
+                    c.status.audio_drops += 1;
+                }
+                c.audio
+                    .push_back((state.audio_origin_us + a.index as u64 * 40_000, a));
+            }
+            if last.elapsed() >= Duration::from_millis(150) {
+                pipe.snapshot_into(&mut c.status.status);
+                last = Instant::now();
+            }
+        }
+        let tail = pipe.flush()?;
+        for a in &tail {
+            self.recording.push(a);
+        }
+        let mut c = crate::lock(&self.channel);
+        for a in tail {
+            if c.audio.len() == 125 {
+                c.audio.pop_front();
+                c.status.audio_drops += 1;
+            }
+            c.audio
+                .push_back((state.audio_origin_us + a.index as u64 * 40_000, a));
+        }
+        pipe.snapshot_into(&mut c.status.status);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Channel id → failures still to inject (errors, then a panic for the
+    /// last one when the flag is set).
+    static FAILURES: Mutex<Vec<(String, u32, bool)>> = Mutex::new(Vec::new());
+    pub(super) fn injected_failure(channel: &str) -> Result<(), String> {
+        let mut failures = crate::lock(&FAILURES);
+        if let Some(entry) = failures
+            .iter_mut()
+            .find(|(id, n, _)| id == channel && *n > 0)
+        {
+            entry.1 -= 1;
+            if entry.2 && entry.1 == 0 {
+                drop(failures);
+                panic!("injected panic");
+            }
+            return Err("injected failure".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_failing_channel_restarts_or_stops_alone() {
+        // Own channel ids: other tests run sessions concurrently.
+        let configs: Vec<_> = crate::pipeline::presets("west")
+            .into_iter()
+            .map(|mut c| {
+                c.id = format!("isolation-{}", c.id);
+                c
+            })
+            .collect();
+        let (flaky, broken) = (configs[0].id.clone(), configs[1].id.clone());
+        // One error then a panic: restarted twice. Ten errors: gives up.
+        crate::lock(&FAILURES).extend([(flaky.clone(), 2, true), (broken.clone(), 10, false)]);
+        let session = Session::start_with_source(
+            Config {
+                input: Input::Wave {
+                    path: String::new(),
+                    center_hz: 352603125.0,
+                    fast: false,
+                },
+                channels: configs.clone(),
+            },
+            |_, _| Ok((Source::Endless(0), 240000.0, 352603125.0)),
+        )
+        .unwrap();
+        let start = Instant::now();
+        loop {
+            let status = session.status(None, false);
+            let find = |id: &str| status.channels.iter().find(|c| c.config.id == id).unwrap();
+            let (f, b) = (find(&flaky), find(&broken));
+            if f.restarts == 2 && b.error.is_some() {
+                assert!(status.running, "{:?}", status.error);
+                assert!(f.error.is_none());
+                assert_eq!(b.restarts, MAX_RESTARTS as u64);
+                // Every other channel kept receiving without a restart.
+                assert!(status
+                    .channels
+                    .iter()
+                    .filter(|c| c.config.id != flaky && c.config.id != broken)
+                    .all(|c| c.restarts == 0 && c.error.is_none()));
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "restarts {} / {:?}, session {:?}",
+                f.restarts,
+                b.error,
+                status.error
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        session.stop();
+        assert_eq!(session.status(None, false).state, "stopped");
+    }
+
+    #[test]
+    fn the_gain_optimizer_sweeps_settles_at_the_knee_and_hands_back_on_request() {
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let model = applied.clone();
+        let channels: Vec<_> = crate::pipeline::presets("east")
+            .into_iter()
+            .take(2)
+            .map(|mut c| {
+                c.id = format!("gain-{}", c.id);
+                c
+            })
+            .collect();
+        let session = Session::start_with_source(
+            Config {
+                input: Input::RtlTcp {
+                    radio: crate::rtl_tcp::Config {
+                        host: "127.0.0.1".into(),
+                        port: 1234,
+                        sample_rate: 240_000,
+                        center_hz: 352_603_125,
+                        gain_db: None,
+                        ppm: 0,
+                        reconnect_seconds: 0,
+                        bias_tee: false,
+                        gain_optimize: true,
+                    },
+                },
+                channels,
+            },
+            move |_, _| {
+                Ok((
+                    Source::GainModel {
+                        gain: 49.6,
+                        seed: 0x9e37_79b9_7f4a_7c15,
+                        applied: model,
+                    },
+                    240000.0,
+                    352603125.0,
+                ))
+            },
+        )
+        .unwrap();
+        let start = Instant::now();
+        let status = loop {
+            let status = session.status(None, false);
+            if let Some(g) = status.gain.as_ref().filter(|g| g.phase == "tracking") {
+                break g.clone();
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "{:?} {:?}",
+                status.gain,
+                status.error
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        let set = crate::lock(&applied).clone();
+        // Eleven sweep gains from low to high, then the choice: the floor
+        // stands 8 dB above the ADC's from about 37 dB.
+        assert_eq!(set.len(), 12, "{set:?}");
+        assert!(set[..11].windows(2).all(|w| w[0] < w[1]), "{set:?}");
+        let chosen = set[11].unwrap();
+        assert!((36.0..=41.0).contains(&chosen), "{set:?}");
+        assert_eq!(status.gain_db, Some(chosen));
+        assert!(status.note.unwrap().contains("雑音の量から"));
+        // Turning it off hands the gain back to the source's own automatic
+        // gain; a ppm change alone leaves the gain alone.
+        session
+            .set_control(Control {
+                gain_db: Some(None),
+                ppm: Some(3),
+                bias_tee: Some(false),
+                gain_optimize: Some(false),
+            })
+            .unwrap();
+        while session.status(None, false).gain.is_some() {
+            assert!(start.elapsed() < Duration::from_secs(60));
+            thread::sleep(Duration::from_millis(10));
+        }
+        session
+            .set_control(Control {
+                gain_db: Some(None),
+                ppm: Some(4),
+                bias_tee: Some(false),
+                gain_optimize: Some(false),
+            })
+            .unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(crate::lock(&applied)[12..], [None]);
+        session.stop();
+    }
 
     /// Every USB transfer arrives at once; a channel queue that cannot hold
     /// it drops blocks on each transfer and never synchronises.
@@ -911,6 +1686,8 @@ mod tests {
                 gain_db: None,
                 ppm: 0,
                 reconnect_seconds: 60,
+                bias_tee: false,
+                gain_optimize: false,
             },
         };
         let held = queue_capacity(&input) * block_samples(240_000.0);
@@ -991,6 +1768,7 @@ mod tests {
                     input: Input::Wave {
                         path: path.to_string_lossy().into(),
                         center_hz: 352603125.0,
+                        fast: false,
                     },
                     channels: crate::pipeline::presets("east"),
                 },
@@ -1022,7 +1800,7 @@ mod tests {
         #[test]
         fn recording_stop_preserves_reception_and_allows_restart() {
             let temp = Temp::new();
-            let (mut session, _release) = gated_wave(&temp.0);
+            let (session, _release) = gated_wave(&temp.0);
             assert!(session.start_recording(&temp.0.join("missing")).is_err());
             assert_eq!(session.snapshot(None).0.state, "receiving");
 
@@ -1048,7 +1826,7 @@ mod tests {
         #[test]
         fn wave_eof_finalizes_recording_after_all_workers_drain() {
             let temp = Temp::new();
-            let (mut session, release) = gated_wave(&temp.0);
+            let (session, release) = gated_wave(&temp.0);
             let recording = session.start_recording(&temp.0).unwrap();
             assert_eq!(recording.state, "recording");
             // One 40 ms IQ block, then the real IqWave EOF. Neither depends
@@ -1107,9 +1885,13 @@ mod tests {
                 reconnection: (false, 0, 0),
                 input_rate: 0.0,
                 iq_request: None,
-                iq_status: None,
+                iq: None,
+                gain: None,
                 source_info: None,
                 frequency_correction: 0.0,
+                invalid_blocks: 0,
+                control: None,
+                control_error: None,
             })),
             channels: configs
                 .iter()
@@ -1120,6 +1902,7 @@ mod tests {
                             status: Status::default(),
                             dropped_blocks: 0,
                             audio_drops: 0,
+                            restarts: 0,
                             error: None,
                         },
                         progress_us: 400_000,
@@ -1136,7 +1919,7 @@ mod tests {
                     }))
                 })
                 .collect(),
-            thread: None,
+            thread: Mutex::new(None),
             recorder: Arc::new(Recorder::default()),
             monitor,
         }

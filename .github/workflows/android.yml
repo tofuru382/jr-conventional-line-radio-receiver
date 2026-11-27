@@ -135,9 +135,13 @@ jobs:
 
   publish:
     # Actions artifacts download only for signed-in GitHub users (and not in
-    # the GitHub app), so android-branch builds also go to the "latest-build"
-    # pre-release, a fixed link anyone can download from a phone browser.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/android'
+    # the GitHub app), and as a zip that phones' file managers did not always
+    # extract. So android-branch builds also go to the "latest-build"
+    # pre-release and the review branch's to "review-build": fixed links to
+    # the APK itself that anyone can download from a phone browser.
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/android' || github.ref == 'refs/heads/improve/review-items')
     needs: apk
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -148,16 +152,23 @@ jobs:
         with:
           name: jr-radio-receiver-android-arm64
           path: dist
-      - name: Publish to the latest-build pre-release
+      - name: Publish to the download pre-release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          tag=latest-build
-          notes="android ブランチの最新ビルド（${GITHUB_SHA::7}）。GitHub にログインしなくてもダウンロードできます。"
+          if [ "$GITHUB_REF_NAME" = android ]; then
+            tag=latest-build
+            title="JR-CLRR 最新ビルド"
+            notes="android ブランチの最新ビルド（${GITHUB_SHA::7}）。GitHub にログインしなくてもダウンロードできます。"
+          else
+            tag=review-build
+            title="JR-CLRR 確認用ビルド（PR）"
+            notes="$GITHUB_REF_NAME ブランチ（PR）の最新ビルド（${GITHUB_SHA::7}）。GitHub にログインしなくてもダウンロードできます。"
+          fi
           gh release view "$tag" >/dev/null 2>&1 ||
             gh release create "$tag" --prerelease --target "$GITHUB_SHA" \
-              --title "JR-CLRR 最新ビルド" --notes "$notes" ||
+              --title "$title" --notes "$notes" ||
             gh release view "$tag" >/dev/null
           # The tag follows the newest build.
           gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null

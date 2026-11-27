@@ -49,6 +49,8 @@ pub struct Vocoder {
     has_excitation: bool,
     has_power: bool,
     has_level: bool,
+    final_period: Option<f32>,
+    final_impulse: Option<[f32; 256]>,
 }
 impl Default for Vocoder {
     fn default() -> Self {
@@ -71,6 +73,8 @@ impl Default for Vocoder {
             has_excitation: false,
             has_power: false,
             has_level: false,
+            final_period: None,
+            final_impulse: None,
         }
     }
 }
@@ -234,9 +238,18 @@ impl Vocoder {
             .clamp(-18.0, 18.0);
             let mut extended = [0.0; 335];
             extended[..255].copy_from_slice(&self.history);
+            let mut period = values[74 + block].clamp(20.0, 160.0);
+            if curve.is_some() {
+                if let Some(old) = self.final_period {
+                    if values[70 + block] > 0.55 && (period / old).ln().abs() < 0.35 {
+                        period = 0.7 * period + 0.3 * old;
+                    }
+                }
+                self.final_period = Some(period);
+            }
             self.excitation(
                 values[70 + block].clamp(0.0, 1.0),
-                values[74 + block].clamp(20.0, 160.0),
+                period,
                 &mut extended[255..],
             );
             if let Some(source) = source {
@@ -252,11 +265,21 @@ impl Vocoder {
             self.source_trace[block * 80..(block + 1) * 80].copy_from_slice(&extended[255..]);
             let mut slope_gain = 10.0_f32.powf(-slope / 40.0);
             let slope_step = 10.0_f32.powf(slope / (20.0 * 79.0));
-            let mut shaped = [0.0; 80];
-            for i in 0..80 {
-                for j in 0..128 {
-                    shaped[i] += extended[255 + i - j] * impulse[j];
+            // The excitation through this block's filter. The final synthesis
+            // fades in from the previous half's filter over the first 32
+            // samples of each half, so a filter change is no step.
+            let fade_from = self
+                .final_impulse
+                .filter(|_| curve.is_some() && block % 2 == 0);
+            let mut shaped: [f32; 80] = std::array::from_fn(|i| convolve(&extended, i, &impulse));
+            if let Some(old) = &fade_from {
+                for (i, sample) in shaped.iter_mut().enumerate().take(32) {
+                    let t = (i + 1) as f32 / 32.0;
+                    *sample = (1.0 - t) * convolve(&extended, i, old) + t * *sample;
                 }
+            }
+            if curve.is_some() {
+                self.final_impulse = Some(impulse);
             }
             for sample in &mut shaped {
                 *sample *= slope_gain;
@@ -275,7 +298,7 @@ impl Vocoder {
             self.has_power = true;
             let bound = 10.0_f32.powf(0.6);
             let denominator = self.power.clamp(power / bound, power * bound);
-            let gain = 10.0_f32.powf(levels[block] / 20.0) / denominator.sqrt();
+            let gain = 10.0_f32.powf(levels[block] / 20.0) / denominator.sqrt().max(1e-12);
             for x in &mut shaped {
                 *x *= gain;
             }
@@ -309,4 +332,15 @@ impl Vocoder {
         }
         Ok(pcm.map(sample))
     }
+}
+
+/// One output of the source/filter convolution, summed in binary32 in the
+/// order the model was trained with (newest input first). A wider sum
+/// changes the result by about -120 dB, below what 16-bit PCM can carry.
+fn convolve(extended: &[f32; 335], i: usize, impulse: &[f32]) -> f32 {
+    let mut sum = 0.0;
+    for j in 0..128 {
+        sum += extended[255 + i - j] * impulse[j];
+    }
+    sum
 }

@@ -20,7 +20,7 @@ impl Voice {
                 d.last_index = Some(index);
                 match payload {
                     Some(p) => d.voice.push(index, p),
-                    None => d.voice.missing_frame(),
+                    None => d.voice.conceal(index),
                 }
             },
             false,

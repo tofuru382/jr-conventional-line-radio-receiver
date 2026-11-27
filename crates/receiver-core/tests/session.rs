@@ -54,10 +54,11 @@ fn wait_for_session_end(session: &Session) -> Overview {
 fn all_22_workers_receive_the_same_iq_and_finish_without_drops() {
     let path = temporary("all.wav");
     silence(&path, 38400);
-    let mut session = Session::start(Config {
+    let session = Session::start(Config {
         input: Input::Wave {
             path: path.to_string_lossy().into(),
             center_hz: 352603125.0,
+            fast: false,
         },
         channels: presets("east"),
     })
@@ -80,10 +81,11 @@ fn cancellation_joins_workers_and_new_session_has_no_old_state() {
     let path = temporary("stop.wav");
     silence(&path, 240000);
     for _ in 0..2 {
-        let mut session = Session::start(Config {
+        let session = Session::start(Config {
             input: Input::Wave {
                 path: path.to_string_lossy().into(),
                 center_hz: 352603125.0,
+                fast: false,
             },
             channels: presets("west"),
         })
@@ -100,10 +102,11 @@ fn cancellation_joins_workers_and_new_session_has_no_old_state() {
 fn invalid_bandwidth_fails_the_session_before_any_channel_runs() {
     let path = temporary("outside.wav");
     silence(&path, 1000);
-    let mut session = Session::start(Config {
+    let session = Session::start(Config {
         input: Input::Wave {
             path: path.to_string_lossy().into(),
             center_hz: 300000000.0,
+            fast: false,
         },
         channels: presets("east"),
     })
@@ -155,7 +158,7 @@ fn rtl_tcp_disconnect_is_a_failure_after_all_22_workers_drain() {
         stream.read_exact(&mut [0; 25]).unwrap();
         stream.write_all(&vec![127; 38400 * 2]).unwrap();
     });
-    let mut session = Session::start(Config {
+    let session = Session::start(Config {
         input: Input::RtlTcp {
             radio: receiver_core::rtl_tcp::Config {
                 host: "127.0.0.1".into(),
@@ -165,6 +168,8 @@ fn rtl_tcp_disconnect_is_a_failure_after_all_22_workers_drain() {
                 gain_db: None,
                 ppm: 0,
                 reconnect_seconds: 0,
+                bias_tee: false,
+                gain_optimize: false,
             },
         },
         channels: presets("east"),
@@ -203,7 +208,7 @@ fn stopping_during_rtl_tcp_handshake_closes_connection_without_failure() {
             result => panic!("expected the client to close its connection, got {result:?}"),
         }
     });
-    let mut session = Session::start(Config {
+    let session = Session::start(Config {
         input: Input::RtlTcp {
             radio: receiver_core::rtl_tcp::Config {
                 host: "127.0.0.1".into(),
@@ -213,6 +218,8 @@ fn stopping_during_rtl_tcp_handshake_closes_connection_without_failure() {
                 gain_db: None,
                 ppm: 0,
                 reconnect_seconds: 0,
+                bias_tee: false,
+                gain_optimize: false,
             },
         },
         channels: presets("east"),
@@ -254,10 +261,11 @@ fn recorded_iq_runs_all_22_workers_in_real_time() {
     let wave = IqWave::open(&path).unwrap();
     let samples = wave.samples;
     let duration = samples as f64 / wave.sample_rate;
-    let mut session = Session::start(Config {
+    let session = Session::start(Config {
         input: Input::Wave {
             path,
             center_hz: center,
+            fast: false,
         },
         channels: presets("east"),
     })
@@ -343,7 +351,7 @@ fn rtl_tcp_drop_reconnects_and_keeps_receiving() {
         stream.write_all(&vec![127; 9600 * 2]).unwrap();
         let _ = wait.recv_timeout(Duration::from_secs(20));
     });
-    let mut session = Session::start(Config {
+    let session = Session::start(Config {
         input: Input::RtlTcp {
             radio: receiver_core::rtl_tcp::Config {
                 host: "127.0.0.1".into(),
@@ -353,6 +361,8 @@ fn rtl_tcp_drop_reconnects_and_keeps_receiving() {
                 gain_db: None,
                 ppm: 0,
                 reconnect_seconds: 60,
+                bias_tee: false,
+                gain_optimize: false,
             },
         },
         channels: presets("east"),
@@ -376,15 +386,64 @@ fn rtl_tcp_drop_reconnects_and_keeps_receiving() {
 }
 
 #[test]
+fn an_iq_capture_cut_short_by_stopping_still_replays() {
+    let input = temporary("iq-short-source.wav");
+    let output = temporary("iq-short-capture.wav");
+    let _ = fs::remove_file(&output);
+    silence(&input, 240_000 * 20);
+    let session = Session::start(Config {
+        input: Input::Wave {
+            path: input.to_string_lossy().into(),
+            center_hz: 352603125.0,
+            fast: false,
+        },
+        channels: presets("east")[..1].to_vec(),
+    })
+    .unwrap();
+    let start = Instant::now();
+    while session.snapshot(None).0.state != "receiving" {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.capture_iq(output.clone(), 10.0).unwrap();
+    while session.snapshot(None).0.iq_capture.unwrap().written_seconds < 0.5 {
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.stop();
+    let status = loop {
+        let s = session.snapshot(None).0.iq_capture.unwrap();
+        if s.state != "saving" {
+            break s;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(status.state, "saved", "{status:?}");
+    assert!(
+        status.message.is_some() && status.written_seconds < 10.0,
+        "{status:?}"
+    );
+    let wave = IqWave::open(&output).unwrap();
+    assert_eq!(
+        wave.samples as f64,
+        (status.written_seconds * 240_000.0).round()
+    );
+    let _ = fs::remove_file(&input);
+    let _ = fs::remove_file(&output);
+}
+
+#[test]
 fn raw_iq_capture_writes_a_replayable_wav() {
     let input = temporary("iq-source.wav");
     let output = temporary("iq-capture.wav");
     let _ = fs::remove_file(&output);
     silence(&input, 240_000 * 3);
-    let mut session = Session::start(Config {
+    let session = Session::start(Config {
         input: Input::Wave {
             path: input.to_string_lossy().into(),
             center_hz: 352603125.0,
+            fast: false,
         },
         channels: presets("east")[..2].to_vec(),
     })
@@ -399,18 +458,25 @@ fn raw_iq_capture_writes_a_replayable_wav() {
         session.capture_iq(output.clone(), 1.0).is_err(),
         "one capture at a time"
     );
+    let mut progress = Vec::new();
     let status = loop {
         let s = session.snapshot(None).0.iq_capture.unwrap();
-        if s != "保存中" {
+        if s.state != "saving" {
             break s;
         }
+        progress.push(s.written_seconds);
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "capture did not finish"
         );
         std::thread::sleep(Duration::from_millis(20));
     };
-    assert!(status.starts_with("保存しました"), "{status}");
+    assert_eq!(status.state, "saved", "{status:?}");
+    assert_eq!(status.message, None);
+    assert_eq!(status.path, output.to_string_lossy());
+    assert_eq!((status.seconds, status.written_seconds), (1.0, 1.0));
+    assert_eq!(status.bytes, 44 + 240_000 * 4);
+    assert!(progress.windows(2).all(|w| w[0] <= w[1]), "{progress:?}");
     let wave = IqWave::open(&output).unwrap();
     assert_eq!(wave.sample_rate, 240_000.0);
     assert_eq!(wave.samples, 240_000);

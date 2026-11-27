@@ -39,6 +39,14 @@ pub struct Config {
     /// off the bus (0: fail at once).
     #[serde(default = "default_reconnect_seconds")]
     pub reconnect_seconds: u32,
+    /// Power an active antenna or LNA through the coaxial cable (GPIO 0).
+    /// The phone supplies that current too.
+    #[serde(default)]
+    pub bias_tee: bool,
+    /// Automatic gain (no `gain_db`) chosen by the noise floor instead of
+    /// the highest gain that does not clip (see `crate::gain`).
+    #[serde(default)]
+    pub gain_optimize: bool,
 }
 /// Ten minutes: a dongle the phone stopped powering only returns once it is
 /// replugged, and a person needs longer than a minute to notice and do that.
@@ -93,8 +101,17 @@ impl Identity {
         }
     }
 }
-/// The descriptor most recently handed over by the Java side.
-static OFFERED: Mutex<Option<(OwnedFd, Identity)>> = Mutex::new(None);
+/// The descriptor most recently handed over by the Java side, and its
+/// number (see [`OFFER_TTL`]).
+static OFFERED: Mutex<Option<(OwnedFd, Identity, u64)>> = Mutex::new(None);
+static OFFERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// A descriptor nobody took this long after it was offered is closed. The
+/// Java side opens the dongle just before a session starts, and a waiting
+/// session takes it within 0.2 s; one left over (reception did not start,
+/// was stopped just then, or gave up) would otherwise keep the departed or
+/// idle dongle open until the next session, and the phone counts it as in
+/// use: its OTG setting stayed locked while the app found no dongle.
+const OFFER_TTL: Duration = Duration::from_secs(15);
 /// A session is waiting for a dongle.
 static WANTED: AtomicBool = AtomicBool::new(false);
 
@@ -111,7 +128,9 @@ pub fn offer_fd(fd: i32, identity: Identity) {
             note(format!(
                 "ドライバー: ドングルを受け取りました（{identity:?}）"
             ));
-            *OFFERED.lock().unwrap() = Some((owned, identity));
+            let number = OFFERS.fetch_add(1, Ordering::Relaxed) + 1;
+            *OFFERED.lock().unwrap() = Some((owned, identity, number));
+            expire_offer(number, OFFER_TTL);
         }
         Err(e) => note(format!("ドライバー: 受け取った接続を複製できません（{e}）")),
     }
@@ -121,7 +140,30 @@ pub fn wants_device() -> bool {
     WANTED.load(Ordering::Relaxed)
 }
 fn take_offered() -> Option<(OwnedFd, Identity)> {
-    OFFERED.lock().unwrap().take()
+    OFFERED
+        .lock()
+        .unwrap()
+        .take()
+        .map(|(fd, identity, _)| (fd, identity))
+}
+/// Closes offer `number` if it is still untaken after `ttl`.
+fn expire_offer(number: u64, ttl: Duration) {
+    let spawned = std::thread::Builder::new()
+        .name("usb-offer".into())
+        .spawn(move || {
+            std::thread::sleep(ttl);
+            let mut offered = OFFERED.lock().unwrap();
+            if offered.as_ref().is_some_and(|o| o.2 == number) {
+                *offered = None;
+                drop(offered);
+                note("ドライバー: 受け取ったドングルが使われなかったので閉じました");
+            }
+        });
+    if let Err(e) = spawned {
+        note(format!(
+            "ドライバー: 期限切れの接続を閉じる準備ができません（{e}）"
+        ));
+    }
 }
 
 /// How long `open` waits for the Java side (permission dialog included).
@@ -167,7 +209,8 @@ fn open_device(
         .frequency_hz(config.center_hz.into())
         .sample_rate_hz(config.sample_rate)
         .gain(gain)
-        .correction_ppm(config.ppm);
+        .correction_ppm(config.ppm)
+        .bias_tee(config.bias_tee);
     let (manufacturer, product) = match identity {
         Identity::BlogV4 => (Some("RTLSDRBlog".into()), Some("Blog V4".into())),
         Identity::Other => (Some(String::new()), Some(String::new())),
@@ -300,6 +343,8 @@ impl Usb {
         loop {
             if stop.load(Ordering::Relaxed) {
                 WANTED.store(false, Ordering::Relaxed);
+                // One offered just now belongs to nobody.
+                drop(take_offered());
                 return Err("USB: 接続を中止しました".into());
             }
             if let Some(fd) = take_offered() {
@@ -324,6 +369,7 @@ impl Usb {
             }
             if started.elapsed() >= wait {
                 WANTED.store(false, Ordering::Relaxed);
+                drop(take_offered());
                 let seconds = wait.as_secs();
                 note(format!(
                     "ドライバー: {seconds} 秒待ってもドングルを使えませんでした"
@@ -389,6 +435,52 @@ impl Usb {
     }
     pub fn reconnecting(&self) -> bool {
         self.rx.is_none()
+    }
+    /// Applies a tuning change now and to every later reconnection.
+    pub fn apply(&mut self, control: &crate::source::Control) -> Result<(), String> {
+        if let Some(gain) = control.gain_db {
+            if gain.is_some_and(|g| !(0.0..=52.5).contains(&g)) {
+                return Err("USB: ゲインは 0–52.5 dB（空欄で自動）を指定してください".into());
+            }
+            self.config.gain_db = gain;
+            self.auto_gain = auto_gain(&self.config, None);
+        }
+        if let Some(ppm) = control.ppm {
+            if !(-488..=488).contains(&ppm) {
+                return Err("USB: 周波数補正は −488–488 ppm を指定してください".into());
+            }
+            self.config.ppm = ppm;
+        }
+        if let Some(bias) = control.bias_tee {
+            self.config.bias_tee = bias;
+        }
+        let Some(device) = self.device.as_mut() else {
+            return Ok(());
+        };
+        if control.gain_db.is_some() {
+            let db = self
+                .config
+                .gain_db
+                .unwrap_or_else(|| gain_at(self.auto_gain.as_ref().map_or(0, |g| g.index)));
+            self.gain_changed = Some(Instant::now());
+            device
+                .set_manual_gain_db(db as f32)
+                .wait()
+                .map_err(|e| format!("USB: ゲインを変更できません ({e})"))?;
+        }
+        if let Some(ppm) = control.ppm {
+            device
+                .set_correction_ppm(ppm)
+                .wait()
+                .map_err(|e| format!("USB: 周波数補正を変更できません ({e})"))?;
+        }
+        if let Some(bias) = control.bias_tee {
+            device
+                .set_bias_tee(bias)
+                .wait()
+                .map_err(|e| format!("USB: Bias-T を切り替えられません ({e})"))?;
+        }
+        Ok(())
     }
     /// For the status line: tuner, V4 handling, gain and recovered USB errors.
     pub fn info(&self) -> String {
@@ -628,6 +720,8 @@ mod tests {
             gain_db: Some(20.0),
             ppm: 0,
             reconnect_seconds: 60,
+            bias_tee: false,
+            gain_optimize: false,
         }
     }
 
@@ -712,6 +806,37 @@ mod tests {
         );
         assert!(error.contains("1 回試しましたが"), "{error}");
         assert!(!wants_device());
+    }
+
+    #[test]
+    fn an_untaken_descriptor_is_closed_after_its_time_and_a_newer_one_is_kept() {
+        let _globals = globals();
+        let file = std::fs::File::open("/dev/null").unwrap();
+        use std::os::fd::AsRawFd;
+        offer_fd(file.as_raw_fd(), Identity::BlogV4);
+        let first = OFFERED.lock().unwrap().as_ref().unwrap().2;
+        // An expiry for an older offer leaves the current one alone.
+        expire_offer(first - 1, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(OFFERED.lock().unwrap().is_some());
+        expire_offer(first, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(OFFERED.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_descriptor_offered_as_the_start_is_cancelled_is_not_kept() {
+        let _globals = globals();
+        let file = std::fs::File::open("/dev/null").unwrap();
+        use std::os::fd::AsRawFd;
+        let stop = AtomicBool::new(true);
+        // Offered while the session that asked for it is being stopped.
+        offer_fd(file.as_raw_fd(), Identity::BlogV4);
+        let error = Usb::open_within(&config(), &stop, Duration::from_secs(1))
+            .err()
+            .unwrap();
+        assert!(error.contains("中止"), "{error}");
+        assert!(take_offered().is_none());
     }
 
     #[test]

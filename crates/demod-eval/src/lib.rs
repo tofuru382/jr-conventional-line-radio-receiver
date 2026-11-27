@@ -8,8 +8,9 @@
 //! Results count symbol errors before FEC and voice frames accepted after it.
 use jr_conventional_dsp::receiver::Dsp;
 use receiver_core::{
-    data::{decode_frame, decode_frame_soft},
-    frame::{Frame, Merger, Synchronizer},
+    data::{decode_frame, decode_frame_soft, Format},
+    frame::{Detector, Frame, Merger, Synchronizer},
+    pipeline::{ChannelConfig, Pipeline},
     synthesis, voice_frame, Complex32,
 };
 use serde::Serialize;
@@ -77,6 +78,24 @@ pub struct Condition {
     pub sample_rate: f64,
     pub frames: usize,
     pub seed: u64,
+    /// Transmit in bursts of `burst_on` frames separated by `burst_off`
+    /// silent frames (noise only). Zero `burst_off` transmits continuously.
+    #[serde(default)]
+    pub burst_on: usize,
+    #[serde(default)]
+    pub burst_off: usize,
+    /// Count frames from the production receive pipeline (both detectors,
+    /// synchronizers, merger and decoders) instead of this tool's own
+    /// reconstruction of it. Symbol error rates are not measured then.
+    #[serde(default)]
+    pub pipeline: bool,
+}
+
+impl Condition {
+    /// Whether frame `i` is transmitted (see [`Self::burst_on`]).
+    pub fn transmits(&self, i: usize) -> bool {
+        self.burst_off == 0 || i % (self.burst_on.max(1) + self.burst_off) < self.burst_on.max(1)
+    }
 }
 
 impl Default for Condition {
@@ -98,6 +117,9 @@ impl Default for Condition {
             sample_rate: 48000.0,
             frames: 200,
             seed: 1,
+            burst_on: 0,
+            burst_off: 0,
+            pipeline: false,
         }
     }
 }
@@ -172,6 +194,15 @@ pub struct Report {
     pub demodulated_symbols: u64,
     /// Accepted frames that only the alternate detector decoded.
     pub alternate_accepted: u64,
+    /// Accepted frames that decoded only after combining both detectors.
+    #[serde(default)]
+    pub combined_accepted: u64,
+    /// Receiver processing time and the duration of the signal it processed
+    /// (pipeline mode only).
+    #[serde(default)]
+    pub cpu_seconds: f64,
+    #[serde(default)]
+    pub signal_seconds: f64,
     /// Compared symbols and their errors by instantaneous channel power
     /// relative to its average, at each symbol's centre. Shows whether errors
     /// concentrate in fades (noise-limited) or spread out (tracking-limited).
@@ -217,6 +248,9 @@ impl Report {
         self.carrier_locked_symbols += other.carrier_locked_symbols;
         self.demodulated_symbols += other.demodulated_symbols;
         self.alternate_accepted += other.alternate_accepted;
+        self.combined_accepted += other.combined_accepted;
+        self.cpu_seconds += other.cpu_seconds;
+        self.signal_seconds += other.signal_seconds;
         if self.fade_bins.is_empty() {
             self.fade_bins = fade_bins();
         }
@@ -544,7 +578,20 @@ pub fn run(condition: &Condition) -> Result<Report, String> {
     }
     // Trailing idle symbols flush the receive filters and traceback.
     dibits.extend(std::iter::repeat_n(0, 2 * FRAME_SYMBOLS));
-    let (received, power) = channel_with_power(&modulate(&dibits, sps), condition, &mut rng);
+    let mut transmitted = modulate(&dibits, sps);
+    if condition.burst_off > 0 {
+        let frame_samples = FRAME_SYMBOLS * sps;
+        for (n, sample) in transmitted.iter_mut().enumerate() {
+            if n / frame_samples < condition.frames && !condition.transmits(n / frame_samples) {
+                *sample = Complex32::default();
+            }
+        }
+    }
+    let (received, power) = channel_with_power(&transmitted, condition, &mut rng);
+    let counted = WARMUP_FRAMES..condition.frames;
+    if condition.pipeline && condition.receiver == Receiver::Dsp {
+        return run_pipeline(condition, &received, &payloads, &infos, counted);
+    }
     // Symbol i is centred on transmit sample i * sps + (filter length - 1) / 2.
     let centre = SPAN_SYMBOLS * sps / 2;
     let symbol_power: Vec<f64> = (0..dibits.len())
@@ -584,9 +631,8 @@ pub fn run(condition: &Condition) -> Result<Report, String> {
         }
     };
 
-    let counted = WARMUP_FRAMES..condition.frames;
     let mut report = Report {
-        frames_sent: counted.len() as u64,
+        frames_sent: counted.clone().filter(|&i| condition.transmits(i)).count() as u64,
         carrier_locked_symbols: snapshot.locked_symbols as u64,
         demodulated_symbols: snapshot.symbols as u64,
         fade_bins: fade_bins(),
@@ -641,10 +687,14 @@ pub fn run(condition: &Condition) -> Result<Report, String> {
                 merger.push(1, frame);
             }
             let traffic = condition.traffic;
-            merger.release([None, None], true, |f| match traffic {
-                Traffic::Data => decode_data(f).is_some(),
-                Traffic::Voice => decode_voice(f).is_some(),
-            })
+            merger
+                .release([None, None], true, |f| match traffic {
+                    Traffic::Data => decode_data(f).is_some(),
+                    Traffic::Voice => decode_voice(f).is_some(),
+                })
+                .into_iter()
+                .map(|(f, d, _)| (f, d != Detector::Primary))
+                .collect()
         }
         None => frames.drain(..).map(|f| (f, false)).collect(),
     };
@@ -703,10 +753,135 @@ pub fn run(condition: &Condition) -> Result<Report, String> {
     Ok(report)
 }
 
+/// [`run`] through the production [`Pipeline`]: the same detectors, frame
+/// synchronizers, merger, decoders and their switches (see
+/// [`receiver_core::tuning`]) as the receiver, timed.
+fn run_pipeline(
+    condition: &Condition,
+    received: &[Complex32],
+    payloads: &[[u8; 20]],
+    infos: &HashMap<[u8; 28], usize>,
+    counted: std::ops::Range<usize>,
+) -> Result<Report, String> {
+    let centre = 352_603_125.0;
+    let config = ChannelConfig {
+        id: "eval".into(),
+        label: "eval".into(),
+        frequency_hz: centre,
+        format: Format::Slotted,
+    };
+    let mut pipeline = Pipeline::new(config, condition.sample_rate, centre)?;
+    let mut report = Report {
+        frames_sent: counted.clone().filter(|&i| condition.transmits(i)).count() as u64,
+        fade_bins: fade_bins(),
+        ..Report::default()
+    };
+    let index: HashMap<[u8; 10], usize> = payloads
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (protected_bits(p), i))
+        .collect();
+    let mut accepted = vec![false; condition.frames];
+    let mut events = Vec::new();
+    let started = std::time::Instant::now();
+    // 40 ms blocks, as the receiver session delivers them.
+    let block = (condition.sample_rate * 0.04).round() as usize;
+    for chunk in received.chunks(block) {
+        pipeline.process_observed(chunk, |e| events.push(e))?;
+    }
+    pipeline.flush_observed(|e| events.push(e))?;
+    report.cpu_seconds = started.elapsed().as_secs_f64();
+    report.signal_seconds = received.len() as f64 / condition.sample_rate;
+    report.demodulated_symbols =
+        pipeline.status.iq_samples * SYMBOL_RATE as u64 / condition.sample_rate as u64;
+    for event in &events {
+        let warmup = (event.frame.bit_offset as usize) < 2 * WARMUP_FRAMES * FRAME_SYMBOLS;
+        if !warmup {
+            report.frames_synchronized += u64::from(event.frame.sync_matched);
+        }
+        let via_alternate = event.detector == Detector::Alternate;
+        let via_combined = event.detector == Detector::Combined;
+        match condition.traffic {
+            Traffic::Data => {
+                if let Some(info) = event.data {
+                    match infos.get(&info) {
+                        Some(&i) if counted.contains(&i) && !accepted[i] => {
+                            accepted[i] = true;
+                            report.data_accepted += 1;
+                            report.alternate_accepted += u64::from(via_alternate);
+                            report.combined_accepted += u64::from(via_combined);
+                        }
+                        Some(_) => {}
+                        None => report.data_false += 1,
+                    }
+                }
+            }
+            Traffic::Voice => {
+                if let Some(payload) = event.speech {
+                    match index.get(&protected_bits(&payload)) {
+                        Some(&i) if counted.contains(&i) && !accepted[i] => {
+                            accepted[i] = true;
+                            report.voice_accepted += 1;
+                            report.alternate_accepted += u64::from(via_alternate);
+                            report.combined_accepted += u64::from(via_combined);
+                            report.corrected_bits += event.corrected_bits.unwrap_or(0) as u64;
+                            report.unprotected_bits += UNPROTECTED_BITS;
+                            report.unprotected_bit_errors += payload
+                                .iter()
+                                .zip(&payloads[i])
+                                .map(|(a, b)| u64::from((a ^ b).count_ones()))
+                                .sum::<u64>();
+                        }
+                        Some(_) => {}
+                        None => report.voice_false += 1,
+                    }
+                }
+            }
+        }
+    }
+    report.clock_slips = 0;
+    Ok(report)
+}
+
+/// `all`, `none`, or a comma list of feature names, each optionally
+/// prefixed with `-` to remove it from `all`.
+pub fn parse_features(value: &str) -> Result<u32, String> {
+    use receiver_core::tuning::*;
+    let named = |name: &str| -> Result<u32, String> {
+        Ok(match name {
+            "combine" => COMBINE,
+            "marker-tolerance" => MARKER_TOLERANCE,
+            "single-frame" => SINGLE_FRAME_ACQUISITION,
+            "flywheel" => FLYWHEEL,
+            "weighted-distance" => WEIGHTED_DISTANCE,
+            "conservative-erasures" => CONSERVATIVE_ERASURES,
+            "channelizer" => CHANNELIZER,
+            other => return Err(format!("unknown feature {other}")),
+        })
+    };
+    match value {
+        "all" => return Ok(ALL),
+        "none" => return Ok(0),
+        _ => {}
+    }
+    let mut flags = if value.split(',').all(|v| v.trim().starts_with('-')) {
+        ALL
+    } else {
+        0
+    };
+    for item in value.split(',').map(str::trim) {
+        match item.strip_prefix('-') {
+            Some(name) => flags &= !named(name)?,
+            None if item == "all" => flags |= ALL,
+            None => flags |= named(item)?,
+        }
+    }
+    Ok(flags)
+}
 /// Payload bits 0..78 are carried by the convolutional code and CRC; the
 /// remaining 80 travel raw. Accepted frames are identified by the former.
 const UNPROTECTED_BITS: u64 = 80;
-fn protected_bits(payload: &[u8; 20]) -> [u8; 10] {
+pub fn protected_bits(payload: &[u8; 20]) -> [u8; 10] {
     let mut key = [0; 10];
     key.copy_from_slice(&payload[..10]);
     key[9] &= 0x3f;

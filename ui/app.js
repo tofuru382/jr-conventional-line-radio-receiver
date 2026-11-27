@@ -1,4 +1,4 @@
-import { makeInput } from "./config.mjs";
+import { makeInput, makeTuning } from "./config.mjs";
 import { buildCatalog } from "./presets.mjs";
 import { AudioPlayer, Leveler } from "./audio.mjs";
 import { OperationMonitorView } from "./operation-monitor.mjs";
@@ -18,7 +18,126 @@ const androidDriver = { host: "127.0.0.1", port: "1234" };
 let nativeAudio = false,
   nativeMonitorState = "",
   serviceReceiving = false;
+// Monitor audio pushed by the receiver as it is decoded (see
+// subscribe_monitor_audio): it keeps flowing while the page's timers are
+// throttled (Android in the background, a minimized window). Polling then
+// carries status only.
+let pushedAudio = false,
+  pushState = "";
+async function startAudioPush() {
+  const Channel = window.__TAURI__?.core?.Channel;
+  if (!native || !Channel) return;
+  const channel = new Channel();
+  channel.onmessage = (message) => {
+    const chosen = message.channel;
+    if (
+      $("auto-select").checked &&
+      chosen &&
+      chosen !== selected &&
+      channels.some((c) => c.id === chosen)
+    )
+      select(chosen);
+    if (running) play(message.frames);
+  };
+  try {
+    await invoke("subscribe_monitor_audio", { channel });
+    pushedAudio = true;
+    syncAudioPush();
+  } catch {
+    pushedAudio = false;
+  }
+}
+function syncAudioPush() {
+  if (!pushedAudio) return;
+  const settings = {
+    enabled: running && $("listen").checked && !nativeAudio,
+    selected: selected || null,
+    automatic: $("auto-select").checked,
+  };
+  const next = JSON.stringify(settings);
+  if (next === pushState) return;
+  pushState = next;
+  invoke("set_monitor_push", { settings }).catch(() => {
+    pushState = "";
+  });
+}
+// Android: audio focus and the media session follow "listen" while
+// receiving (see AudioRoute.kt); its counters tell the page to mute.
+let routeListening = false,
+  route = null,
+  routeMessage = "";
+function syncAudioRoute() {
+  if (!platform.android || !window.JrAndroid?.setListening) return;
+  const listening = running && $("listen").checked;
+  if (listening === routeListening) return;
+  routeListening = listening;
+  window.JrAndroid.setListening(listening);
+}
+function setListen(on, message) {
+  routeMessage = message;
+  if ($("listen").checked === on) return;
+  $("listen").checked = on;
+  $("listen").dispatchEvent(new Event("change"));
+}
+// Whether audio may play now. Unplugged headphones and another app taking the
+// audio for good turn "listen" off; a phone call pauses until it ends; a
+// headset button or the lock screen toggles "listen".
+// The recordings player plays in this same WebView, yet Android hands it the
+// audio focus as if it were another app. That loss must neither mute nor
+// pause the live audio, which keeps playing as it is; the focus is taken
+// back once the recording stops (so another app taking it later still
+// mutes). A recording paused while the app is in the background was most
+// likely paused by another app taking the audio: that one mutes.
+const OWN_PLAYBACK_GRACE_MS = 3000;
+let ownPlayback = false,
+  ownPlaybackEnded = -Infinity;
+function ownPlaybackRecent() {
+  return ownPlayback || performance.now() - ownPlaybackEnded < OWN_PLAYBACK_GRACE_MS;
+}
+function ownPlaybackStopped(event) {
+  if (!ownPlayback) return;
+  ownPlayback = false;
+  ownPlaybackEnded = performance.now();
+  if (!platform.android) return;
+  if (event.type === "pause" && document.visibilityState === "hidden") {
+    ownPlaybackEnded = -Infinity;
+    setListen(false, "ほかのアプリが音声を使い始めたため消音しました");
+    return;
+  }
+  window.JrAndroid?.reclaimAudioFocus?.();
+}
+$("recordings-player").addEventListener("play", () => {
+  ownPlayback = true;
+});
+for (const type of ["pause", "ended", "emptied", "error"])
+  $("recordings-player").addEventListener(type, ownPlaybackStopped);
+function audioRouteOpen() {
+  if (!platform.android || !window.JrAndroid?.audioRoute) return true;
+  let next;
+  try {
+    next = JSON.parse(window.JrAndroid.audioRoute());
+  } catch {
+    return true;
+  }
+  const previous = route;
+  route = next;
+  if (previous) {
+    if (next.noisy > previous.noisy)
+      setListen(false, "イヤホンの接続が切れたため消音しました");
+    else if (next.toggles > previous.toggles)
+      setListen(!$("listen").checked, "");
+    else if (next.focus === "lost" && previous.focus !== "lost" && !ownPlaybackRecent())
+      setListen(false, "ほかのアプリが音声を使い始めたため消音しました");
+  }
+  if (next.focus === "transient" && !ownPlaybackRecent()) {
+    resetAudio();
+    return false;
+  }
+  return true;
+}
 function syncNativeMonitor() {
+  syncAudioPush();
+  syncAudioRoute();
   if (!nativeAudio) return;
   const settings = {
     enabled: running && $("listen").checked,
@@ -31,8 +150,9 @@ function syncNativeMonitor() {
   if (next === nativeMonitorState) return;
   nativeMonitorState = next;
   invoke("set_native_monitor", { settings }).catch((e) => {
+    // Sent again with the next change; nothing for the screen.
     nativeMonitorState = "";
-    fail(e);
+    console.warn(e);
   });
 }
 // Three rising tones through the chosen output, so the playback path can be
@@ -364,6 +484,177 @@ $("recordings-sort").addEventListener("change", () => {
   resetRecordingsPaging();
   renderRecordings();
 });
+// Diagnostic IQ captures (desktop and Android): the raw band for 10 or
+// 30 s, saved to the recordings folder's IQ subfolder; the IQ WAV input
+// replays them.
+let iqCapture = null,
+  iqFiles = [],
+  iqMessage = "",
+  iqDeleteArmed = null;
+const IQ_SHOWN = 5;
+function iqDirectory() {
+  return $("record-directory").value.trim() || null;
+}
+function megabytes(bytes) {
+  return bytes >= 100e6 ? `${Math.round(bytes / 1e6)} MB` : `${(bytes / 1e6).toFixed(1)} MB`;
+}
+// Captures replay through the IQ WAV input, which Android does not have:
+// there they are kept to be sent on for analysis.
+function iqReplayable() {
+  return Boolean($("input-kind").querySelector('option[value="wave"]'));
+}
+function iqRate() {
+  return (running && lastSnapshot?.sample_rate) || Number($("rate").value) || 0;
+}
+function renderIqCapture() {
+  const receiving = running && lastSnapshot?.state === "receiving";
+  const saving = iqCapture?.state === "saving";
+  $("iq-capture").disabled = !native || busy || !receiving || saving;
+  $("iq-seconds").disabled = !native || saving;
+  $("iq-capture").textContent = saving ? "保存中…" : "IQ を保存";
+  const bytes = iqRate() * Number($("iq-seconds").value) * 4;
+  const size = bytes ? `約 ${megabytes(bytes)}` : "";
+  const hint = !native
+    ? ""
+    : `受信中の電波をそのまま保存します${size ? `（${size}）` : ""}。${
+        iqReplayable() ? "入力方式「IQ WAV ファイル」で再生できます。" : "保存先の IQ フォルダーから、解析用に送れます。"
+      }${
+        bytes > 100e6 ? "サンプルレートが高いため大きなファイルになります。" : ""
+      }`;
+  if ($("iq-capture-hint").textContent !== hint) $("iq-capture-hint").textContent = hint;
+  const c = iqCapture;
+  const status = iqMessage
+    ? iqMessage
+    : !c
+      ? ""
+      : c.state === "saving"
+        ? `保存中… 残り ${Math.max(0, Math.ceil(c.seconds - c.written_seconds))} 秒`
+        : c.state === "saved"
+          ? `保存しました（${c.written_seconds.toFixed(0)} 秒・${megabytes(c.bytes)}）${c.message ? `：${c.message}` : ""}${c.path ? ` 保存先：${c.path}` : ""}`
+          : c.message || "IQ を保存できませんでした";
+  const iqStatus = $("iq-capture-status");
+  iqStatus.classList.toggle("field-error", Boolean(iqMessage && iqMessage !== "削除しました" && !iqMessage.startsWith("入力を")) || Boolean(c && c.state !== "saving" && c.state !== "saved"));
+  if ($("iq-capture-status").textContent !== status) $("iq-capture-status").textContent = status;
+  for (const replay of $("iq-files").querySelectorAll(".iq-replay")) {
+    replay.disabled = running || busy;
+    replay.title = running ? "受信を停止してから選んでください" : "";
+  }
+}
+// From each snapshot: progress, and the file list once a capture ends.
+function noteIqCapture(next) {
+  const finished = iqCapture?.state === "saving" && next && next.state !== "saving";
+  iqCapture = next ?? iqCapture;
+  if (finished) void refreshIqFiles();
+}
+$("iq-seconds").addEventListener("change", renderIqCapture);
+$("iq-capture").addEventListener("click", async () => {
+  iqMessage = "";
+  $("iq-capture").disabled = true;
+  try {
+    const path = await invoke("capture_iq", {
+      directory: iqDirectory(),
+      seconds: Number($("iq-seconds").value),
+    });
+    iqCapture = {
+      state: "saving",
+      path,
+      message: null,
+      seconds: Number($("iq-seconds").value),
+      written_seconds: 0,
+      bytes: 0,
+    };
+  } catch (e) {
+    iqMessage = friendlyError(e);
+  }
+  renderIqCapture();
+});
+// "20261123T061112Z" in the name, as Japan time.
+function iqTime(file) {
+  const m = /^iq-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(file.name);
+  const date = m
+    ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]))
+    : file.modified
+      ? new Date(file.modified * 1000)
+      : null;
+  return date ? jstTime.format(date) : file.name;
+}
+function iqCenterHz(file) {
+  const m = /-(\d+)Hz-(\d+)\.wav$/i.exec(file.name);
+  return m ? { center: Number(m[1]), rate: Number(m[2]) } : null;
+}
+function replayButton(file, info) {
+  const replay = el("button", "この IQ で受信", "iq-replay");
+  replay.type = "button";
+  replay.disabled = running || busy;
+  replay.title = running ? "受信を停止してから選んでください" : "";
+  replay.addEventListener("click", () => {
+    $("input-kind").value = "wave";
+    $("input-kind").dispatchEvent(new Event("change"));
+    $("path").value = file.path;
+    $("path").dispatchEvent(new Event("input"));
+    $("path").dispatchEvent(new Event("change"));
+    if (info) {
+      $("center").value = (info.center / 1e6).toFixed(6);
+      $("center").dispatchEvent(new Event("input"));
+      $("center").dispatchEvent(new Event("change"));
+    }
+    iqMessage = "入力を「IQ WAV ファイル」に切り替えました。受信を開始すると再生します。";
+    renderIqCapture();
+  });
+  return replay;
+}
+function renderIqFiles() {
+  const list = $("iq-files");
+  list.replaceChildren();
+  for (const file of iqFiles.slice(0, IQ_SHOWN)) {
+    const info = iqCenterHz(file);
+    const row = el("div", undefined, "iq-file");
+    row.append(
+      el(
+        "span",
+        `${iqTime(file)}　${info ? `${(info.center / 1e6).toFixed(6)} MHz・${(info.rate / 1000).toLocaleString()} kS/s・` : ""}${megabytes(file.bytes)}`,
+        "iq-file-name",
+      ),
+    );
+    if (iqReplayable()) row.append(replayButton(file, info));
+    const remove = el("button", iqDeleteArmed === file.path ? "もう一度押すと削除" : "削除");
+    remove.type = "button";
+    remove.addEventListener("click", async () => {
+      if (iqDeleteArmed !== file.path) {
+        iqDeleteArmed = file.path;
+        renderIqFiles();
+        setTimeout(() => {
+          if (iqDeleteArmed !== file.path) return;
+          iqDeleteArmed = null;
+          renderIqFiles();
+        }, 4000);
+        return;
+      }
+      iqDeleteArmed = null;
+      try {
+        await invoke("delete_iq_capture", { path: file.path, directory: iqDirectory() });
+        iqMessage = "削除しました";
+      } catch (e) {
+        iqMessage = friendlyError(e);
+      }
+      await refreshIqFiles();
+      renderIqCapture();
+    });
+    row.append(remove);
+    list.append(row);
+  }
+  if (iqFiles.length > IQ_SHOWN)
+    list.append(el("p", `ほか ${iqFiles.length - IQ_SHOWN} 件（保存先の IQ フォルダーにあります）`, "field-hint"));
+}
+async function refreshIqFiles() {
+  if (!native) return;
+  try {
+    iqFiles = (await invoke("list_iq_captures", { directory: iqDirectory() })) ?? [];
+  } catch {
+    iqFiles = [];
+  }
+  renderIqFiles();
+}
 function addRecordingsBrowser() {
   $("recordings-browser").hidden = false;
   $("recordings-browser").addEventListener("toggle", () => {
@@ -408,6 +699,8 @@ const preferenceFields = {
   rx_channel: "rx-channel",
   antenna: "antenna",
   path: "path",
+  stream_args: "stream-args",
+  gain_auto: "gain-auto",
 };
 const emptyRecording = () => ({
   state: "idle",
@@ -514,6 +807,8 @@ function el(tag, text, className) {
   return n;
 }
 $("about-open").addEventListener("click", () => {
+  renderIqCapture();
+  void refreshIqFiles();
   const dialog = $("about-dialog");
   if (!dialog.open) dialog.showModal();
 });
@@ -530,16 +825,18 @@ document.addEventListener("click", (event) => {
   if (panel) panel.open = true;
   target.focus({ preventScroll: true });
 });
+// The error line shows only what stopped and what to do; a lost dongle's
+// diagnosis goes to the version dialog and the connection log.
 function fail(error) {
-  const diagnosis = usbDiagnosis(String(error?.message ?? error ?? ""));
-  const text = friendlyError(error) + (diagnosis ? `\n診断：${diagnosis}` : "");
+  usbDiagnosis(String(error?.message ?? error ?? ""));
+  const text = friendlyError(error);
   if ($("error").textContent !== text) $("error").textContent = text;
   $("error").hidden = false;
 }
-// Android, built-in driver: when the dongle is lost, say what the driver and
+// Android, built-in driver: when the dongle is lost, note what the driver and
 // the phone saw, so a report tells a cut USB link (power, contact) from a
 // dongle that stopped answering, and whether a gain change preceded it. The
-// last one is kept for the version dialog.
+// last one is kept for the version dialog and the connection log.
 const usbDiagnosisKey = "jr-clrr.usb-diagnosis";
 let diagnosed = { raw: "", text: "" };
 function usbDiagnosis(raw) {
@@ -572,7 +869,7 @@ function usbDiagnosis(raw) {
         `${new Date().toLocaleString("ja-JP", { hour12: false })}\n${text}`,
       );
     } catch {
-      // Storage may be unavailable; the error still shows the diagnosis.
+      // Storage may be unavailable; the diagnosis is then not kept.
     }
     showLastUsbDiagnosis();
   }
@@ -627,67 +924,34 @@ async function connectionLogText() {
     .filter((line) => line !== null)
     .join("\n");
 }
-// Android: background reception needs the battery optimisation off (and on
-// some phones, vivo among them, their own background settings). Shown when
-// reception starts while it is on, and after the phone killed a run.
-const batteryNoticeKey = "jr-clrr.battery-notice";
-function showBackgroundNotice({ killed = null, starting = false } = {}) {
-  if (!platform.android) return;
-  const restricted = window.JrAndroid?.batteryRestricted?.() === true;
-  let dismissed = false;
-  try {
-    dismissed = localStorage.getItem(batteryNoticeKey) === "dismissed";
-  } catch {
-    dismissed = false;
-  }
-  if (!killed && !(starting && restricted && !dismissed)) return;
-  if (killed) {
-    const at = new Date(killed).toLocaleString("ja-JP", { hour12: false, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-    $("background-notice-killed").textContent = `前回は ${at} ごろ、受信中に Android がアプリを止めました。`;
-  }
-  $("background-notice-killed").hidden = !killed;
-  $("background-notice-battery").hidden = !restricted;
-  $("background-battery").hidden = !restricted;
-  const vendor = bridgeText("manufacturer").toLowerCase();
-  const vendorHelp = {
-    vivo: "vivo：設定 → 電池 → バックグラウンドの電力消費の管理 で、このアプリの「高いバックグラウンド電力消費」を許可し、アプリの設定で自動起動もオンにします（項目名は機種によって違います）。",
-    xiaomi: "Xiaomi：アプリの設定 → バッテリーセーバー を「制限なし」にし、自動起動をオンにします。",
-    oppo: "OPPO：アプリの設定 → バッテリー使用 で「バックグラウンドアクティビティを許可」をオンにします。",
-    samsung: "Galaxy：アプリの設定 → バッテリー を「制限なし」にします。",
-  };
-  const help = Object.entries(vendorHelp).find(([name]) => vendor.includes(name))?.[1] ?? "";
-  $("background-notice-vendor").textContent = help;
-  $("background-notice-vendor").hidden = !help;
-  $("background-notice").hidden = false;
+let resumeAfterKill = false;
+// Files written by path reach MediaStore (music and file apps) only when
+// indexed: ask Android to, once a recording is complete.
+function noteRecording(next) {
+  const finished =
+    next?.state === "completed" &&
+    next.directory &&
+    !next.discarded &&
+    recordingStatus?.state !== "completed";
+  recordingStatus = next;
+  if (finished && platform.android) window.JrAndroid?.scanRecordings?.(next.directory);
 }
-$("background-battery").addEventListener("click", () => {
+// Opt-in (a checkbox in the receive settings, Android only): reopening the
+// app after Android stopped it while receiving starts reception again with
+// the saved settings.
+const autoResumeKey = "jr-clrr-auto-resume";
+function autoResume() {
   try {
-    window.JrAndroid?.requestBatteryExemption?.();
+    return localStorage.getItem(autoResumeKey) === "on";
   } catch {
-    // The bridge only exists in the Android app.
+    return false;
   }
-});
-$("background-settings").addEventListener("click", () => {
+}
+$("background-resume").addEventListener("change", () => {
   try {
-    window.JrAndroid?.openAppSettings?.();
+    localStorage.setItem(autoResumeKey, $("background-resume").checked ? "on" : "off");
   } catch {
-    // The bridge only exists in the Android app.
-  }
-});
-$("background-dismiss").addEventListener("click", () => {
-  $("background-notice").hidden = true;
-  try {
-    localStorage.setItem(batteryNoticeKey, "dismissed");
-  } catch {
-    // It is shown again next time.
-  }
-});
-// Back from the settings: hide what was fixed there.
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "hidden" || $("background-notice").hidden || !platform.android) return;
-  if (window.JrAndroid?.batteryRestricted?.() === false) {
-    $("background-notice-battery").hidden = $("background-battery").hidden = true;
-    if ($("background-notice-killed").hidden) $("background-notice").hidden = true;
+    // Asked again next time.
   }
 });
 $("about-copy-log").addEventListener("click", async () => {
@@ -734,9 +998,13 @@ function capturePreferences() {
   return {
     version: 1,
     preset_file: presetFile,
-    input: Object.fromEntries(
-      Object.entries(preferenceFields).map(([key, id]) => [key, $(id).value]),
-    ),
+    input: {
+      ...Object.fromEntries(
+        Object.entries(preferenceFields).map(([key, id]) => [key, $(id).value]),
+      ),
+      bias_tee: $("bias-tee").checked,
+      wave_fast: $("wave-fast").checked,
+    },
     output: {
       enabled: recordingEnabled,
       directory: $("record-directory").value,
@@ -788,7 +1056,10 @@ async function restorePreferences(initial = false) {
   recordingEnabled = saved?.output.enabled === true;
   if (saved) {
     for (const [key, id] of Object.entries(preferenceFields))
-      if (key !== "profile") $(id).value = saved.input[key];
+      if (key !== "profile") $(id).value = saved.input[key] ?? "";
+    $("bias-tee").checked = saved.input.bias_tee === true;
+    $("wave-fast").checked = saved.input.wave_fast === true;
+    if (!$("gain-auto").value) $("gain-auto").value = "clip";
     const args = $("args").value;
     if (args) {
       const option = el("option", "保存済みのデバイス");
@@ -866,11 +1137,34 @@ $("preferences-retry").addEventListener("click", async () => {
     }
   } else await flushPreferences();
 });
+// Settings that apply while receiving: sent at once (see set_tuning).
+const liveTuning = new Set(["gain", "ppm", "bias-tee", "gain-auto"]);
+// The settings form is locked while receiving or busy, except for the
+// live-tunable controls of a live input; some controls also depend on the
+// input kind or on the desktop app.
+function lockSettings() {
+  const kind = $("input-kind").value;
+  const wave = kind === "wave";
+  const live = running && !busy && !wave;
+  for (const control of $("settings").querySelectorAll("input, select, button")) {
+    // Not a reception setting: what to do after Android stops the app.
+    if (control.id === "background-resume") continue;
+    const always =
+      ((control.id === "rate" || control.id === "gain") && wave) ||
+      ((control.id === "scan" || control.id === "browse" || control.id === "tcp-test") && !native);
+    control.disabled = always || ((running || busy) && !(live && liveTuning.has(control.id)));
+  }
+  // The automatic method only matters with the gain left automatic.
+  if ($("gain").value.trim() !== "") $("gain-auto").disabled = true;
+  $("live-tuning-hint").hidden = !live;
+  renderPpmSuggestion();
+  renderGainStatus(lastSnapshot?.gain);
+}
 function setControls() {
   renderLive();
   $("route-open").disabled = busy || !presetCatalog.length;
   routePicker.setBlocked(running || busy);
-  $("settings").disabled = running || busy;
+  lockSettings();
   $("region").disabled = running || busy || !channels.length;
   $("preset-browse").disabled = !native || running || busy;
   $("preset-reload").disabled = !native || running || busy || !presetFile;
@@ -886,7 +1180,11 @@ function setControls() {
   $("preferences-retry").disabled = busy || (preferencesLoadFailed && running);
   $("total-enabled").textContent = enabled.size;
   renderMute();
-  $("audio-state").textContent = !$("listen").checked
+  $("audio-state").textContent = routeMessage && !$("listen").checked
+    ? routeMessage
+    : route?.focus === "transient" && $("listen").checked && !ownPlaybackRecent()
+      ? "通話中のため一時的に消音しています"
+      : !$("listen").checked
     ? "消音中"
     : nativeAudio
       ? "音声オン"
@@ -1159,6 +1457,7 @@ function renderRecording() {
   $("output-options").disabled = busy || active;
   $("record-browse").disabled = !native || busy || active;
   $("record-start").disabled = !native || busy || !receiving || active;
+  renderIqCapture();
   $("record-stop").disabled = !native || busy || (!active && !recordingEnabled);
   $("record-stop").textContent = active ? "保存を停止" : "保存を無効にする";
   // Top bar toggle: on = saving now, or from the next reception.
@@ -1207,13 +1506,14 @@ function renderRecording() {
       `${active ? "保存フォルダー" : "保存したフォルダー"}：${s.directory}`;
     $("recording-output").hidden = false;
   }
-  // A problem with one call's WAV does not stop the saving; it shows the
-  // same way, without opening the settings.
-  const error = recordingActionError || s.error || s.warning;
+  // Only what stopped the saving or refused a request: a problem with one
+  // call's WAV or frames lost to slow storage do not stop it, and are not
+  // shown.
+  const error = recordingActionError || s.error;
   const message = error ? friendlyError(error) : "";
   if ($("recording-error").textContent !== message) {
     $("recording-error").textContent = message;
-    if (error && error !== s.warning) $("recording-settings").open = true;
+    if (error) $("recording-settings").open = true;
   }
   $("recording-error").hidden = !error;
 }
@@ -1226,6 +1526,7 @@ $("record-directory").addEventListener("input", () => {
   clearRecordingError();
   renderRecording();
 });
+$("record-directory").addEventListener("change", () => void refreshIqFiles());
 $("record-browse").addEventListener("click", async () => {
   try {
     const path = await invoke("plugin:dialog|open", {
@@ -1239,6 +1540,7 @@ $("record-browse").addEventListener("click", async () => {
       $("record-directory").value = path;
       clearRecordingError();
       void persistPreferences();
+      void refreshIqFiles();
     }
   } catch (e) {
     recordingActionError = String(e.message ?? e);
@@ -1298,7 +1600,7 @@ async function stopSaving(fromCard = false) {
     if (active) recordingStatus = { ...recordingStatus, state: "stopping" };
     setControls();
     await flushPreferences();
-    if (active) recordingStatus = await invoke("stop_recording");
+    if (active) noteRecording(await invoke("stop_recording"));
   } catch (e) {
     recordingActionError = String(e.message ?? e);
   } finally {
@@ -1349,6 +1651,7 @@ async function prepareAudio() {
 }
 function play(frames) {
   if (nativeAudio) return;
+  if (!audioRouteOpen()) return;
   if (!context || context.state !== "running" || !$("listen").checked) return;
   audioPlayer.enqueue(frames, selected);
 }
@@ -1890,11 +2193,12 @@ function updateSource() {
   $("driver-group").hidden = !(tcp && platform.android);
   $("device-group").hidden = wave || tcp || usb;
   $("tcp-group").hidden = !tcp;
-  $("ppm-group").hidden = !(tcp || usb);
+  $("ppm-group").hidden = wave;
+  $("bias-group").hidden = wave;
+  $("gain-auto-group").hidden = !(tcp || usb);
   $("soapy-options").hidden = wave || tcp || usb;
   $("file-group").hidden = !wave;
-  $("rate").disabled = wave;
-  $("gain").disabled = wave;
+  lockSettings();
   $("rate").title = wave ? "WAV ヘッダーから取得します" : "";
   $("gain").placeholder = tcp || usb ? "自動" : "機器の既定値";
   const host = $("host").value.trim();
@@ -1972,6 +2276,9 @@ $("driver-start").addEventListener("click", async () => {
 function applyAndroidLayout() {
   document.documentElement.classList.add("android");
   $("input-kind").querySelector('option[value="sdr"]')?.remove();
+  // No IQ WAV input either: without a file picker it only replayed IQ
+  // captures, which Android no longer makes.
+  $("input-kind").querySelector('option[value="wave"]')?.remove();
   // Built-in driver: the app drives the dongle itself (no driver app).
   const usb = el("option", "USB 直結（内蔵ドライバー）");
   usb.value = "usb";
@@ -2054,43 +2361,6 @@ function adoptMacDefaults() {
     void persistPreferences();
   }
 }
-// Android, built-in driver: a dongle the phone no longer sees (it cut the
-// USB power, or the plug lost contact) only returns once it is replugged.
-// The session keeps waiting; say so once it has been gone for 5 seconds.
-// A start waits 30 s for the dongle to be plugged in; that is said at once.
-const usbWaitNotice = "ドングルが USB から外れています。挿し直すと自動で受信を再開します。";
-const usbStartNotice = "ドングルが見つかりません。30 秒以内に挿すと受信を始めます。";
-const usbWait = { since: 0, checked: 0, absent: false, shown: "" };
-function renderUsbWait(s) {
-  const usb = platform.android && $("input-kind").value === "usb";
-  const starting = usb && s.running && s.state === "starting";
-  const waiting = usb && (s.reconnecting || starting);
-  if (waiting && Date.now() - usbWait.checked >= 1000) {
-    usbWait.checked = Date.now();
-    try {
-      usbWait.absent = window.JrAndroid?.usbAttached?.() === false;
-    } catch {
-      usbWait.absent = false;
-    }
-  }
-  if (!waiting || !usbWait.absent) {
-    usbWait.since = 0;
-    usbWait.absent = false;
-    if (usbWait.shown) {
-      // Not an error that replaced the notice meanwhile.
-      if ($("error").textContent === usbWait.shown) clearError();
-      usbWait.shown = "";
-    }
-    return;
-  }
-  usbWait.since ||= Date.now();
-  const notice = starting ? usbStartNotice : usbWaitNotice;
-  const due = Date.now() - usbWait.since >= (starting ? 0 : 5000);
-  if (due && usbWait.shown !== notice && (!usbWait.shown || $("error").textContent === usbWait.shown)) {
-    usbWait.shown = notice;
-    fail(notice);
-  }
-}
 // What the phone saw when the built-in driver asked for the dongle. A dongle
 // that is not there yet (or bounced off USB just then) is waited for: the
 // session takes it once it is plugged in.
@@ -2142,11 +2412,12 @@ function adoptAndroidDefaults() {
   } catch {
     switched = false;
   }
-  if (!switched && $("input-kind").value !== "wave") {
+  if (!switched) {
     $("input-kind").value = "usb";
     changed = true;
   }
-  if (!["usb", "rtl_tcp", "wave"].includes($("input-kind").value)) {
+  // Also an input Android no longer offers (an IQ WAV file).
+  if (!["usb", "rtl_tcp"].includes($("input-kind").value)) {
     $("input-kind").value = "usb";
     changed = true;
   }
@@ -2192,9 +2463,13 @@ async function startReception() {
         "args",
         "antenna",
         "rx-channel",
+        "stream-args",
+        "gain-auto",
       ].map((id) => [id, $(id).value]),
     );
     values.kind = $("input-kind").value;
+    values.bias_tee = $("bias-tee").checked;
+    values.wave_fast = $("wave-fast").checked;
     const activeChannels = channels.filter((c) => enabled.has(c.id));
     const input = makeInput(values, activeChannels);
     busy = true;
@@ -2219,7 +2494,6 @@ async function startReception() {
     running = true;
     syncBackgroundService();
     syncNativeMonitor();
-    if (input.kind !== "wave") showBackgroundNotice({ starting: true });
     sessionReplay = input.kind === "wave";
     recordingStatus = emptyRecording();
     recordingResumePending = recordingEnabled;
@@ -2233,6 +2507,15 @@ async function startReception() {
     $("state").textContent = "接続中";
     $("source-panel").open = false;
   } catch (e) {
+    // Android may already have opened the dongle for a session that did not
+    // start: let go of it (the phone counts it as in use until then).
+    if (platform.android && !running) {
+      try {
+        window.JrAndroid?.releaseUsb?.();
+      } catch {
+        // The bridge only exists in the Android app.
+      }
+    }
     fail(e);
     if (e.field) {
       invalidField = $(e.field);
@@ -2263,7 +2546,7 @@ async function stopReception() {
       recordingStatus = { ...recordingStatus, state: "stopping" };
       renderRecording();
     }
-    recordingStatus = await invoke("stop");
+    noteRecording(await invoke("stop"));
     running = false;
     syncBackgroundService();
     syncNativeMonitor();
@@ -2278,6 +2561,7 @@ async function stopReception() {
   }
 }
 $("listen").addEventListener("change", () => {
+  if ($("listen").checked) routeMessage = "";
   syncNativeMonitor();
   resetAudio();
   prepareAudio().catch(fail);
@@ -2342,11 +2626,95 @@ function frequencyCorrection(s) {
 }
 // Samples per second actually arriving; far from the setting means the
 // dongle is not running at the requested rate (or input is being lost).
+// Slightly fewer samples than requested, for a while, are lost upstream
+// (RTL-TCP reports no server-side loss): shown as an estimate.
 function measuredRate(s) {
   if (!s.input_rate || $("input-kind").value === "wave") return "";
-  const off = Math.abs(s.input_rate / s.sample_rate - 1) > 0.05;
-  return `　実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : ""}`;
+  const ratio = s.input_rate / s.sample_rate;
+  const off = Math.abs(ratio - 1) > 0.05;
+  const lost = !off && ratio < 0.99 ? `（推定欠落 ${((1 - ratio) * 100).toFixed(1)} %）` : "";
+  return `　実測 ${Math.round(s.input_rate).toLocaleString()} S/s${off ? "（設定と違います）" : lost}`;
 }
+// After a session, the automatic frequency correction it settled on can be
+// kept as the tuner's ppm correction for the next start.
+// Automatic gain by the noise floor (自動ゲインの方式): what it is doing.
+function renderGainStatus(g) {
+  const shown = running && !$("gain-auto-group").hidden && $("gain").value.trim() === "" && g;
+  const text = !shown
+    ? ""
+    : g.phase === "sweeping"
+      ? `${g.note ?? "最適なゲインを探しています"}…（15 秒ほど受信が乱れることがあります）`
+      : g.note ?? (g.gain_db != null ? `ゲイン ${g.gain_db.toFixed(1)} dB` : "");
+  if ($("gain-status").textContent !== text) $("gain-status").textContent = text;
+}
+$("gain").addEventListener("input", lockSettings);
+function renderPpmSuggestion() {
+  const button = $("apply-ppm");
+  const suggested = Math.round(lastSnapshot?.frequency_correction_ppm ?? 0);
+  const usable =
+    !running && !busy && suggested !== 0 && $("input-kind").value !== "wave";
+  button.hidden = !usable;
+  if (usable)
+    button.textContent = `自動補正を周波数補正に反映（${suggested > 0 ? "+" : "−"}${Math.abs(suggested)} ppm）`;
+}
+$("apply-ppm").addEventListener("click", () => {
+  const suggested = Math.round(lastSnapshot?.frequency_correction_ppm ?? 0);
+  const ppm = Number($("ppm").value) || 0;
+  $("ppm").value = String(ppm + suggested);
+  lastSnapshot = { ...lastSnapshot, frequency_correction_ppm: 0 };
+  renderPpmSuggestion();
+  void persistPreferences();
+});
+// Gain, ppm and bias tee while receiving: applied without restarting. A
+// "change" event fires once a value is committed, not on every keystroke.
+async function sendTuning() {
+  if (!running || busy) return;
+  try {
+    const control = makeTuning(
+      {
+        gain: $("gain").value,
+        ppm: $("ppm").value,
+        bias_tee: $("bias-tee").checked,
+        gain_auto: $("gain-auto").value,
+      },
+      $("input-kind").value,
+    );
+    await invoke("set_tuning", { control });
+    for (const id of ["gain", "ppm"]) $(id).removeAttribute("aria-invalid");
+  } catch (e) {
+    if (e.field) $(e.field).setAttribute("aria-invalid", "true");
+    fail(e);
+  }
+}
+for (const id of liveTuning)
+  $(id).addEventListener("change", () => {
+    void sendTuning();
+  });
+$("tcp-test").addEventListener("click", async () => {
+  const result = $("tcp-test-result");
+  result.textContent = "接続しています…";
+  $("tcp-test").disabled = true;
+  try {
+    const input = makeInput(
+      {
+        kind: "rtl_tcp",
+        host: $("host").value,
+        port: $("port").value,
+        rate: "240000",
+        center: "352.603125",
+        gain: "",
+        ppm: "0",
+      },
+      [{ frequency_hz: 352603125 }],
+    );
+    const probe = await invoke("test_rtl_tcp", { radio: input.radio });
+    result.textContent = `接続できました：${probe.address}・${probe.tuner}（ゲイン ${probe.gain_count} 段）`;
+  } catch (e) {
+    result.textContent = `接続できません：${e.message ?? e}`;
+  } finally {
+    lockSettings();
+  }
+});
 // Main page: calls in progress (with background recording and playback state)
 // and the latest recordings, playable in place.
 let liveKey = "";
@@ -2418,8 +2786,26 @@ $("volume").addEventListener("input", () => {
 });
 async function poll() {
   const started = performance.now();
+  // Hidden (screen off, app in the background): Android plays the monitor
+  // natively and needs nothing from the page; the desktop still feeds its
+  // audio but skips every render until the page is visible again.
+  const hidden = document.visibilityState === "hidden";
+  if (hidden && (nativeAudio || pushedAudio)) {
+    setTimeout(poll, 1000);
+    return;
+  }
   try {
-    if (native && !busy && sessionVisible) {
+    if (native && !busy && sessionVisible && hidden) {
+      const result = await invoke("snapshot", {
+        selected,
+        automatic: $("auto-select").checked,
+      });
+      if (result) {
+        running = result.status.running;
+        if (result.status.state === "receiving" || result.status.state === "completed")
+          play(result.audio);
+      }
+    } else if (native && !busy && sessionVisible) {
       const generation = uiGeneration;
       const requestedChannel = selected;
       const revision = selectionRevision;
@@ -2427,14 +2813,17 @@ async function poll() {
       const result = await invoke("snapshot", {
         selected: requestedChannel,
         automatic,
-        ...(nativeAudio ? { audio: false } : {}),
+        ...(nativeAudio || pushedAudio ? { audio: false } : {}),
       });
       if (result && generation === uiGeneration) {
         const s = result.status;
         lastSnapshot = s;
-        if (s.recording) recordingStatus = s.recording;
+        if (s.recording) noteRecording(s.recording);
+        noteIqCapture(s.iq_capture);
+        renderGainStatus(s.gain);
         running = s.running;
         syncBackgroundService();
+        syncAudioPush();
         const selectionCurrent = revision === selectionRevision;
         if (
           selectionCurrent &&
@@ -2453,7 +2842,6 @@ async function poll() {
           else resetAudio();
           syncNativeMonitor();
         }
-        renderUsbWait(s);
         const stateLabel = s.reconnecting
           ? "再接続中"
           : ({
@@ -2504,7 +2892,8 @@ async function poll() {
       }
     }
   } catch (e) {
-    fail(e);
+    // The next poll tries again; errors are shown only once reception stops.
+    console.warn(e);
   } finally {
     // IPC and rendering time are part of the polling period, not an extra
     // delay added after it. Leave breathing room when a poll itself is slow.
@@ -2520,6 +2909,8 @@ for (const id of [
   "output-audio",
   "output-raw",
   "output-data",
+  "bias-tee",
+  "wave-fast",
 ]) {
   for (const event of ["input", "change"])
     $(id).addEventListener(event, () => {
@@ -2546,8 +2937,9 @@ try {
     if (platform.android) {
       addTestSound();
       addRecordingsBrowser();
-      const kill = bridgeText("lastKill");
-      if (kill) showBackgroundNotice({ killed: Number(kill.split("\t")[1]) });
+      $("background-resume-group").hidden = false;
+      $("background-resume").checked = autoResume();
+      if (bridgeText("lastKill")) resumeAfterKill = autoResume();
     }
   }
   bundledCatalog = native
@@ -2559,6 +2951,8 @@ try {
         }),
       );
   await restorePreferences(true);
+  $("iq-capture-group").hidden = !native;
+  void refreshIqFiles();
   if (platform.android) adoptAndroidDefaults();
   else if (platform.simple) adoptMacDefaults();
   busy = false;
@@ -2579,7 +2973,12 @@ try {
         await flushPreferences();
       });
     }
+    await startAudioPush();
     poll();
+    if (resumeAfterKill && !running) {
+      resumeAfterKill = false;
+      $("start").click();
+    }
   } else {
     $("runtime-note").textContent =
       "ブラウザプレビュー　受信にはデスクトップアプリを起動してください";

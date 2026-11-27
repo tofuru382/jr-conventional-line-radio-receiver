@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
-import { makeInput } from "../../ui/config.mjs";
+import { makeInput, makeTuning } from "../../ui/config.mjs";
 import { buildCatalog } from "../../ui/presets.mjs";
 import { AudioPlayer, Leveler } from "../../ui/audio.mjs";
 import { OperationMonitorView } from "../../ui/operation-monitor.mjs";
@@ -82,8 +82,12 @@ async function setup(
     platformInfo = null,
     driverError = null,
     recordings = [],
+    iqFiles = [],
+    startError = null,
     connectionLog = [],
     bridge = null,
+    channelClass = null,
+    storage = null,
   } = {},
 ) {
   const dom = new JSDOM(html, {
@@ -135,7 +139,7 @@ async function setup(
   let snapshot = { status: status(), audio: [] };
   let recording = { state: "idle", files: 0, pcm_samples: 0, error: null };
   let closeHandler;
-  w.testDependencies = { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError };
+  w.testDependencies = { makeInput, makeTuning, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError };
   w.structuredClone = structuredClone;
   // jsdom has no native modal behavior. Exercise our handlers, not a focus trap
   // or Escape key implementation; those belong to the browser's dialog element.
@@ -163,9 +167,11 @@ async function setup(
     return timers.length;
   };
   if (bridge) w.JrAndroid = bridge;
+  for (const [key, value] of Object.entries(storage ?? {})) w.localStorage.setItem(key, value);
   w.__TAURI__ = native
     ? {
         core: {
+          ...(channelClass ? { Channel: channelClass } : {}),
           invoke: async (command, args) => {
             calls.push({ command, args });
             if (command === "load_preferences") {
@@ -213,6 +219,7 @@ async function setup(
                 ? presetFiles.path
                 : folder;
             if (command === "start") {
+              if (startError) throw new Error(startError);
               recording = { state: "idle", files: 0, pcm_samples: 0, error: null };
               return null;
             }
@@ -243,7 +250,12 @@ async function setup(
               if (w.__failDelete) throw new Error(w.__failDelete);
               return null;
             }
-            if (command === "capture_iq") return "/sdcard/Download/JR-CLRR/Recordings/iq-1-352603125Hz-240000.wav";
+            if (command === "capture_iq") return "/sdcard/Download/JR-CLRR/Recordings/IQ/iq-20261123T061112Z-352603125Hz-240000.wav";
+            if (command === "list_iq_captures") return structuredClone(iqFiles);
+            if (command === "delete_iq_capture") {
+              iqFiles = iqFiles.filter((f) => f.path !== args.path);
+              return null;
+            }
             if (command === "native_audio_status")
               return { underruns: 2, buffer_ms: 1000, rate: 48000 };
             if (command === "connection_log") return structuredClone(connectionLog);
@@ -276,7 +288,7 @@ async function setup(
     };
   };
   await w.eval(
-    `(async () => {const { makeInput, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError } = window.testDependencies;\n${source}\n})()`,
+    `(async () => {const { makeInput, makeTuning, buildCatalog, AudioPlayer, Leveler, OperationMonitorView, RoutePicker, friendlyError } = window.testDependencies;\n${source}\n})()`,
   );
   const $ = (id) => w.document.getElementById(id);
   if (!catalogError)
@@ -372,7 +384,7 @@ test("Android hides SoapySDR and pickers, defaults to the built-in USB driver, a
   const { $ } = app;
   assert.deepEqual(
     [...$("input-kind").options].map((o) => o.value),
-    ["usb", "rtl_tcp", "wave"],
+    ["usb", "rtl_tcp"],
   );
   assert.equal($("input-kind").value, "usb");
   assert.equal($("driver-group").hidden, true);
@@ -394,7 +406,7 @@ test("Android hides SoapySDR and pickers, defaults to the built-in USB driver, a
     [1234],
   );
   assert.equal($("error").hidden, true);
-  await app.change("input-kind", "wave");
+  await app.change("input-kind", "usb");
   assert.equal($("driver-group").hidden, true);
 });
 test("Android plays live audio through Web Audio and holds the background service while receiving", async (t) => {
@@ -528,6 +540,14 @@ test("Android built-in driver asks for the dongle before starting", async (t) =>
   assert.equal(start.args.config.input.radio.sample_rate, 240000);
   assert.ok(!("host" in start.args.config.input.radio));
 });
+test("Android lets go of the dongle when reception fails to start after it was opened", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false }, startError: "受信を開始できません" });
+  const released = [];
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "ok", releaseUsb: () => released.push(1) };
+  await app.click("start");
+  assert.equal(released.length, 1);
+  assert.match(app.$("error").textContent, /受信を開始できません/);
+});
 test("Android starts without the dongle and waits for it to be plugged in", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
@@ -537,20 +557,24 @@ test("Android starts without the dongle and waits for it to be plugged in", asyn
   await app.click("start");
   // Not found (or bounced off USB just then): the session starts and waits.
   assert.equal(app.calls.some((c) => c.command === "start"), true);
-  let now = 1_000_000;
-  t.mock.method(app.w.Date, "now", () => now);
+  // Waiting is no error: the status bar says it is getting ready.
   app.setSnapshot({ status: { ...status(), state: "starting" }, audio: [] });
   await app.poll();
-  assert.equal($("error").textContent, "ドングルが見つかりません。30 秒以内に挿すと受信を始めます。");
-  assert.equal($("state").textContent, "準備中");
-  // Plugged in: the notice goes, and reception starts.
-  attached = true;
-  now += 1500;
-  await app.poll();
   assert.equal($("error").hidden, true);
+  assert.equal($("state").textContent, "準備中");
+  // Plugged in: reception starts.
+  attached = true;
   app.setSnapshot({ status: status(), audio: [] });
   await app.poll();
   assert.equal($("error").hidden, true);
+  assert.equal($("state").textContent, "受信中");
+  // Never plugged in within the wait: the stopped session says so.
+  app.setSnapshot({
+    status: { ...status(), running: false, state: "failed", error: "USB: 30 秒待ちましたが、ドングルを使えませんでした。挿さっているか、USB の使用を許可したかを確認してください" },
+    audio: [],
+  });
+  await app.poll();
+  assert.equal($("error").textContent, "ドングルを使えませんでした。挿し直して、USB の使用を許可してください。");
 });
 test("a failed session's error does not come back after switching input or starting again", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -578,7 +602,7 @@ test("a failed session's error does not come back after switching input or start
   assert.match($("error").textContent, /ドングルを開けません/);
   assert.doesNotMatch($("error").textContent, /RTL-TCP/);
 });
-test("a lost dongle's error carries a diagnosis, kept for the version dialog with the log", async (t) => {
+test("a lost dongle's error is one plain line; its diagnosis is kept for the version dialog with the log", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
   assert.equal($("about-copy-log").hidden, false);
@@ -596,16 +620,14 @@ test("a lost dongle's error carries a diagnosis, kept for the version dialog wit
   app.setSnapshot({ status: { ...status(), running: false, state: "failed", error: lost }, audio: [] });
   await app.poll();
   await app.poll();
-  const [message, diagnosis] = $("error").textContent.split("\n");
-  assert.equal(message, "ドングルが外れました。挿し直してから受信を開始してください。");
-  assert.equal(
-    diagnosis,
-    "診断：データが止まった · ゲイン変更の 0.4 秒後 · 再接続 3 回失敗: USB: ドングルを初期化できません (control transfer timed out) · スマホが USB の切断を検出（63 秒前） · 今は USB 機器なし · 電池 41.5℃ 48%",
-  );
+  assert.equal($("error").textContent, "ドングルが外れました。挿し直してから受信を開始してください。");
   // The phone is asked once per error, not on every poll.
   assert.equal(asked, 1);
   assert.equal($("about-lost").hidden, false);
-  assert.match($("about-lost").textContent, /\nデータが止まった · /);
+  assert.equal(
+    $("about-lost").textContent.split("\n")[1],
+    "データが止まった · ゲイン変更の 0.4 秒後 · 再接続 3 回失敗: USB: ドングルを初期化できません (control transfer timed out) · スマホが USB の切断を検出（63 秒前） · 今は USB 機器なし · 電池 41.5℃ 48%",
+  );
   assert.match(app.w.localStorage.getItem("jr-clrr.usb-diagnosis"), /ゲイン変更の 0\.4 秒後/);
   // The log: driver and Android notes in time order, shown and copied.
   let copied = null;
@@ -624,46 +646,36 @@ test("a lost dongle's error carries a diagnosis, kept for the version dialog wit
   assert.match(lines[1], /^前回の切断: .*ゲイン変更の 0\.4 秒後/);
   assert.ok(lines.some((l) => /Android: USB 機器が外れました/.test(l)));
   assert.equal($("about-copy-log").textContent, "コピーしました");
-  // Other errors and other platforms get no diagnosis.
+  // Other errors get no diagnosis either: the kept one stays.
   app.setSnapshot({
     status: { ...status(), running: false, state: "failed", error: "RTL-TCP: 127.0.0.1:1234 に接続できません" },
     audio: [],
   });
   await app.poll();
   assert.doesNotMatch($("error").textContent, /診断/);
+  assert.match($("about-lost").textContent, /ゲイン変更の 0\.4 秒後/);
 });
-test("Android says to replug a dongle that left USB, until it is back", async (t) => {
+test("Android shows no error while the session waits for a dongle that left USB, only once it gives up", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
-  let attached = false;
-  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "ok", usbAttached: () => attached };
+  app.w.JrAndroid = { setReceiving() {}, requestUsb: () => "ok", usbAttached: () => false };
   await app.change("input-kind", "usb");
   await app.click("start");
   let now = 1_000_000;
   t.mock.method(app.w.Date, "now", () => now);
-  const reconnecting = { status: { ...status(), reconnecting: true }, audio: [] };
-  app.setSnapshot(reconnecting);
-  await app.poll();
-  // A bounce of a few seconds says nothing.
-  now += 4000;
+  app.setSnapshot({ status: { ...status(), reconnecting: true }, audio: [] });
+  for (let i = 0; i < 4; i++) {
+    now += 6000;
+    await app.poll();
+  }
+  assert.equal($("error").hidden, true);
+  assert.equal($("state").textContent, "再接続中");
+  // A poll that fails (e.g. while in the background) shows nothing either.
+  app.setSnapshot(() => {
+    throw new Error("IPC timeout");
+  });
   await app.poll();
   assert.equal($("error").hidden, true);
-  now += 1500;
-  await app.poll();
-  assert.equal($("error").textContent, "ドングルが USB から外れています。挿し直すと自動で受信を再開します。");
-  assert.equal($("error").hidden, false);
-  // Replugged: the notice goes away, also before reception is back.
-  attached = true;
-  now += 1500;
-  await app.poll();
-  assert.equal($("error").hidden, true);
-  // An error that replaced the notice stays.
-  attached = false;
-  now += 1500;
-  await app.poll();
-  now += 6000;
-  await app.poll();
-  assert.equal($("error").hidden, false);
   app.setSnapshot({
     status: { ...status(), running: false, state: "failed", error: "USB: 受信を開始できません" },
     audio: [],
@@ -672,58 +684,48 @@ test("Android says to replug a dongle that left USB, until it is back", async (t
   assert.match($("error").textContent, /^ドングルの受信を開始できません/);
   assert.equal($("error").hidden, false);
 });
-test("Android asks to lift battery optimisation, and reports a killed run", async (t) => {
+test("saving problems that do not stop the saving are not shown; one that stops it is", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
   const { $ } = app;
-  const asked = [];
-  let restricted = true;
-  app.w.JrAndroid = {
-    setReceiving() {},
-    requestUsb: () => "ok",
-    batteryRestricted: () => restricted,
-    manufacturer: () => "vivo",
-    requestBatteryExemption: () => asked.push("battery"),
-    openAppSettings: () => asked.push("settings"),
-  };
-  assert.equal($("background-notice").hidden, true);
   await app.click("start");
-  assert.equal($("background-notice").hidden, false);
-  assert.equal($("background-notice-battery").hidden, false);
-  assert.equal($("background-notice-killed").hidden, true);
-  assert.match($("background-notice-vendor").textContent, /^vivo：設定 → 電池/);
-  $("background-battery").click();
-  $("background-settings").click();
-  assert.deepEqual(asked, ["battery", "settings"]);
-  // Back from the settings with the optimisation off: the notice goes.
-  restricted = false;
-  app.w.document.dispatchEvent(new app.w.Event("visibilitychange"));
-  assert.equal($("background-notice").hidden, true);
-  // Dismissed, it is not shown at the next start.
-  restricted = true;
-  await app.click("start");
-  await app.click("start");
-  assert.equal($("background-notice").hidden, false);
-  $("background-dismiss").click();
-  assert.equal($("background-notice").hidden, true);
-  await app.click("start");
-  await app.click("start");
-  assert.equal($("background-notice").hidden, true);
+  const saving = { state: "recording", options: { audio: true, raw_frames: false, data_messages: false }, files: 1, pcm_samples: 8000, raw_frames: 0, data_messages: 0, error: null, directory: "/sdcard/x" };
+  app.setRecording({ ...saving, warning: "D5 の WAV を確定できませんでした", dropped_events: 12 });
+  await app.poll();
+  assert.equal($("recording-error").hidden, true);
+  assert.equal($("error").hidden, true);
+  app.setRecording({ ...saving, state: "failed", error: "保存先に書き込めません" });
+  await app.poll();
+  assert.equal($("recording-error").hidden, false);
+  assert.equal($("recording-error").textContent, "保存先に書き込めません");
 });
-test("Android shows when the phone killed the last run", async (t) => {
-  const app = await setup(t, {
-    platformInfo: { android: true, soapy: false },
-    bridge: {
-      lastKill: () => `${Date.UTC(2026, 10, 18, 0, 0)}\t${Date.UTC(2026, 10, 18, 0, 41)}`,
-      batteryRestricted: () => false,
-      manufacturer: () => "Google",
-    },
-  });
+test("Android shows no background notice; resuming after the phone killed a run is a setting", async (t) => {
+  const killed = `${Date.UTC(2026, 10, 18, 0, 0)}\t${Date.UTC(2026, 10, 18, 0, 41)}`;
+  const bridge = () => ({ lastKill: () => killed, setReceiving() {}, requestUsb: () => "ok" });
+  // Not opted in: a killed run says nothing and does not start reception.
+  const app = await setup(t, { platformInfo: { android: true, soapy: false }, bridge: bridge() });
   const { $ } = app;
-  assert.equal($("background-notice").hidden, false);
-  assert.match($("background-notice-killed").textContent, /^前回は .+ ごろ、受信中に Android がアプリを止めました。$/);
-  assert.equal($("background-notice-battery").hidden, true);
-  assert.equal($("background-battery").hidden, true);
-  assert.equal($("background-notice-vendor").hidden, true);
+  assert.equal($("background-notice"), null);
+  assert.equal($("background-resume-group").hidden, false);
+  assert.equal($("background-resume").checked, false);
+  await app.click("start");
+  await tick();
+  assert.equal($("error").hidden, true);
+  assert.equal(app.calls.filter((c) => c.command === "start").length, 1);
+  // Opting in is remembered.
+  $("background-resume").click();
+  assert.equal(app.w.localStorage.getItem("jr-clrr-auto-resume"), "on");
+  // Opted in: reopening after a killed run starts reception by itself.
+  const resumed = await setup(t, {
+    platformInfo: { android: true, soapy: false },
+    bridge: bridge(),
+    storage: { "jr-clrr-auto-resume": "on" },
+  });
+  for (let i = 0; i < 5; i++) await tick();
+  assert.equal(resumed.$("background-resume").checked, true);
+  assert.equal(resumed.calls.filter((c) => c.command === "start").length, 1);
+  // Desktop has no such setting.
+  const desktop = await setup(t, { platformInfo: { android: false, soapy: true } });
+  assert.equal(desktop.$("background-resume-group").hidden, true);
 });
 test("the title bar shows the time and the screen's name", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -842,10 +844,131 @@ test("the measured input rate is shown and flagged when it differs from the sett
   await app.poll();
   assert.match($("capture-info").textContent, /　周波数 自動補正 \+120 Hz　入力/);
 });
-test("no diagnosis panels: IQ capture and the connection log are gone", async (t) => {
+test("no diagnosis panels on Android besides the IQ capture in the version dialog", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
-  for (const id of ["iq-group", "iq-capture", "log-group", "connection-log", "recent-block"])
+  for (const id of ["iq-group", "log-group", "connection-log", "recent-block"])
     assert.equal(app.$(id), null, id);
+  assert.equal(app.$("iq-capture-group").closest("dialog")?.id, "about-dialog");
+  assert.equal(app.$("iq-capture-group").hidden, false);
+});
+test("IQ capture saves for the chosen length with progress, then lists, replays and deletes captures", async (t) => {
+  const root = "/sdcard/Download/JR-CLRR/Recordings/IQ";
+  const iq = (stamp, seconds) => ({
+    name: `iq-${stamp}-352603125Hz-240000.wav`,
+    path: `${root}/iq-${stamp}-352603125Hz-240000.wav`,
+    bytes: 44 + 240000 * 4 * seconds,
+    modified: 0,
+  });
+  const app = await setup(t, {
+    platformInfo: { android: false, soapy: true },
+    iqFiles: [iq("20261123T061112Z", 10)],
+  });
+  const { $ } = app;
+  // Listed at start, newest first, in Japan time with frequency, rate and size.
+  const rows = () => [...$("iq-files").querySelectorAll(".iq-file")];
+  assert.equal(rows().length, 1);
+  assert.equal(rows()[0].querySelector(".iq-file-name").textContent, "11/23 15:11:12　352.603125 MHz・240 kS/s・9.6 MB");
+  // Only while receiving; the hint gives the size for the chosen length.
+  assert.equal($("iq-capture").disabled, true);
+  assert.match($("iq-capture-hint").textContent, /約 9\.6 MB/);
+  await app.change("iq-seconds", "30");
+  assert.match($("iq-capture-hint").textContent, /約 28\.8 MB/);
+  await app.click("start");
+  await app.poll();
+  assert.equal($("iq-capture").disabled, false);
+  // Replaying needs reception stopped.
+  assert.equal(rows()[0].querySelector(".iq-replay").disabled, true);
+  await app.click("iq-capture");
+  const request = app.calls.filter((c) => c.command === "capture_iq").at(-1).args;
+  assert.equal(request.seconds, 30);
+  assert.equal($("iq-capture").disabled, true);
+  assert.equal($("iq-capture").textContent, "保存中…");
+  const path = `${root}/iq-20261123T061200Z-352603125Hz-240000.wav`;
+  const capture = (state, written, extra = {}) => ({
+    status: { ...status(), iq_capture: { state, path, message: null, seconds: 30, written_seconds: written, bytes: 44 + 960000 * written, ...extra } },
+    audio: [],
+  });
+  app.setSnapshot(capture("saving", 12.4));
+  await app.poll();
+  assert.equal($("iq-capture-status").textContent, "保存中… 残り 18 秒");
+  // Finished: the list refreshes.
+  app.setSnapshot(capture("saved", 30));
+  await app.poll();
+  assert.equal(
+    $("iq-capture-status").textContent,
+    "保存しました（30 秒・28.8 MB） 保存先：/sdcard/Download/JR-CLRR/Recordings/IQ/iq-20261123T061200Z-352603125Hz-240000.wav",
+  );
+  assert.equal($("iq-capture").disabled, false);
+  assert.ok(app.calls.filter((c) => c.command === "list_iq_captures").length >= 2);
+  // Stopped: replay switches the input to that file at its centre frequency.
+  await app.click("start");
+  app.setSnapshot({ status: { ...status(), running: false, state: "stopped" }, audio: [] });
+  await app.poll();
+  assert.equal(rows()[0].querySelector(".iq-replay").disabled, false);
+  $("center").value = "350";
+  rows()[0].querySelector(".iq-replay").click();
+  assert.equal($("input-kind").value, "wave");
+  assert.equal($("path").value, iq("20261123T061112Z", 10).path);
+  assert.equal($("center").value, "352.603125");
+  assert.match($("iq-capture-status").textContent, /IQ WAV ファイル/);
+  // Delete asks for a second press.
+  const remove = () => [...rows()[0].querySelectorAll("button")].at(-1);
+  remove().click();
+  assert.equal(remove().textContent, "もう一度押すと削除");
+  assert.equal(app.calls.some((c) => c.command === "delete_iq_capture"), false);
+  remove().click();
+  await tick();
+  await tick();
+  assert.equal(app.calls.filter((c) => c.command === "delete_iq_capture").at(-1).args.path, iq("20261123T061112Z", 10).path);
+  assert.equal(rows().length, 0);
+  assert.equal($("iq-capture-status").textContent, "削除しました");
+});
+test("a failed or cut-short IQ capture says why", async (t) => {
+  const app = await setup(t, { platformInfo: { android: false, soapy: true } });
+  const { $ } = app;
+  await app.click("start");
+  await app.poll();
+  await app.click("iq-capture");
+  const at = (state, extra) => ({
+    status: { ...status(), iq_capture: { state, path: "/x/IQ/iq-a.wav", message: null, seconds: 10, written_seconds: 0, bytes: 0, ...extra } },
+    audio: [],
+  });
+  app.setSnapshot(at("saved", { written_seconds: 4, bytes: 44 + 960000 * 4, message: "保存先への書き込みが追いつかないため途中で止めました" }));
+  await app.poll();
+  assert.equal(
+    $("iq-capture-status").textContent,
+    "保存しました（4 秒・3.8 MB）：保存先への書き込みが追いつかないため途中で止めました 保存先：/x/IQ/iq-a.wav",
+  );
+  await app.click("iq-capture");
+  app.setSnapshot(at("failed", { message: "IQ を保存できません：Permission denied" }));
+  await app.poll();
+  assert.equal($("iq-capture-status").textContent, "IQ を保存できません：Permission denied");
+});
+test("IQ captures replay on desktop; Android keeps them to send on, without an IQ WAV input", async (t) => {
+  const file = { name: "iq-20261123T061112Z-352603125Hz-240000.wav", path: "/r/IQ/iq-20261123T061112Z-352603125Hz-240000.wav", bytes: 9600044, modified: 0 };
+  const desktop = await setup(t, { platformInfo: { android: false, soapy: true }, iqFiles: [file] });
+  assert.equal(desktop.$("iq-capture-group").hidden, false);
+  assert.deepEqual([...desktop.$("iq-files").querySelectorAll("button")].map((b) => b.textContent), ["この IQ で受信", "削除"]);
+  const preview = await setup(t, { native: false });
+  assert.equal(preview.$("iq-capture-group").hidden, true);
+  assert.match(desktop.$("iq-capture-hint").textContent, /入力方式「IQ WAV ファイル」で再生できます/);
+  // Android: the capture, but no IQ WAV input to replay it with, so no
+  // replay key (it used to leave no input chosen); a run saved with that
+  // input comes back on the built-in driver.
+  const preferences = {
+    value: {
+      version: 1,
+      preset_file: null,
+      input: { kind: "wave", profile: "east", center: "352.603125", rate: "240000", gain: "", host: "", port: "", ppm: "0", args: "", rx_channel: "0", antenna: "", path: "/sdcard/x/IQ/iq-a.wav" },
+      output: { enabled: false, directory: null, audio: true, raw_frames: false, data_messages: false },
+    },
+  };
+  const android = await setup(t, { platformInfo: { android: true, soapy: false }, preferences, configureConnection: false, iqFiles: [file] });
+  assert.equal(android.$("iq-capture-group").hidden, false);
+  assert.deepEqual([...android.$("iq-files").querySelectorAll("button")].map((b) => b.textContent), ["削除"]);
+  assert.match(android.$("iq-capture-hint").textContent, /解析用に送れます/);
+  assert.equal(android.$("input-kind").querySelector('option[value="wave"]'), null);
+  assert.equal(android.$("input-kind").value, "usb");
 });
 test("Android chooses receive targets by route", async (t) => {
   const app = await setup(t, { platformInfo: { android: true, soapy: false } });
@@ -1786,7 +1909,11 @@ test("about dialog shows product and author, restores focus, and leaves receptio
   assert.equal(dialog.open, true);
   assert.deepEqual(ui.modalCalls, ["showModal"]);
   assert.equal(ui.w.document.activeElement.id, "about-close");
-  assert.equal(ui.calls.length, commands);
+  // Opening it only reads the IQ capture list shown in it.
+  assert.deepEqual(
+    ui.calls.slice(commands).map((c) => c.command),
+    ["list_iq_captures"],
+  );
   await ui.poll();
   assert.equal(ui.$("state").textContent, "受信中");
   assert.equal(ui.$("recording-state").textContent, "保存中");
@@ -2146,7 +2273,12 @@ test("default source requires a user endpoint; filtering never removes active ch
   assert.equal(config.input.kind, "rtl_tcp");
   assert.equal(config.input.radio.host, "127.0.0.1");
   assert.equal(config.input.radio.port, 1234);
-  assert.equal(ui.$("settings").disabled, true);
+  // Locked while receiving, except what applies live (gain, ppm, bias tee).
+  for (const id of ["host", "port", "rate", "center", "input-kind", "tcp-test"])
+    assert.equal(ui.$(id).disabled, true, id);
+  await ui.poll();
+  for (const id of ["gain", "ppm", "bias-tee"]) assert.equal(ui.$(id).disabled, false, id);
+  assert.equal(ui.$("live-tuning-hint").hidden, false);
   assert.equal(ui.w.document.activeElement.id, "start");
   await ui.poll();
   assert.equal(ui.$("total-locked").textContent, "3");
@@ -2157,7 +2289,7 @@ test("default source requires a user endpoint; filtering never removes active ch
   });
   await ui.click("start");
   await ui.poll();
-  assert.equal(ui.$("settings").disabled, false);
+  for (const id of ["host", "port", "rate", "gain"]) assert.equal(ui.$(id).disabled, false, id);
   assert.equal(ui.$("state").textContent, "停止中");
   assert.equal(ui.$("channels").querySelectorAll("td.locked").length, 0);
 });
@@ -2577,4 +2709,192 @@ test("the version dialog credits the dongle drivers", async (t) => {
   assert.match($("about-driver").textContent, /librtlsdr/);
   assert.match($("about-driver").textContent, /Rtl-sdr driver/);
   assert.match($("about-font").textContent, /DotGothic16（Fontworks、SIL OFL 1\.1）/);
+});
+
+test("gain and ppm changes while receiving are sent without restarting", async (t) => {
+  const ui = await setup(t);
+  await ui.click("start");
+  await ui.poll();
+  await ui.change("gain", "30.5");
+  ui.$("bias-tee").checked = true;
+  ui.$("bias-tee").dispatchEvent(new ui.w.Event("change"));
+  await new Promise((resolve) => setImmediate(resolve));
+  const tuning = ui.calls.filter((c) => c.command === "set_tuning");
+  assert.equal(tuning.length, 2);
+  assert.deepEqual(tuning[0].args.control, { gain_db: 30.5, ppm: 0, bias_tee: false, gain_optimize: false });
+  assert.deepEqual(tuning[1].args.control, { gain_db: 30.5, ppm: 0, bias_tee: true, gain_optimize: false });
+  assert.equal(ui.calls.filter((c) => c.command === "start").length, 1);
+});
+
+test("the automatic gain method is offered for RTL-TCP and USB, sent live and saved, and shows what the optimizer does", async (t) => {
+  const ui = await setup(t);
+  const { $ } = ui;
+  assert.equal($("gain-auto-group").hidden, false);
+  assert.equal($("gain-auto").value, "clip");
+  await ui.change("gain-auto", "optimize");
+  await ui.click("start");
+  const started = ui.calls.filter((c) => c.command === "start").at(-1).args;
+  assert.equal(JSON.stringify(started).includes('"gain_optimize":true'), true, JSON.stringify(started));
+  const at = (gain) => ({ status: { ...status(), gain }, audio: [] });
+  ui.setSnapshot(at({ phase: "sweeping", gain_db: 7.7, note: "最適なゲインを探しています", floor_rise_db: null }));
+  await ui.poll();
+  assert.equal($("gain-status").textContent, "最適なゲインを探しています…（15 秒ほど受信が乱れることがあります）");
+  ui.setSnapshot(at({ phase: "tracking", gain_db: 37.2, note: "雑音の量から 37.2 dB を選びました（ADC の雑音より 8.1 dB 上）", floor_rise_db: 8.1 }));
+  await ui.poll();
+  assert.match($("gain-status").textContent, /^雑音の量から 37\.2 dB を選びました/);
+  // Switching back while receiving is sent at once.
+  await ui.change("gain-auto", "clip");
+  const tuning = ui.calls.filter((c) => c.command === "set_tuning").at(-1).args.control;
+  assert.deepEqual(tuning, { gain_db: null, ppm: 0, bias_tee: false, gain_optimize: false });
+  // A manual gain makes the method irrelevant.
+  ui.input("gain", "20");
+  assert.equal($("gain-auto").disabled, true);
+  assert.equal($("gain-status").textContent, "");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ui.preferences.value.input.gain_auto, "clip");
+  // Not for SoapySDR or IQ files.
+  await ui.click("start");
+  await ui.change("input-kind", "wave");
+  assert.equal($("gain-auto-group").hidden, true);
+});
+
+test("pushed monitor audio plays without polling for it and follows the automatic choice", async (t) => {
+  let channel;
+  const ui = await setup(t, {
+    channelClass: class {
+      constructor() {
+        channel = this;
+      }
+    },
+  });
+  ui.$("listen").checked = true; // the harness starts muted
+  await ui.click("start");
+  await ui.poll();
+  assert.ok(channel, "the page subscribes when the API has channels");
+  assert.ok(ui.calls.some((c) => c.command === "subscribe_monitor_audio"));
+  const push = ui.calls.filter((c) => c.command === "set_monitor_push").at(-1);
+  assert.equal(push.args.settings.enabled, true);
+  // Status polls no longer take the audio.
+  const snapshot = ui.calls.filter((c) => c.command === "snapshot").at(-1);
+  assert.equal(snapshot.args.audio, false);
+  const target = presets[2].id;
+  ui.$("auto-select").checked = true;
+  channel.onmessage({
+    channel: target,
+    frames: [{ channel: target, epoch: 0, index: 0, pcm: new Array(320).fill(1000) }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const frequency = (presets[2].frequency_hz / 1e6).toFixed(5);
+  assert.ok(ui.$("selected-frequency").textContent.includes(frequency));
+  assert.ok(ui.playback.length > 0, "the pushed frame was scheduled");
+});
+
+test("Android mutes when headphones are unplugged and pauses during a call", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const listening = [];
+  let route = { noisy: 0, focus: "held", toggles: 0 };
+  app.w.JrAndroid = {
+    setReceiving() {},
+    setListening: (on) => listening.push(on),
+    audioRoute: () => JSON.stringify(route),
+  };
+  app.$("listen").checked = true;
+  await app.click("start");
+  const frame = (index) => ({
+    status: status(),
+    audio: [{ channel: presets[0].id, epoch: 0, index, pcm: new Array(320).fill(1000) }],
+  });
+  app.setSnapshot(frame(0));
+  await app.poll();
+  assert.deepEqual(listening, [true]);
+  const played = app.playback.length;
+  assert.ok(played > 0);
+  // A phone call: nothing plays until it ends, "listen" stays on.
+  route = { ...route, focus: "transient" };
+  app.setSnapshot(frame(1));
+  await app.poll();
+  assert.equal(app.playback.length, played);
+  assert.equal(app.$("listen").checked, true);
+  assert.equal(app.$("audio-state").textContent, "通話中のため一時的に消音しています");
+  // Headphones unplugged: "listen" turns off with the reason shown.
+  route = { ...route, focus: "held", noisy: 1 };
+  app.setSnapshot(frame(2));
+  await app.poll();
+  assert.equal(app.$("listen").checked, false);
+  assert.equal(app.$("audio-state").textContent, "イヤホンの接続が切れたため消音しました");
+  assert.equal(listening.at(-1), false);
+});
+
+test("Android keeps live audio playing while a saved recording plays, then takes the audio focus back", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const reclaimed = [];
+  let route = { noisy: 0, focus: "held", toggles: 0 };
+  app.w.JrAndroid = {
+    setReceiving() {},
+    setListening() {},
+    audioRoute: () => JSON.stringify(route),
+    reclaimAudioFocus: () => {
+      reclaimed.push(true);
+      route = { ...route, focus: "held" };
+    },
+  };
+  let now = 1000;
+  app.w.performance.now = () => now;
+  app.$("listen").checked = true;
+  await app.click("start");
+  const frame = (index) => ({
+    status: status(),
+    audio: [{ channel: presets[0].id, epoch: 0, index, pcm: new Array(320).fill(1000) }],
+  });
+  app.setSnapshot(frame(0));
+  await app.poll();
+  const player = app.$("recordings-player");
+  // Our own player takes the focus for good: live audio keeps playing.
+  player.dispatchEvent(new app.w.Event("play"));
+  route = { ...route, focus: "lost" };
+  const before = app.playback.length;
+  app.setSnapshot(frame(1));
+  await app.poll();
+  assert.equal(app.$("listen").checked, true);
+  assert.ok(app.playback.length > before, "live audio still plays");
+  // A short clip asks for the focus only for a while: still no pause.
+  route = { ...route, focus: "transient" };
+  app.setSnapshot(frame(2));
+  const during = app.playback.length;
+  await app.poll();
+  assert.ok(app.playback.length > during);
+  assert.notEqual(app.$("audio-state").textContent, "通話中のため一時的に消音しています");
+  // The recording ends: the focus is taken back.
+  player.dispatchEvent(new app.w.Event("ended"));
+  assert.equal(reclaimed.length, 1);
+  app.setSnapshot(frame(3));
+  await app.poll();
+  assert.equal(app.$("listen").checked, true);
+  // Later, another app taking the audio still mutes.
+  now += 5000;
+  route = { ...route, focus: "lost" };
+  app.setSnapshot(frame(4));
+  await app.poll();
+  assert.equal(app.$("listen").checked, false);
+  assert.equal(app.$("audio-state").textContent, "ほかのアプリが音声を使い始めたため消音しました");
+});
+
+test("Android mutes when another app pauses a recording playing in the background", async (t) => {
+  const app = await setup(t, { platformInfo: { android: true, soapy: false } });
+  const reclaimed = [];
+  app.w.JrAndroid = {
+    setReceiving() {},
+    setListening() {},
+    audioRoute: () => JSON.stringify({ noisy: 0, focus: "lost", toggles: 0 }),
+    reclaimAudioFocus: () => reclaimed.push(true),
+  };
+  app.$("listen").checked = true;
+  await app.click("start");
+  await app.poll();
+  const player = app.$("recordings-player");
+  player.dispatchEvent(new app.w.Event("play"));
+  Object.defineProperty(app.w.document, "visibilityState", { value: "hidden", configurable: true });
+  player.dispatchEvent(new app.w.Event("pause"));
+  assert.equal(reclaimed.length, 0);
+  assert.equal(app.$("listen").checked, false);
 });

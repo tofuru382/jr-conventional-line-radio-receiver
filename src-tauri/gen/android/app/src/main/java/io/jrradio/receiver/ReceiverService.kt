@@ -31,12 +31,13 @@ class ReceiverService : Service() {
 
   // Built-in driver: while a session waits for the dongle (it dropped off USB
   // and came back), hand it over again, also with the app in the background.
-  // Every second, so a dongle that settled is opened soon after.
+  // Every second, and right when a settling dongle may be opened (the
+  // second's wait came on top of it).
   private val usbWatch =
     object : Runnable {
       override fun run() {
         if (UsbDongle.sessionWantsDevice()) UsbDongle.request(this@ReceiverService)
-        handler.postDelayed(this, 1000)
+        handler.postDelayed(this, UsbDongle.askAgainIn())
       }
     }
 
@@ -105,14 +106,35 @@ class ReceiverService : Service() {
       stopSelf()
       return START_NOT_STICKY
     }
-    val type =
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-      } else {
-        0
-      }
+    // Playing the monitor and driving a USB dongle (or a network tuner):
+    // both describe this service; the second also covers receiving with the
+    // monitor muted. Its prerequisite is met by CHANGE_NETWORK_STATE (and,
+    // for the built-in driver, the USB permission). Should a phone refuse
+    // the combination, media playback alone is used as before.
     shown = ""
-    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(null), type)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      try {
+        ServiceCompat.startForeground(
+          this,
+          NOTIFICATION_ID,
+          notification(null),
+          ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+        )
+      } catch (e: RuntimeException) {
+        UsbDongle.note("Android: サービス種別の追加を拒否されました（${e.javaClass.simpleName}）")
+        ServiceCompat.startForeground(
+          this,
+          NOTIFICATION_ID,
+          notification(null),
+          ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+        )
+      }
+    } else {
+      ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(null), 0)
+    }
+    AudioRoute.watch(this)
+    watchThermal()
     if (wakeLock == null) {
       val power = getSystemService(Context.POWER_SERVICE) as PowerManager
       wakeLock =
@@ -122,7 +144,8 @@ class ReceiverService : Service() {
         }
     }
     handler.removeCallbacks(usbWatch)
-    handler.postDelayed(usbWatch, 2000)
+    // A start whose dongle was settling waited 2 s here for the first ask.
+    handler.postDelayed(usbWatch, UsbDongle.askAgainIn())
     handler.removeCallbacks(bandUpdate)
     handler.postDelayed(bandUpdate, 1000)
     if (!running) {
@@ -149,7 +172,35 @@ class ReceiverService : Service() {
     return START_NOT_STICKY
   }
 
+  // A hot phone throttles its CPU and then cuts USB power; past "severe",
+  // the receiver pauses its second (drift-tracking) detector on every channel.
+  private var thermalListener: Any? = null
+
+  private fun watchThermal() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || thermalListener != null) return
+    val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+    val listener =
+      PowerManager.OnThermalStatusChangedListener { status ->
+        val hot = status >= PowerManager.THERMAL_STATUS_SEVERE
+        UsbDongle.note("Android: 端末の温度状態 $status${if (hot) "（処理を軽くします）" else ""}")
+        try {
+          NativeBand.setPowerSaving(hot)
+        } catch (e: UnsatisfiedLinkError) {
+          // The library is always loaded while the service runs.
+        }
+      }
+    power.addThermalStatusListener(ContextCompat.getMainExecutor(this), listener)
+    thermalListener = listener
+  }
+
   override fun onDestroy() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      (thermalListener as? PowerManager.OnThermalStatusChangedListener)?.let {
+        (getSystemService(Context.POWER_SERVICE) as PowerManager).removeThermalStatusListener(it)
+      }
+    }
+    thermalListener = null
+    AudioRoute.release(this)
     handler.removeCallbacks(usbWatch)
     handler.removeCallbacks(bandUpdate)
     handler.removeCallbacks(heartbeat)
