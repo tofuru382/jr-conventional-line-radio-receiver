@@ -525,6 +525,8 @@ function renderIqCapture() {
         : c.state === "saved"
           ? `保存しました（${c.written_seconds.toFixed(0)} 秒・${megabytes(c.bytes)}）${c.message ? `：${c.message}` : ""}${c.path ? ` 保存先：${c.path}` : ""}`
           : c.message || "IQ を保存できませんでした";
+  const iqStatus = $("iq-capture-status");
+  iqStatus.classList.toggle("field-error", Boolean(iqMessage && iqMessage !== "削除しました" && !iqMessage.startsWith("入力を")) || Boolean(c && c.state !== "saving" && c.state !== "saved"));
   if ($("iq-capture-status").textContent !== status) $("iq-capture-status").textContent = status;
   for (const replay of $("iq-files").querySelectorAll(".iq-replay")) {
     replay.disabled = running || busy;

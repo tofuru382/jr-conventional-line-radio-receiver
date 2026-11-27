@@ -2986,3 +2986,26 @@ select {
 .panel-summary-meta {
   margin-inline-start: 0;
 }
+
+/* Shared error presentation for global, form, recording and diagnostic errors. */
+:is(.error, .field-error):not([hidden]):not(:empty) {
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid var(--danger);
+  border-inline-start-width: 4px;
+  border-radius: 8px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: var(--text-caption);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+:is(.error, .field-error):not([hidden]):not(:empty)::before {
+  content: "⚠ エラー";
+  display: block;
+  font-weight: 700;
+  margin-block-end: 4px;
+}
+:is(.error, .field-error)[hidden] { display: none !important; }
